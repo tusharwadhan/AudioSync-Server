@@ -94,13 +94,11 @@ async def get_audio(video_id: str):
     if cached:
         return AudioResponse(**cached)
 
-    # yt-dlp options with cookies support for bot detection bypass
+    # yt-dlp options - no format specified, we'll pick from available formats
     ydl_opts = {
-        "format": "bestaudio*/best",  # bestaudio* includes audio-only AND audio+video, fallback to best
         "quiet": True,
         "no_warnings": True,
         "skip_download": True,
-        "format_sort": ["abr", "acodec"],  # Prefer higher audio bitrate
     }
 
     # Add cookies if available
@@ -120,27 +118,37 @@ async def get_audio(video_id: str):
                     error="Failed to extract video info"
                 )
 
-            # Get the best audio URL
-            audio_url = info.get("url")
+            # Get best audio URL from available formats
+            audio_url = None
+            formats = info.get("formats", [])
 
-            # If no direct URL, check formats for audio
-            if not audio_url and "formats" in info:
-                # First try: audio-only formats (sorted by quality)
-                audio_formats = [
-                    f for f in info["formats"]
-                    if f.get("acodec") != "none" and f.get("vcodec") == "none" and f.get("url")
+            if formats:
+                # First try: audio-only formats (m4a, webm audio)
+                audio_only = [
+                    f for f in formats
+                    if f.get("acodec") != "none"
+                    and (f.get("vcodec") == "none" or f.get("vcodec") is None)
+                    and f.get("url")
                 ]
-                if audio_formats:
-                    # Get highest bitrate audio
-                    audio_formats.sort(key=lambda x: x.get("abr") or 0, reverse=True)
-                    audio_url = audio_formats[0]["url"]
+                if audio_only:
+                    # Sort by audio bitrate (highest first)
+                    audio_only.sort(key=lambda x: x.get("abr") or x.get("tbr") or 0, reverse=True)
+                    audio_url = audio_only[0]["url"]
 
-                # Second try: any format with audio
+                # Second try: any format with audio (including video+audio)
                 if not audio_url:
-                    for fmt in reversed(info["formats"]):
-                        if fmt.get("acodec") != "none" and fmt.get("url"):
-                            audio_url = fmt["url"]
-                            break
+                    with_audio = [
+                        f for f in formats
+                        if f.get("acodec") != "none" and f.get("url")
+                    ]
+                    if with_audio:
+                        # Prefer formats with lower video quality (smaller file, audio matters)
+                        with_audio.sort(key=lambda x: x.get("tbr") or 0)
+                        audio_url = with_audio[0]["url"]
+
+            # Fallback to direct URL if available
+            if not audio_url:
+                audio_url = info.get("url")
 
             if not audio_url:
                 return AudioResponse(
