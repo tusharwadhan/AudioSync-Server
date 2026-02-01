@@ -94,11 +94,17 @@ async def get_audio(video_id: str):
     if cached:
         return AudioResponse(**cached)
 
-    # yt-dlp options - no format specified, we'll pick from available formats
+    # yt-dlp options - use web client and permissive format
     ydl_opts = {
+        "format": "ba/b/w",  # best audio, or best, or worst (very permissive)
         "quiet": True,
         "no_warnings": True,
         "skip_download": True,
+        "extractor_args": {
+            "youtube": {
+                "player_client": ["web"],  # Use web client
+            }
+        },
     }
 
     # Add cookies if available
