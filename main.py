@@ -4,20 +4,8 @@ from pydantic import BaseModel
 from typing import Optional, List
 import yt_dlp
 import time
-import os
-import tempfile
 
 app = FastAPI(title="AudioSync API")
-
-# Setup cookies file from environment variable (for YouTube bot detection bypass)
-COOKIES_FILE = None
-if os.environ.get("YOUTUBE_COOKIES"):
-    # Write cookies to a temp file
-    cookies_content = os.environ.get("YOUTUBE_COOKIES", "")
-    fd, COOKIES_FILE = tempfile.mkstemp(suffix=".txt", prefix="yt_cookies_")
-    with os.fdopen(fd, 'w') as f:
-        f.write(cookies_content)
-    print(f"Cookies file created at {COOKIES_FILE}")
 
 # Allow all origins for mobile app access
 app.add_middleware(
@@ -94,22 +82,40 @@ async def get_audio(video_id: str):
     if cached:
         return AudioResponse(**cached)
 
-    # yt-dlp options - use web client and permissive format
+    # 2026 config - requires Deno installed on server
+    import platform
+    import os
+    import shutil
+
+    # Find Deno path - check multiple locations
+    deno_path = None
+    if platform.system() == "Windows":
+        deno_path = os.path.expanduser("~/.deno/bin/deno.exe")
+    else:
+        # Check common locations on Linux (Render, etc.)
+        possible_paths = [
+            "/opt/render/.deno/bin/deno",  # Render
+            os.path.expanduser("~/.deno/bin/deno"),  # Home dir
+            shutil.which("deno"),  # System PATH
+        ]
+        for path in possible_paths:
+            if path and os.path.exists(path):
+                deno_path = path
+                break
+        if not deno_path:
+            deno_path = "deno"  # Fallback to PATH
+
     ydl_opts = {
-        "format": "ba/b/w",  # best audio, or best, or worst (very permissive)
+        "format": "bestaudio/best",
         "quiet": True,
         "no_warnings": True,
         "skip_download": True,
         "extractor_args": {
             "youtube": {
-                "player_client": ["web"],  # Use web client
+                "js_runtimes": [f"deno:{deno_path}"],
             }
         },
     }
-
-    # Add cookies if available
-    if COOKIES_FILE and os.path.exists(COOKIES_FILE):
-        ydl_opts["cookiefile"] = COOKIES_FILE
 
     try:
         url = f"https://www.youtube.com/watch?v={video_id}"
@@ -124,37 +130,15 @@ async def get_audio(video_id: str):
                     error="Failed to extract video info"
                 )
 
-            # Get best audio URL from available formats
-            audio_url = None
-            formats = info.get("formats", [])
+            # Get the best audio URL
+            audio_url = info.get("url")
 
-            if formats:
-                # First try: audio-only formats (m4a, webm audio)
-                audio_only = [
-                    f for f in formats
-                    if f.get("acodec") != "none"
-                    and (f.get("vcodec") == "none" or f.get("vcodec") is None)
-                    and f.get("url")
-                ]
-                if audio_only:
-                    # Sort by audio bitrate (highest first)
-                    audio_only.sort(key=lambda x: x.get("abr") or x.get("tbr") or 0, reverse=True)
-                    audio_url = audio_only[0]["url"]
-
-                # Second try: any format with audio (including video+audio)
-                if not audio_url:
-                    with_audio = [
-                        f for f in formats
-                        if f.get("acodec") != "none" and f.get("url")
-                    ]
-                    if with_audio:
-                        # Prefer formats with lower video quality (smaller file, audio matters)
-                        with_audio.sort(key=lambda x: x.get("tbr") or 0)
-                        audio_url = with_audio[0]["url"]
-
-            # Fallback to direct URL if available
-            if not audio_url:
-                audio_url = info.get("url")
+            # If no direct URL, check formats
+            if not audio_url and "formats" in info:
+                for fmt in reversed(info["formats"]):
+                    if fmt.get("acodec") != "none" and fmt.get("url"):
+                        audio_url = fmt["url"]
+                        break
 
             if not audio_url:
                 return AudioResponse(
@@ -203,10 +187,6 @@ async def search(q: str, limit: int = 10):
         "extract_flat": True,  # Don't download, just get metadata
         "skip_download": True,
     }
-
-    # Add cookies if available
-    if COOKIES_FILE and os.path.exists(COOKIES_FILE):
-        ydl_opts["cookiefile"] = COOKIES_FILE
 
     try:
         search_query = f"ytsearch{limit}:{q}"
