@@ -96,10 +96,11 @@ async def get_audio(video_id: str):
 
     # yt-dlp options with cookies support for bot detection bypass
     ydl_opts = {
-        "format": "bestaudio/best",
+        "format": "bestaudio*/best",  # bestaudio* includes audio-only AND audio+video, fallback to best
         "quiet": True,
         "no_warnings": True,
         "skip_download": True,
+        "format_sort": ["abr", "acodec"],  # Prefer higher audio bitrate
     }
 
     # Add cookies if available
@@ -122,12 +123,24 @@ async def get_audio(video_id: str):
             # Get the best audio URL
             audio_url = info.get("url")
 
-            # If no direct URL, check formats
+            # If no direct URL, check formats for audio
             if not audio_url and "formats" in info:
-                for fmt in reversed(info["formats"]):
-                    if fmt.get("acodec") != "none" and fmt.get("url"):
-                        audio_url = fmt["url"]
-                        break
+                # First try: audio-only formats (sorted by quality)
+                audio_formats = [
+                    f for f in info["formats"]
+                    if f.get("acodec") != "none" and f.get("vcodec") == "none" and f.get("url")
+                ]
+                if audio_formats:
+                    # Get highest bitrate audio
+                    audio_formats.sort(key=lambda x: x.get("abr") or 0, reverse=True)
+                    audio_url = audio_formats[0]["url"]
+
+                # Second try: any format with audio
+                if not audio_url:
+                    for fmt in reversed(info["formats"]):
+                        if fmt.get("acodec") != "none" and fmt.get("url"):
+                            audio_url = fmt["url"]
+                            break
 
             if not audio_url:
                 return AudioResponse(
