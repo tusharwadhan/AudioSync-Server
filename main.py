@@ -4,8 +4,20 @@ from pydantic import BaseModel
 from typing import Optional, List
 import yt_dlp
 import time
+import os
+import tempfile
 
 app = FastAPI(title="AudioSync API")
+
+# Setup cookies file from environment variable (for YouTube bot detection bypass)
+COOKIES_FILE = None
+if os.environ.get("YOUTUBE_COOKIES"):
+    # Write cookies to a temp file
+    cookies_content = os.environ.get("YOUTUBE_COOKIES", "")
+    fd, COOKIES_FILE = tempfile.mkstemp(suffix=".txt", prefix="yt_cookies_")
+    with os.fdopen(fd, 'w') as f:
+        f.write(cookies_content)
+    print(f"Cookies file created at {COOKIES_FILE}")
 
 # Allow all origins for mobile app access
 app.add_middleware(
@@ -82,13 +94,17 @@ async def get_audio(video_id: str):
     if cached:
         return AudioResponse(**cached)
 
-    # 2026 config - requires Deno installed on server
+    # yt-dlp options with cookies support for bot detection bypass
     ydl_opts = {
         "format": "bestaudio/best",
         "quiet": True,
         "no_warnings": True,
         "skip_download": True,
     }
+
+    # Add cookies if available
+    if COOKIES_FILE and os.path.exists(COOKIES_FILE):
+        ydl_opts["cookiefile"] = COOKIES_FILE
 
     try:
         url = f"https://www.youtube.com/watch?v={video_id}"
@@ -160,6 +176,10 @@ async def search(q: str, limit: int = 10):
         "extract_flat": True,  # Don't download, just get metadata
         "skip_download": True,
     }
+
+    # Add cookies if available
+    if COOKIES_FILE and os.path.exists(COOKIES_FILE):
+        ydl_opts["cookiefile"] = COOKIES_FILE
 
     try:
         search_query = f"ytsearch{limit}:{q}"
