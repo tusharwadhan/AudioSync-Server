@@ -1,0 +1,14 @@
+Collecting ytmusicapi
+  Downloading ytmusicapi-1.11.5-py3-none-any.whl.metadata (5.5 kB)
+Requirement already satisfied: requests>=2.22 in c:\users\91798\appdata\local\programs\python\python311\lib\site-packages (from ytmusicapi) (2.32.5)
+Requirement already satisfied: charset_normalizer<4,>=2 in c:\users\91798\appdata\local\programs\python\python311\lib\site-packages (from requests>=2.22->ytmusicapi) (3.4.4)
+Requirement already satisfied: idna<4,>=2.5 in c:\users\91798\appdata\local\programs\python\python311\lib\site-packages (from requests>=2.22->ytmusicapi) (3.11)
+Requirement already satisfied: urllib3<3,>=1.21.1 in c:\users\91798\appdata\local\programs\python\python311\lib\site-packages (from requests>=2.22->ytmusicapi) (2.6.3)
+Requirement already satisfied: certifi>=2017.4.17 in c:\users\91798\appdata\local\programs\python\python311\lib\site-packages (from requests>=2.22->ytmusicapi) (2026.1.4)
+Downloading ytmusicapi-1.11.5-py3-none-any.whl (102 kB)
+   -------------------------------------- 102.3/102.3 kB 979.5 kB/s eta 0:00:00
+Installing collected packages: ytmusicapi
+Successfully installed ytmusicapi-1.11.5
+
+[notice] A new release of pip is available: 24.0 -> 26.0.1
+[notice] To update, run: python.exe -m pip install --upgrade pip

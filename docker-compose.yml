@@ -1,0 +1,47 @@
+services:
+  # PostgreSQL database for Piped
+  postgres:
+    image: postgres:15-alpine
+    container_name: audiosync-postgres
+    environment:
+      - POSTGRES_DB=piped
+      - POSTGRES_USER=piped
+      - POSTGRES_PASSWORD=piped123
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U piped"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # Piped Backend (NewPipe Extractor)
+  piped:
+    image: 1337kavin/piped:latest
+    container_name: audiosync-piped
+    ports:
+      - "8080:8080"
+    volumes:
+      - ./piped-config.properties:/app/config.properties:ro
+    depends_on:
+      postgres:
+        condition: service_healthy
+    restart: unless-stopped
+
+  # Python API Server with yt-dlp fallback
+  api:
+    build: .
+    container_name: audiosync-api
+    ports:
+      - "8000:8000"
+    environment:
+      - PIPED_URL=http://piped:8080
+      - PIPED_TIMEOUT=5
+      - PIPED_ENABLED=false  # Disabled until Piped image updates NewPipe Extractor
+    depends_on:
+      - piped
+    restart: unless-stopped
+
+volumes:
+  postgres_data:
