@@ -5,11 +5,15 @@ services:
     plan: free
     buildCommand: |
       curl -fsSL https://deno.land/install.sh | sh
+      npm install -g @nicholasgasior/bgutil-ytdlp-pot-provider || true
       pip install -r requirements.txt
-    startCommand: uvicorn main:app --host 0.0.0.0 --port $PORT
+    startCommand: |
+      bgutil-ytdlp-pot-provider &
+      sleep 3
+      uvicorn main:app --host 0.0.0.0 --port $PORT
     healthCheckPath: /health
     envVars:
       - key: DENO_INSTALL
         value: /opt/render/.deno
       - key: PATH
-        value: /opt/render/.deno/bin:$PATH
+        value: /opt/render/.deno/bin:/opt/render/project/node_modules/.bin:$PATH
