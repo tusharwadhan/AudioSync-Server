@@ -101,8 +101,9 @@ class RoomListResponse(BaseModel):
 APP_UPDATE_CONFIG = {
     "latestVersion": "3.2",
     "latestVersionCode": 15,
-    "apkUrl": "https://semidefensive-soledad-unimpeachably.ngrok-free.dev/releases/audiosync.apk",
-    "releaseNotes": "Major update: Time-synced lyrics overlay, room stability fixes, UI improvements",
+    # "apkUrl": "https://semidefensive-soledad-unimpeachably.ngrok-free.dev/releases/audiosync.apk",
+    "apkUrl": "https://6ce06afd-a5a5-4e05-8439-3b2ac7d0273f-00-mgch2ulxaibh.pike.replit.dev/releases/audiosync.apk",
+    "releaseNotes": "Bugs fixes and some improvements",
     # List of version codes that MUST update (mandatory)
     "mandatoryBelow": 9,  # All versions below this must update
 }
