@@ -99,8 +99,8 @@ class RoomListResponse(BaseModel):
 
 # App update configuration - modify these values to control updates
 APP_UPDATE_CONFIG = {
-    "latestVersion": "3.0",
-    "latestVersionCode": 13,
+    "latestVersion": "3.2",
+    "latestVersionCode": 15,
     "apkUrl": "https://semidefensive-soledad-unimpeachably.ngrok-free.dev/releases/audiosync.apk",
     "releaseNotes": "Major update: Time-synced lyrics overlay, room stability fixes, UI improvements",
     # List of version codes that MUST update (mandatory)
@@ -520,7 +520,7 @@ async def get_audio_ytdlp(video_id: str) -> AudioResponse:
     return await asyncio.to_thread(_extract_audio_ytdlp, video_id)
 
 
-def _extract_related_ytdlp(video_id: str, limit: int = 25) -> RelatedResponse:
+def _extract_related_ytdlp(video_id: str, limit: int = 50) -> RelatedResponse:
     """Sync yt-dlp related extraction (runs in thread pool)"""
 
     ydl_opts = {
@@ -579,7 +579,7 @@ def _extract_related_ytdlp(video_id: str, limit: int = 25) -> RelatedResponse:
         )
 
 
-async def get_related_ytdlp(video_id: str, limit: int = 25) -> RelatedResponse:
+async def get_related_ytdlp(video_id: str, limit: int = 50) -> RelatedResponse:
     """Truly async: runs yt-dlp in thread pool"""
     return await asyncio.to_thread(_extract_related_ytdlp, video_id, limit)
 
@@ -1242,12 +1242,12 @@ async def get_stream(video_id: str, include_suggestions: bool = True):
             cached_sug = get_cached_suggestions(video_id)
             if cached_sug:
                 suggestions = [
-                    StreamSuggestion(**r) for r in cached_sug[:15]
+                    StreamSuggestion(**r) for r in cached_sug[:50]
                 ]
                 print(f"[/stream] {video_id} → FULL CACHE HIT ({time.time()-start:.2f}s)")
             else:
                 t1 = time.time()
-                related_response = await get_related_ytdlp(video_id, limit=15)
+                related_response = await get_related_ytdlp(video_id, limit=50)
                 print(f"[/stream] {video_id} → suggestions fetch: {time.time()-t1:.2f}s")
                 if related_response.success:
                     suggestions = [
@@ -1289,7 +1289,7 @@ async def get_stream(video_id: str, include_suggestions: bool = True):
                     duration=r.get("duration"),
                     thumbnail=r.get("thumbnail"),
                     uploader=r.get("uploader")
-                ) for r in piped_result["related"][:15]
+                ) for r in piped_result["related"][:50]
             ]
 
         return StreamResponse(
@@ -1308,7 +1308,7 @@ async def get_stream(video_id: str, include_suggestions: bool = True):
     if include_suggestions:
         ytdlp_result, related_response = await asyncio.gather(
             get_audio_ytdlp(video_id),
-            get_related_ytdlp(video_id, limit=15)
+            get_related_ytdlp(video_id, limit=50)
         )
     else:
         ytdlp_result = await get_audio_ytdlp(video_id)
@@ -1362,7 +1362,7 @@ async def get_stream(video_id: str, include_suggestions: bool = True):
 
 
 @app.get("/related/{video_id}", response_model=RelatedResponse)
-async def get_related(video_id: str, limit: int = 25):
+async def get_related(video_id: str, limit: int = 50):
     """
     Get related songs (suggestions).
     Checks cache first, then Piped, then yt-dlp.
@@ -1546,7 +1546,7 @@ async def get_next(video_id: str):
                         uploader=next_piped.get("uploader", first_related.get("uploader")),
                         audioUrl=next_piped["url"]
                     ),
-                    suggestions=[SearchResult(**r) for r in related[1:26]]  # Skip first, next 25
+                    suggestions=[SearchResult(**r) for r in related[1:51]]  # Skip first, next 50
                 )
 
     # Fallback to yt-dlp
@@ -1567,7 +1567,7 @@ async def get_next(video_id: str):
     # Step 3+4: Get audio URL AND suggestions IN PARALLEL
     audio_result, next_suggestions = await asyncio.gather(
         get_audio_ytdlp(next_video_id),
-        get_related_ytdlp(next_video_id, limit=25)
+        get_related_ytdlp(next_video_id, limit=50)
     )
 
     if not audio_result.success or not audio_result.url:
