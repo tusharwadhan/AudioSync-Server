@@ -15,6 +15,8 @@ import uuid
 import re
 from room_manager import RoomManager
 from ytmusicapi import YTMusic
+from analytics_db import AnalyticsDB
+from analytics_api import router as dashboard_router
 
 app = FastAPI(title="AudioSync API")
 
@@ -30,6 +32,28 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+# Analytics database
+analytics = AnalyticsDB(os.path.join(os.path.dirname(__file__), "analytics.db"))
+
+# Dashboard router
+app.include_router(dashboard_router, prefix="/dashboard")
+
+
+@app.middleware("http")
+async def analytics_middleware(request: Request, call_next):
+    start = time.time()
+    response = await call_next(request)
+    path = request.url.path
+    if not path.startswith("/dashboard"):
+        analytics.log_api_request(
+            method=request.method, path=path,
+            status_code=response.status_code,
+            response_time_ms=(time.time() - start) * 1000,
+            client_ip=request.client.host if request.client else "unknown",
+        )
+    return response
+
 
 # ==================== PIPED CONFIGURATION ====================
 # Self-hosted Piped instance (NewPipe Extractor on server)
@@ -604,6 +628,29 @@ async def health():
 
 
 @app.on_event("startup")
+async def startup_analytics():
+    await analytics.init()
+    app.state.analytics = analytics
+    app.state.room_manager = room_manager
+    app.state.caches = {"audio": _cache, "suggestions": _suggestions_cache, "browse": _browse_cache}
+    app.state.start_time = time.time()
+
+
+@app.on_event("shutdown")
+async def shutdown_analytics():
+    await analytics.close()
+
+
+@app.on_event("startup")
+async def startup_analytics_cleanup():
+    async def _cleanup_loop():
+        while True:
+            await asyncio.sleep(86400)  # Daily
+            await analytics.cleanup_old_data()
+    asyncio.create_task(_cleanup_loop())
+
+
+@app.on_event("startup")
 async def startup_room_cleanup():
     """Periodically clean up zombie rooms with no active host."""
     async def _cleanup_loop():
@@ -615,6 +662,7 @@ async def startup_room_cleanup():
                     continue
                 # If host_id is not in active members, room is a zombie
                 if room.host_id not in room.members:
+                    await analytics.log_room_destroyed(code, room.host_name, room.created_at, room.peak_members, room.songs_played, room.password is not None)
                     remaining_ws = [m.websocket for m in room.members.values()]
                     for mid in list(room.members.keys()):
                         room_manager._client_to_room.pop(mid, None)
@@ -716,6 +764,7 @@ async def browse_moods():
             sections.append(BrowseMoodSection(title=section_title, categories=categories))
 
         print(f"[/browse/moods] {sum(len(s.categories) for s in sections)} categories ({time.time()-start:.2f}s)")
+        analytics.log_event("browse", detail=json.dumps({"type": "moods"}))
         return BrowseMoodsResponse(success=True, sections=sections)
     except Exception as e:
         print(f"[/browse/moods] ERROR: {e}")
@@ -761,6 +810,7 @@ async def browse_mood_playlists(params: str):
         response = BrowseMoodPlaylistsResponse(success=True, title="", playlists=playlists)
         set_browse_cache(cache_key, response)
         print(f"[/browse/mood_playlists] {len(playlists)} playlists ({time.time()-start:.2f}s)")
+        analytics.log_event("browse", detail=json.dumps({"type": "mood_playlists"}))
         return response
     except Exception as e:
         print(f"[/browse/mood_playlists] ERROR: {e}")
@@ -827,6 +877,7 @@ async def browse_playlist_detail(playlist_id: str, limit: int = 50):
         )
         set_browse_cache(cache_key, response)
         print(f"[/browse/playlist] {len(tracks)} tracks ({time.time()-start:.2f}s)")
+        analytics.log_event("browse", video_id=playlist_id, detail=json.dumps({"type": "playlist"}))
         return response
     except Exception as e:
         print(f"[/browse/playlist] ERROR: {e}")
@@ -891,6 +942,7 @@ async def browse_charts(country: str = "ZZ"):
         response = BrowseChartsResponse(success=True, country=country, songs=songs)
         set_browse_cache(cache_key, response)
         print(f"[/browse/charts] {len(songs)} songs ({time.time()-start:.2f}s)")
+        analytics.log_event("browse", detail=json.dumps({"type": "charts", "country": country}))
         return response
     except Exception as e:
         print(f"[/browse/charts] ERROR: {e}")
@@ -1084,6 +1136,7 @@ async def get_lyrics_endpoint(video_id: str):
         )
         set_browse_cache(cache_key, response, ttl=86400)  # Cache for 24 hours
         print(f"[/lyrics] {len(lines)} timed lines, source={source} ({time.time()-start:.2f}s)")
+        analytics.log_event("lyrics_fetch", video_id=video_id, detail=json.dumps({"source": source, "lines": len(lines)}))
         return response
 
     except Exception as e:
@@ -1356,6 +1409,7 @@ async def get_audio(video_id: str, fresh: bool = False):
     result = await extract_audio_url(video_id)
     source = result.get("source", "unknown")
     print(f"[/audio] {video_id} → {source} ({time.time()-start:.2f}s)")
+    analytics.log_event("audio_extract", video_id=video_id, detail=json.dumps({"source": source, "time_ms": round((time.time()-start)*1000)}))
 
     return AudioResponse(**result)
 
@@ -1396,6 +1450,7 @@ async def get_stream(video_id: str, include_suggestions: bool = True):
                     ]
                     set_suggestions_cache(video_id, [r.model_dump() for r in related_response.related])
         print(f"[/stream] {video_id} → CACHE HIT + {len(suggestions)} suggestions ({time.time()-start:.2f}s)")
+        analytics.log_event("song_play", video_id=video_id, title=cached.get("title"), detail=json.dumps({"source": "cache"}))
         return StreamResponse(
             success=True, videoId=video_id, audioUrl=cached["url"],
             title=cached.get("title"), duration=cached.get("duration"),
@@ -1430,6 +1485,7 @@ async def get_stream(video_id: str, include_suggestions: bool = True):
                 ) for r in piped_result["related"][:50]
             ]
 
+        analytics.log_event("song_play", video_id=video_id, title=piped_result.get("title"), detail=json.dumps({"source": "piped"}))
         return StreamResponse(
             success=True,
             videoId=video_id,
@@ -1480,6 +1536,7 @@ async def get_stream(video_id: str, include_suggestions: bool = True):
             set_suggestions_cache(video_id, [r.model_dump() for r in related_response.related])
 
         print(f"[/stream] {video_id} → yt-dlp OK + {len(suggestions)} suggestions ({time.time()-start:.2f}s total)")
+        analytics.log_event("song_play", video_id=video_id, title=ytdlp_result.title, detail=json.dumps({"source": "ytdlp"}))
         return StreamResponse(
             success=True,
             videoId=video_id,
@@ -1647,6 +1704,7 @@ async def search(q: str, limit: int = 10):
 
     result = await asyncio.to_thread(_search_ytdlp)
     print(f"[/search] '{q}' → {len(result.results)} results ({time.time()-start:.2f}s)")
+    analytics.log_event("search", query=q, detail=json.dumps({"results": len(result.results), "time_ms": round((time.time()-start)*1000)}))
     return result
 
 
@@ -1752,6 +1810,7 @@ async def handle_create_room(client_id: str, websocket: WebSocket, msg: dict):
 
     room = room_manager.create_room(client_id, websocket, host_name=host_name, password=password)
     print(f"[WS] Room {room.code} created by {client_id[:8]} ({host_name}), locked={password is not None}")
+    analytics.log_event("room_create", client_id=client_id, client_name=host_name, room_code=room.code, detail=json.dumps({"locked": password is not None}))
     await ws_send(websocket, {
         "type": "room_created",
         "code": room.code,
@@ -1802,6 +1861,7 @@ async def handle_join_room(client_id: str, websocket: WebSocket, msg: dict):
     room, promoted = room_manager.join_room(code, client_id, websocket, name=name)
     role = "host" if promoted else "guest"
     print(f"[WS] {client_id[:8]} ({name}) joined room {code} as {role} ({len(room.members)} members)")
+    analytics.log_event("room_join", client_id=client_id, client_name=name, room_code=code, detail=json.dumps({"role": role, "members": len(room.members)}))
 
     # Send current room state to the joiner (with personalized queue)
     state = {
@@ -1852,6 +1912,8 @@ async def handle_play(client_id: str, msg: dict):
             return
 
     print(f"[WS] Room {room.code}: host playing {video_id}")
+    analytics.log_event("room_song_change", room_code=room.code, video_id=video_id, title=msg.get("title", ""))
+    room.songs_played += 1
 
     # Extract audio URL once for everyone
     audio_data = await extract_audio_url(video_id)
@@ -1971,6 +2033,8 @@ async def handle_next(client_id: str):
     # We call the play logic directly instead of handle_play to bypass vote-block
     video_id = next_item.video_id
     print(f"[WS] Room {room.code}: host playing {video_id}")
+    analytics.log_event("room_song_change", room_code=room.code, video_id=video_id, title=next_item.title)
+    room.songs_played += 1
 
     audio_data = await extract_audio_url(video_id)
     if not audio_data.get("success") or not audio_data.get("url"):
@@ -2106,6 +2170,7 @@ async def handle_song_request(client_id: str, msg: dict):
     )
     room.queue.append(item)
     print(f"[WS] Room {room.code}: {member.name} requested '{item.title}'")
+    analytics.log_event("song_request", client_id=client_id, client_name=member.name, room_code=room.code, video_id=video_id, title=item.title)
 
     # Broadcast updated queue (personalized)
     await room_manager.broadcast_queue(room)
@@ -2215,16 +2280,21 @@ async def handle_leave(client_id: str):
     """Explicit leave (user clicked Leave button). Destroys room immediately if host."""
     # Clean up queue before leaving (remove their requests/votes)
     room = room_manager.get_room_for_client(client_id)
+    room_snapshot = None
     if room:
         room.remove_member_from_queue(client_id)
+        room_snapshot = (room.code, room.host_name, room.created_at, room.peak_members, room.songs_played, room.password is not None)
 
     code, was_host, remaining_ws = room_manager.leave_room(client_id)
     if not code:
         return
 
     print(f"[WS] {client_id[:8]} left room {code} (was_host={was_host})")
+    analytics.log_event("room_leave", client_id=client_id, room_code=code, detail=json.dumps({"was_host": was_host}))
 
     if was_host:
+        if room_snapshot:
+            await analytics.log_room_destroyed(*room_snapshot)
         # Room was destroyed — notify remaining members directly
         for ws in remaining_ws:
             await ws_send(ws, {"type": "room_closed"})
@@ -2252,6 +2322,7 @@ async def handle_disconnect(client_id: str):
         return
 
     print(f"[WS] {client_id[:8]} disconnected from room {code} (was_host={was_host})")
+    analytics.log_event("room_leave", client_id=client_id, room_code=code, detail=json.dumps({"was_host": was_host, "disconnect": True}))
 
     room = room_manager.rooms.get(code)
     if room:
@@ -2279,6 +2350,7 @@ async def destroy_room_after_grace(client_id: str, code: str, delay: int = 30):
     host_active = room.host_id is not None and room.host_id in room.members
     if not host_active:
         # Host didn't rejoin — destroy room and notify remaining guests
+        await analytics.log_room_destroyed(code, room.host_name, room.created_at, room.peak_members, room.songs_played, room.password is not None)
         remaining_ws = [m.websocket for m in room.members.values()]
         for mid in list(room.members.keys()):
             room_manager._client_to_room.pop(mid, None)
@@ -2335,6 +2407,7 @@ async def websocket_endpoint(websocket: WebSocket):
     client_id = str(uuid.uuid4())
 
     print(f"[WS] Client connected: {client_id[:8]}")
+    analytics.log_event("ws_connect", client_id=client_id)
     await ws_send(websocket, {"type": "connected", "clientId": client_id})
 
     try:
@@ -2407,9 +2480,11 @@ async def websocket_endpoint(websocket: WebSocket):
 
     except WebSocketDisconnect:
         print(f"[WS] Client disconnected: {client_id[:8]}")
+        analytics.log_event("ws_disconnect", client_id=client_id)
         await handle_disconnect(client_id)
     except Exception as e:
         print(f"[WS] Error for {client_id[:8]}: {e}")
+        analytics.log_event("ws_disconnect", client_id=client_id)
         await handle_disconnect(client_id)
 
 

@@ -43,6 +43,8 @@ class RoomState:
     queue: list = field(default_factory=list)  # list of QueueItem
     created_at: float = field(default_factory=time.time)
     invite_tokens: dict = field(default_factory=dict)  # token -> expiry timestamp
+    peak_members: int = 1
+    songs_played: int = 0
 
     def get_sorted_queue(self) -> list:
         """Requests sorted by vote count desc, then timestamp asc, followed by suggestions."""
@@ -135,6 +137,7 @@ class RoomManager:
         member = RoomMember(client_id=client_id, websocket=websocket, name=name)
         room.members[client_id] = member
         self._client_to_room[client_id] = code.upper()
+        room.peak_members = max(room.peak_members, len(room.members))
         # If room has no active host, promote this joiner to host
         promoted = False
         if room.host_id not in room.members or room.host_id == client_id:
@@ -230,6 +233,7 @@ class RoomManager:
         member = RoomMember(client_id=client_id, websocket=websocket, name=name)
         room.members[client_id] = member
         self._client_to_room[client_id] = code.upper()
+        room.peak_members = max(room.peak_members, len(room.members))
         return room, was_host
 
     def cleanup_stale_disconnects(self, max_age: float = 60.0) -> list:
