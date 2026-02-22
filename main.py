@@ -1,4 +1,5 @@
-from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect
+from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect, Request
+from fastapi.responses import HTMLResponse, JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
@@ -1156,6 +1157,142 @@ async def list_rooms():
     )
 
 
+# ==================== SHARE ENDPOINTS ====================
+
+@app.get("/share/song/{video_id}", response_class=HTMLResponse)
+async def share_song_page(video_id: str, request: Request):
+    """HTML page with Open Graph tags for song link previews."""
+    result = await extract_audio_url(video_id)
+    title = result.get("title", "Unknown Song") if result.get("success") else "Unknown Song"
+    uploader = result.get("uploader", "Unknown Artist") if result.get("success") else "Unknown Artist"
+    thumbnail = result.get("thumbnail", "") if result.get("success") else ""
+    duration = result.get("duration")
+    duration_str = f"{duration // 60}:{duration % 60:02d}" if duration else ""
+
+    description = f"{uploader}"
+    if duration_str:
+        description += f" • {duration_str}"
+
+    deep_link = f"audiosync://song/{video_id}"
+
+    return f"""<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="utf-8">
+    <meta property="og:title" content="{title}" />
+    <meta property="og:description" content="{description}" />
+    <meta property="og:image" content="{thumbnail}" />
+    <meta property="og:url" content="{request.url}" />
+    <meta property="og:type" content="music.song" />
+    <meta name="twitter:card" content="summary_large_image" />
+    <meta http-equiv="refresh" content="0;url={deep_link}" />
+    <title>{title} - AudioSync</title>
+    <style>
+        body {{ background: #121212; color: #fff; font-family: -apple-system, sans-serif; display: flex; justify-content: center; align-items: center; min-height: 100vh; margin: 0; }}
+        .card {{ background: #1e1e1e; border-radius: 16px; padding: 32px; max-width: 400px; text-align: center; }}
+        .thumb {{ width: 200px; height: 200px; border-radius: 12px; object-fit: cover; margin-bottom: 16px; }}
+        h2 {{ margin: 8px 0 4px; }}
+        .artist {{ color: #888; margin-bottom: 20px; }}
+        .btn {{ display: inline-block; background: #1DB954; color: #fff; padding: 12px 32px; border-radius: 24px; text-decoration: none; font-weight: bold; }}
+    </style>
+</head>
+<body>
+    <div class="card">
+        {"<img class='thumb' src='" + thumbnail + "' />" if thumbnail else ""}
+        <h2>{title}</h2>
+        <p class="artist">{description}</p>
+        <a class="btn" href="{deep_link}">Open in AudioSync</a>
+    </div>
+</body>
+</html>"""
+
+
+@app.get("/share/room/{room_code}", response_class=HTMLResponse)
+async def share_room_page(room_code: str, request: Request, invite: Optional[str] = None):
+    """HTML page with Open Graph tags for room invite link previews."""
+    room = room_manager.rooms.get(room_code.upper())
+
+    if not room:
+        return HTMLResponse(content=f"""<!DOCTYPE html>
+<html>
+<head><meta charset="utf-8"><title>AudioSync</title>
+<style>body {{ background: #121212; color: #fff; font-family: sans-serif; display: flex; justify-content: center; align-items: center; min-height: 100vh; margin: 0; }}
+.card {{ background: #1e1e1e; border-radius: 16px; padding: 32px; text-align: center; }} .btn {{ display: inline-block; background: #1DB954; color: #fff; padding: 12px 32px; border-radius: 24px; text-decoration: none; font-weight: bold; margin-top: 16px; }}</style>
+</head><body><div class="card"><h2>Room Not Available</h2><p style="color:#888">This room no longer exists or has been closed.</p></div></body></html>""", status_code=200)
+
+    host_name = room.host_name
+    member_count = len(room.members)
+    current_song = room.current_song.get("title") if room.current_song else None
+
+    title = f"{host_name}'s Room"
+    description = f"{member_count} listening"
+    if current_song:
+        description += f" • ♪ {current_song}"
+
+    deep_link = f"audiosync://room/{room_code.upper()}"
+    if invite:
+        deep_link += f"?invite={invite}"
+
+    return f"""<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="utf-8">
+    <meta property="og:title" content="{title}" />
+    <meta property="og:description" content="{description}" />
+    <meta property="og:type" content="website" />
+    <meta property="og:url" content="{request.url}" />
+    <meta name="twitter:card" content="summary" />
+    <meta http-equiv="refresh" content="0;url={deep_link}" />
+    <title>{title} - AudioSync</title>
+    <style>
+        body {{ background: #121212; color: #fff; font-family: -apple-system, sans-serif; display: flex; justify-content: center; align-items: center; min-height: 100vh; margin: 0; }}
+        .card {{ background: #1e1e1e; border-radius: 16px; padding: 32px; max-width: 400px; text-align: center; }}
+        h2 {{ margin: 8px 0 4px; }}
+        .info {{ color: #888; margin-bottom: 20px; }}
+        .btn {{ display: inline-block; background: #1DB954; color: #fff; padding: 12px 32px; border-radius: 24px; text-decoration: none; font-weight: bold; }}
+    </style>
+</head>
+<body>
+    <div class="card">
+        <h2>{title}</h2>
+        <p class="info">{description}</p>
+        <a class="btn" href="{deep_link}">Join in AudioSync</a>
+    </div>
+</body>
+</html>"""
+
+
+@app.get("/room/{room_code}")
+async def get_room_info(room_code: str):
+    """JSON endpoint for app to fetch room info when handling deep links."""
+    room = room_manager.rooms.get(room_code.upper())
+    if not room:
+        raise HTTPException(status_code=404, detail="Room not found")
+    return {
+        "code": room.code,
+        "hostName": room.host_name,
+        "memberCount": len(room.members),
+        "hasPassword": room.password is not None,
+        "currentSong": room.current_song.get("title") if room.current_song else None,
+        "currentSongThumbnail": room.current_song.get("thumbnail") if room.current_song else None,
+    }
+
+
+class InviteRequest(BaseModel):
+    clientId: str
+
+@app.post("/room/{room_code}/invite")
+async def create_room_invite(room_code: str, req: InviteRequest):
+    """Generate a single-use invite token for a locked room."""
+    room = room_manager.rooms.get(room_code.upper())
+    if not room:
+        raise HTTPException(status_code=404, detail="Room not found")
+    if req.clientId not in room.members:
+        raise HTTPException(status_code=403, detail="Not a member of this room")
+    token = room.create_invite_token()
+    return {"token": token}
+
+
 async def extract_audio_url(video_id: str) -> dict:
     """Reusable audio extraction — used by /audio endpoint and WebSocket play handler.
     Returns dict with success, videoId, url, title, duration, thumbnail, uploader, source."""
@@ -1652,10 +1789,14 @@ async def handle_join_room(client_id: str, websocket: WebSocket, msg: dict):
 
     # Validate password if room is locked
     if room.password is not None:
-        provided = msg.get("password", "")
-        if provided != room.password:
-            await ws_send(websocket, {"type": "error", "message": "Wrong password"})
-            return
+        invite_token = msg.get("invite")
+        if invite_token and room.validate_invite_token(invite_token):
+            pass  # Valid invite token — bypass password
+        else:
+            provided = msg.get("password", "")
+            if provided != room.password:
+                await ws_send(websocket, {"type": "error", "message": "Wrong password"})
+                return
 
     name = msg.get("name", "Unknown")
     room, promoted = room_manager.join_room(code, client_id, websocket, name=name)

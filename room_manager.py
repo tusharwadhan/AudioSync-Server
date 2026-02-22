@@ -2,6 +2,7 @@ import time
 import random
 import string
 import json
+import uuid
 from dataclasses import dataclass, field
 from typing import Optional
 
@@ -41,6 +42,7 @@ class RoomState:
     play_start_time: float = 0.0  # server timestamp when play started (for position calc)
     queue: list = field(default_factory=list)  # list of QueueItem
     created_at: float = field(default_factory=time.time)
+    invite_tokens: dict = field(default_factory=dict)  # token -> expiry timestamp
 
     def get_sorted_queue(self) -> list:
         """Requests sorted by vote count desc, then timestamp asc, followed by suggestions."""
@@ -67,6 +69,30 @@ class RoomState:
                 "isSuggestion": q.is_suggestion,
             })
         return result
+
+    def create_invite_token(self) -> str:
+        """Generate a single-use invite token with 1-hour expiry."""
+        self._clean_expired_tokens()
+        token = str(uuid.uuid4())
+        self.invite_tokens[token] = time.time() + 3600  # 1 hour
+        return token
+
+    def validate_invite_token(self, token: str) -> bool:
+        """Check if invite token is valid. Consumes the token if valid (single-use)."""
+        self._clean_expired_tokens()
+        expiry = self.invite_tokens.get(token)
+        if expiry is None:
+            return False
+        if time.time() > expiry:
+            del self.invite_tokens[token]
+            return False
+        del self.invite_tokens[token]  # single-use
+        return True
+
+    def _clean_expired_tokens(self):
+        """Remove expired invite tokens."""
+        now = time.time()
+        self.invite_tokens = {t: exp for t, exp in self.invite_tokens.items() if exp > now}
 
     def has_voted_request(self) -> bool:
         """Check if any request has more than 1 vote (beyond requester's auto-vote)."""
