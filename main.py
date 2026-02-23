@@ -124,11 +124,11 @@ class RoomListResponse(BaseModel):
 
 # App update configuration - modify these values to control updates
 APP_UPDATE_CONFIG = {
-    "latestVersion": "4.0",
-    "latestVersionCode": 17,
+    "latestVersion": "4.1",
+    "latestVersionCode": 18,
     # "apkUrl": "https://semidefensive-soledad-unimpeachably.ngrok-free.dev/releases/audiosync.apk",
     "apkUrl": "https://6ce06afd-a5a5-4e05-8439-3b2ac7d0273f-00-mgch2ulxaibh.pike.replit.dev/releases/audiosync.apk",
-    "releaseNotes": "Create and manage custom playlists, sort your library your way, and share songs instantly with friends. Listen Together now supports room queue with voting, password-protected rooms, invite links, and room discovery.",
+    "releaseNotes": "Fixed share and add-to-playlist buttons not working in the suggestion list.",
     # List of version codes that MUST update (mandatory)
     "mandatoryBelow": 9,  # All versions below this must update
 }
