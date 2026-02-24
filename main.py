@@ -1009,7 +1009,7 @@ async def _fetch_lrclib(title: str, artist: str, duration_secs: int = 0) -> Opti
     lrclib_down = [False]  # mutable flag for early exit
 
     try:
-        async with httpx.AsyncClient(timeout=10) as client:
+        async with httpx.AsyncClient(timeout=15) as client:
             # Try exact match first if we have duration
             if duration_secs > 0:
                 for t in titles:
