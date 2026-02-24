@@ -1,0 +1,7 @@
+__pycache__/
+*.pyc
+*.pyo
+analytics.db
+
+# Firebase service account credentials
+*-firebase-adminsdk-*.json

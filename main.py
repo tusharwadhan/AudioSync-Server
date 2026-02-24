@@ -197,10 +197,20 @@ CACHE_TTL = 4 * 60 * 60  # 4 hours
 room_manager = RoomManager()
 
 # Firebase Cloud Messaging
-_firebase_cred = credentials.Certificate(
-    os.path.join(os.path.dirname(__file__), "audiosync-dfee2-firebase-adminsdk-fbsvc-4fe0940bca.json")
-)
-firebase_admin.initialize_app(_firebase_cred)
+_firebase_creds_json = os.getenv("FIREBASE_CREDENTIALS")
+if _firebase_creds_json:
+    _firebase_cred = credentials.Certificate(json.loads(_firebase_creds_json))
+    firebase_admin.initialize_app(_firebase_cred)
+    print("[FCM] Firebase initialized from FIREBASE_CREDENTIALS env var")
+else:
+    # Fallback: load from local file (for local development)
+    _firebase_file = os.path.join(os.path.dirname(__file__), "audiosync-dfee2-firebase-adminsdk-fbsvc-4fe0940bca.json")
+    if os.path.exists(_firebase_file):
+        _firebase_cred = credentials.Certificate(_firebase_file)
+        firebase_admin.initialize_app(_firebase_cred)
+        print("[FCM] Firebase initialized from local file")
+    else:
+        print("[FCM] WARNING: No Firebase credentials found. FCM disabled.")
 
 # FCM token storage: client_id -> fcm_token
 _fcm_tokens: dict[str, str] = {}
@@ -224,6 +234,8 @@ def register_fcm_token(client_id: str, token: str):
 
 async def send_fcm_to_disconnected_members(room_code: str):
     """Send FCM wake-up to room members who are disconnected."""
+    if not firebase_admin._apps:
+        return
     room = room_manager.rooms.get(room_code)
     if not room:
         return
