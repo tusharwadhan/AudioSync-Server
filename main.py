@@ -977,18 +977,24 @@ def _parse_lrc(lrc_text: str) -> List[LyricsLine]:
     return result
 
 
-async def _lrclib_request(client: httpx.AsyncClient, url: str, params: dict, retries: int = 2) -> Optional[httpx.Response]:
-    """Make an LRCLIB request with retries"""
-    for attempt in range(retries + 1):
+async def _lrclib_request(client: httpx.AsyncClient, url: str, params: dict, lrclib_down: list) -> Optional[httpx.Response]:
+    """Make an LRCLIB request with 1 retry, early exit if LRCLIB is down"""
+    if lrclib_down[0]:
+        return None
+    for attempt in range(2):
         try:
             resp = await client.get(url, params=params, headers={"User-Agent": "AudioSync/1.0"})
             if resp.status_code == 200:
                 return resp
-        except Exception:
-            if attempt < retries:
+            return None  # 404 or other status — don't retry, LRCLIB is reachable
+        except (httpx.TimeoutException, httpx.ConnectError):
+            if attempt == 0:
                 await asyncio.sleep(0.5)
             else:
+                lrclib_down[0] = True
                 return None
+        except Exception:
+            return None
     return None
 
 
@@ -1000,14 +1006,15 @@ async def _fetch_lrclib(title: str, artist: str, duration_secs: int = 0) -> Opti
     if "|" in clean_title:
         clean_title = clean_title.split("|")[0].strip()
     titles = [title, clean_title] if clean_title != title else [title]
+    lrclib_down = [False]  # mutable flag for early exit
 
     try:
-        async with httpx.AsyncClient(timeout=15) as client:
+        async with httpx.AsyncClient(timeout=5) as client:
             # Try exact match first if we have duration
             if duration_secs > 0:
                 for t in titles:
                     resp = await _lrclib_request(client, "https://lrclib.net/api/get",
-                        {"track_name": t, "artist_name": artist, "duration": duration_secs})
+                        {"track_name": t, "artist_name": artist, "duration": duration_secs}, lrclib_down)
                     if resp:
                         data = resp.json()
                         if data.get("syncedLyrics"):
@@ -1016,7 +1023,7 @@ async def _fetch_lrclib(title: str, artist: str, duration_secs: int = 0) -> Opti
             # Search with artist
             for t in titles:
                 resp = await _lrclib_request(client, "https://lrclib.net/api/search",
-                    {"track_name": t, "artist_name": artist})
+                    {"track_name": t, "artist_name": artist}, lrclib_down)
                 if resp:
                     for r in resp.json():
                         if r.get("syncedLyrics"):
@@ -1025,7 +1032,7 @@ async def _fetch_lrclib(title: str, artist: str, duration_secs: int = 0) -> Opti
             # Fallback: search with title only (no artist) for better matching
             for t in titles:
                 resp = await _lrclib_request(client, "https://lrclib.net/api/search",
-                    {"track_name": t})
+                    {"track_name": t}, lrclib_down)
                 if resp:
                     results = resp.json()
                     for r in results:
