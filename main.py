@@ -17,6 +17,8 @@ from room_manager import RoomManager
 from ytmusicapi import YTMusic
 from analytics_db import AnalyticsDB
 from analytics_api import router as dashboard_router
+import firebase_admin
+from firebase_admin import credentials, messaging
 
 app = FastAPI(title="AudioSync API")
 
@@ -193,6 +195,61 @@ CACHE_TTL = 4 * 60 * 60  # 4 hours
 
 # Room manager for Listen Together feature
 room_manager = RoomManager()
+
+# Firebase Cloud Messaging
+_firebase_cred = credentials.Certificate(
+    os.path.join(os.path.dirname(__file__), "audiosync-dfee2-firebase-adminsdk-fbsvc-4fe0940bca.json")
+)
+firebase_admin.initialize_app(_firebase_cred)
+
+# FCM token storage: client_id -> fcm_token
+_fcm_tokens: dict[str, str] = {}
+_fcm_token_to_client: dict[str, str] = {}
+
+
+def register_fcm_token(client_id: str, token: str):
+    """Store FCM token for a client."""
+    old_client = _fcm_token_to_client.get(token)
+    if old_client and old_client != client_id:
+        _fcm_tokens.pop(old_client, None)
+
+    old_token = _fcm_tokens.get(client_id)
+    if old_token and old_token != token:
+        _fcm_token_to_client.pop(old_token, None)
+
+    _fcm_tokens[client_id] = token
+    _fcm_token_to_client[token] = client_id
+    print(f"[FCM] Token registered for {client_id[:8]}: {token[:20]}...")
+
+
+async def send_fcm_to_disconnected_members(room_code: str):
+    """Send FCM wake-up to room members who are disconnected."""
+    room = room_manager.rooms.get(room_code)
+    if not room:
+        return
+
+    for client_id, info in list(room_manager._pending_disconnects.items()):
+        if info["code"] != room_code:
+            continue
+
+        token = _fcm_tokens.get(client_id)
+        if not token:
+            continue
+
+        try:
+            message = messaging.Message(
+                data={"type": "room_reconnect", "roomCode": room_code},
+                token=token,
+                android=messaging.AndroidConfig(priority="high"),
+            )
+            await asyncio.to_thread(messaging.send, message)
+            print(f"[FCM] Sent room_reconnect to {client_id[:8]} for room {room_code}")
+        except messaging.UnregisteredError:
+            print(f"[FCM] Token expired for {client_id[:8]}, removing")
+            _fcm_tokens.pop(client_id, None)
+            _fcm_token_to_client.pop(token, None)
+        except Exception as e:
+            print(f"[FCM] Failed to send to {client_id[:8]}: {e}")
 
 
 def get_cached(video_id: str) -> Optional[dict]:
@@ -1957,6 +2014,7 @@ async def handle_play(client_id: str, msg: dict):
         "position": 0,
         "playStartTime": play_start_time,
     })
+    await send_fcm_to_disconnected_members(room.code)
 
 
 async def handle_pause(client_id: str, msg: dict):
@@ -1975,6 +2033,7 @@ async def handle_pause(client_id: str, msg: dict):
         "type": "sync_pause",
         "position": position,
     })
+    await send_fcm_to_disconnected_members(room.code)
 
 
 async def handle_resume(client_id: str, msg: dict):
@@ -1997,6 +2056,7 @@ async def handle_resume(client_id: str, msg: dict):
         "position": position,
         "resumeTime": resume_time,
     })
+    await send_fcm_to_disconnected_members(room.code)
 
 
 async def handle_seek(client_id: str, msg: dict):
@@ -2016,6 +2076,7 @@ async def handle_seek(client_id: str, msg: dict):
         "type": "sync_seek",
         "position": position,
     })
+    await send_fcm_to_disconnected_members(room.code)
 
 
 async def handle_next(client_id: str):
@@ -2075,6 +2136,7 @@ async def handle_next(client_id: str):
         "position": 0,
         "playStartTime": play_start_time,
     })
+    await send_fcm_to_disconnected_members(room.code)
 
 
 async def handle_queue_update(client_id: str, msg: dict):
@@ -2141,6 +2203,7 @@ async def handle_chat_message(client_id: str, msg: dict):
         "text": text,
         "timestamp": int(time.time() * 1000),
     })
+    await send_fcm_to_disconnected_members(room.code)
 
 
 async def handle_song_request(client_id: str, msg: dict):
@@ -2481,6 +2544,11 @@ async def websocket_endpoint(websocket: WebSocket):
 
             elif msg_type == "share_lyrics":
                 await handle_share_lyrics(client_id, msg)
+
+            elif msg_type == "register_fcm_token":
+                token = msg.get("token", "")
+                if token:
+                    register_fcm_token(client_id, token)
 
             elif msg_type == "leave":
                 await handle_leave(client_id)

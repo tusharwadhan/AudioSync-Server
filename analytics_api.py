@@ -1,6 +1,7 @@
 import os
 import secrets
 import time
+import asyncio
 from fastapi import APIRouter, Request, Response, Depends, HTTPException
 from fastapi.responses import HTMLResponse, RedirectResponse
 
@@ -154,3 +155,52 @@ async def api_health(request: Request, hours: int = 24):
         "error_rates": await analytics.get_error_rates(hours),
         "cache_sizes": cache_sizes,
     }
+
+
+@router.get("/api/fcm/tokens", dependencies=[Depends(require_auth)])
+async def api_fcm_tokens(request: Request):
+    from main import _fcm_tokens, room_manager
+    tokens = []
+    for client_id, token in _fcm_tokens.items():
+        room_code = room_manager._client_to_room.get(client_id)
+        tokens.append({
+            "client_id": client_id,
+            "token_preview": token[:20] + "...",
+            "room": room_code,
+        })
+    return {"tokens": tokens}
+
+
+@router.post("/api/fcm/test", dependencies=[Depends(require_auth)])
+async def api_fcm_test(request: Request):
+    from main import _fcm_tokens
+    from firebase_admin import messaging
+
+    body = await request.json()
+    target = body.get("target", "all")
+
+    if target == "all":
+        targets = dict(_fcm_tokens)
+    else:
+        token = _fcm_tokens.get(target)
+        if not token:
+            return {"success": False, "error": "No FCM token for that client"}
+        targets = {target: token}
+
+    sent = 0
+    failed = 0
+    for client_id, token in targets.items():
+        try:
+            msg = messaging.Message(
+                data={"type": "fcm_test", "message": "Test from dashboard"},
+                token=token,
+                android=messaging.AndroidConfig(priority="high"),
+            )
+            await asyncio.to_thread(messaging.send, msg)
+            sent += 1
+            print(f"[FCM] Test sent to {client_id[:8]}")
+        except Exception as e:
+            failed += 1
+            print(f"[FCM] Test failed for {client_id[:8]}: {e}")
+
+    return {"success": True, "sent": sent, "failed": failed}

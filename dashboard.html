@@ -187,6 +187,19 @@ tr:hover td { background: #222; }
       <table><thead><tr><th>Endpoint</th><th>Errors</th><th>Total</th><th>Rate</th></tr></thead>
       <tbody id="tableErrors"></tbody></table>
     </div>
+    <div class="chart-card" style="margin-top:16px;">
+      <h3>FCM Test</h3>
+      <div style="padding:8px;display:flex;flex-direction:column;gap:10px;">
+        <div id="fcmTokenCount" style="color:#888;font-size:13px;">Registered tokens: -</div>
+        <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;">
+          <select id="fcmTarget" style="background:#1a1a1a;color:#fff;border:1px solid #333;padding:6px 10px;border-radius:6px;font-size:13px;">
+            <option value="all">All registered devices</option>
+          </select>
+          <button onclick="sendTestFcm()" style="background:#1DB954;color:#000;border:none;padding:6px 16px;border-radius:6px;cursor:pointer;font-weight:600;font-size:13px;">Send Test FCM</button>
+        </div>
+        <div id="fcmResult" style="font-size:13px;color:#888;"></div>
+      </div>
+    </div>
   </div>
 </div>
 
@@ -459,6 +472,42 @@ async function loadHealth() {
     `<tr><td style="font-family:monospace;font-size:12px">${e.path}</td><td style="color:#ff5252">${e.errors}</td>` +
     `<td>${e.total}</td><td>${((e.errors / e.total) * 100).toFixed(1)}%</td></tr>`
   ).join('') || '<tr><td colspan="4" class="empty">No errors recorded</td></tr>';
+
+  // FCM tokens
+  const fcmData = await fetchAPI('fcm/tokens');
+  if (fcmData) {
+    document.getElementById('fcmTokenCount').textContent = 'Registered tokens: ' + (fcmData.tokens || []).length;
+    const sel = document.getElementById('fcmTarget');
+    sel.innerHTML = '<option value="all">All registered devices</option>';
+    (fcmData.tokens || []).forEach(t => {
+      sel.innerHTML += `<option value="${t.client_id}">${t.client_id.slice(0,8)}... ${t.room ? '(room: '+t.room+')' : '(no room)'}</option>`;
+    });
+  }
+}
+
+async function sendTestFcm() {
+  const target = document.getElementById('fcmTarget').value;
+  const resultDiv = document.getElementById('fcmResult');
+  resultDiv.textContent = 'Sending...';
+  resultDiv.style.color = '#888';
+  try {
+    const res = await fetch('api/fcm/test', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ target })
+    });
+    const data = await res.json();
+    if (data.success) {
+      resultDiv.textContent = 'Sent ' + data.sent + ' message(s). ' + (data.failed > 0 ? data.failed + ' failed.' : '');
+      resultDiv.style.color = '#1DB954';
+    } else {
+      resultDiv.textContent = 'Error: ' + (data.error || 'Unknown');
+      resultDiv.style.color = '#ff5252';
+    }
+  } catch (e) {
+    resultDiv.textContent = 'Error: ' + e.message;
+    resultDiv.style.color = '#ff5252';
+  }
 }
 
 // ---- User detail modal ----
