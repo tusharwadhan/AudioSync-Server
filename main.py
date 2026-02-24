@@ -132,7 +132,7 @@ APP_UPDATE_CONFIG = {
     "apkUrl": "https://6ce06afd-a5a5-4e05-8439-3b2ac7d0273f-00-mgch2ulxaibh.pike.replit.dev/releases/audiosync.apk",
     "releaseNotes": "Fixed share and add-to-playlist buttons not working in the suggestion list.",
     # List of version codes that MUST update (mandatory)
-    "mandatoryBelow": 9,  # All versions below this must update
+    "mandatoryBelow": 10,  # All versions below this must update
 }
 
 
