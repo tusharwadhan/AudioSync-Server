@@ -166,6 +166,7 @@ async def api_fcm_tokens(request: Request):
         tokens.append({
             "client_id": client_id,
             "token_preview": token[:20] + "...",
+            "token": token,
             "room": room_code,
         })
     return {"tokens": tokens}
