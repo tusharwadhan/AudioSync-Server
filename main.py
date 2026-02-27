@@ -777,22 +777,25 @@ async def startup_browse_cache():
             t2 = time.time()
             raw_charts = await asyncio.to_thread(_ytmusic.get_charts, "ZZ")
             videos = raw_charts.get("videos", {})
-            if isinstance(videos, dict):
-                playlist_id = videos.get("playlist", "")
+            tracks_raw = []
+            if isinstance(videos, dict) and videos.get("items"):
+                tracks_raw = videos["items"]
             elif isinstance(videos, list) and videos:
-                playlist_id = videos[0].get("playlistId", "")
-            else:
-                playlist_id = ""
-            if playlist_id:
-                playlist = await asyncio.to_thread(_ytmusic.get_playlist, playlist_id, 50)
+                pid = videos[0].get("playlistId", "")
+                if pid:
+                    pl = await asyncio.to_thread(_ytmusic.get_playlist, pid, 50)
+                    tracks_raw = pl.get("tracks") or []
+            if tracks_raw:
                 songs = []
-                for idx, track in enumerate(playlist.get("tracks", [])):
+                for idx, track in enumerate(tracks_raw):
+                    if not isinstance(track, dict):
+                        continue
                     vid = track.get("videoId")
                     if not vid:
                         continue
-                    thumbs = track.get("thumbnails", [])
+                    thumbs = track.get("thumbnails") or []
                     thumb = thumbs[-1].get("url") if thumbs and isinstance(thumbs[-1], dict) else None
-                    artists = track.get("artists", [])
+                    artists = track.get("artists") or []
                     artist = artists[0].get("name") if artists and isinstance(artists[0], dict) else None
                     songs.append(BrowseChartTrack(
                         videoId=vid, title=track.get("title", "Unknown"),
@@ -970,39 +973,44 @@ async def browse_charts(country: str = "ZZ"):
         return cached
 
     try:
-        # get_charts returns playlist references, not individual songs
+        # get_charts returns different structures depending on country
         raw = await asyncio.to_thread(_ytmusic.get_charts, country)
 
         videos = raw.get("videos", {})
-        # ytmusicapi returns videos as a dict (with "playlist" key) for country-specific,
-        # or as a list of dicts (with "playlistId") for global charts
-        if isinstance(videos, dict):
-            playlist_id = videos.get("playlist", "")
-        elif isinstance(videos, list) and videos:
-            playlist_id = videos[0].get("playlistId", "")
-        else:
-            return BrowseChartsResponse(success=False, country=country)
-        if not playlist_id:
-            return BrowseChartsResponse(success=False, country=country)
+        tracks_raw = []
 
-        print(f"[/browse/charts] Fetching chart playlist: {playlist_id}")
-        playlist = await asyncio.to_thread(_ytmusic.get_playlist, playlist_id, 50)
+        if isinstance(videos, dict) and videos.get("items"):
+            # Country-specific: videos is a dict with "items" containing tracks directly
+            tracks_raw = videos["items"]
+            print(f"[/browse/charts] Using {len(tracks_raw)} items from charts dict")
+        elif isinstance(videos, list) and videos:
+            # Global ("ZZ"): videos is a list of playlist refs, fetch first playlist
+            playlist_id = videos[0].get("playlistId", "")
+            if playlist_id:
+                print(f"[/browse/charts] Fetching chart playlist: {playlist_id}")
+                playlist = await asyncio.to_thread(_ytmusic.get_playlist, playlist_id, 50)
+                tracks_raw = playlist.get("tracks") or []
+
+        if not tracks_raw:
+            return BrowseChartsResponse(success=False, country=country)
 
         songs = []
-        for idx, track in enumerate(playlist.get("tracks", [])):
+        for idx, track in enumerate(tracks_raw):
+            if not isinstance(track, dict):
+                continue
             video_id = track.get("videoId")
             if not video_id:
                 continue
 
             # Get thumbnail
             thumbnail = None
-            thumbs = track.get("thumbnails", [])
+            thumbs = track.get("thumbnails") or []
             if thumbs and isinstance(thumbs, list):
                 thumbnail = thumbs[-1].get("url") if isinstance(thumbs[-1], dict) else None
 
             # Get artist
             uploader = None
-            artists = track.get("artists", [])
+            artists = track.get("artists") or []
             if artists and isinstance(artists, list) and isinstance(artists[0], dict):
                 uploader = artists[0].get("name")
 
