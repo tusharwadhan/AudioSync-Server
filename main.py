@@ -126,11 +126,11 @@ class RoomListResponse(BaseModel):
 
 # App update configuration - modify these values to control updates
 APP_UPDATE_CONFIG = {
-    "latestVersion": "4.1",
-    "latestVersionCode": 18,
+    "latestVersion": "5.0.0",
+    "latestVersionCode": 19,
     # "apkUrl": "https://semidefensive-soledad-unimpeachably.ngrok-free.dev/releases/audiosync.apk",
     "apkUrl": "https://6ce06afd-a5a5-4e05-8439-3b2ac7d0273f-00-mgch2ulxaibh.pike.replit.dev/releases/audiosync.apk",
-    "releaseNotes": "Fixed share and add-to-playlist buttons not working in the suggestion list.",
+    "releaseNotes": "New Home tab with personalized suggestions, trending charts, and mood-based playlists. Camera Ring player \u2014 a floating expanded player with album art, seekbar with haptic ticks, favorite button, and playback controls. Playlist sharing \u2014 share playlists via link with live sync; enable Allow editing to let friends add or remove songs.",
     # List of version codes that MUST update (mandatory)
     "mandatoryBelow": 10,  # All versions below this must update
 }
@@ -1462,6 +1462,183 @@ async def create_room_invite(room_code: str, req: InviteRequest):
         raise HTTPException(status_code=403, detail="Not a member of this room")
     token = room.create_invite_token()
     return {"token": token}
+
+
+# ==================== SHARED PLAYLISTS ====================
+
+PLAYLISTS_FILE = os.path.join(os.path.dirname(__file__), "shared_playlists.json")
+shared_playlists: dict = {}
+
+def _load_shared_playlists():
+    global shared_playlists
+    if os.path.exists(PLAYLISTS_FILE):
+        try:
+            with open(PLAYLISTS_FILE, "r") as f:
+                shared_playlists = json.load(f)
+            print(f"[SharedPlaylists] Loaded {len(shared_playlists)} playlists")
+        except Exception as e:
+            print(f"[SharedPlaylists] Failed to load: {e}")
+            shared_playlists = {}
+
+def _save_shared_playlists():
+    try:
+        with open(PLAYLISTS_FILE, "w") as f:
+            json.dump(shared_playlists, f)
+    except Exception as e:
+        print(f"[SharedPlaylists] Failed to save: {e}")
+
+_load_shared_playlists()
+
+
+class SharedPlaylistSong(BaseModel):
+    videoId: str
+    title: str
+    uploader: Optional[str] = None
+    duration: Optional[int] = None
+    thumbnail: Optional[str] = None
+    position: int
+
+class SharePlaylistRequest(BaseModel):
+    name: str
+    canEdit: bool = False
+    songs: List[SharedPlaylistSong]
+
+class UpdatePlaylistRequest(BaseModel):
+    name: str
+    songs: List[SharedPlaylistSong]
+
+
+@app.post("/api/playlist/share")
+async def create_shared_playlist(req: SharePlaylistRequest):
+    """Upload a playlist to share. Returns shareId and ownerToken."""
+    share_id = str(uuid.uuid4())[:8]
+    owner_token = str(uuid.uuid4())
+    now = time.time()
+
+    shared_playlists[share_id] = {
+        "shareId": share_id,
+        "name": req.name,
+        "ownerToken": owner_token,
+        "canEdit": req.canEdit,
+        "songs": [s.dict() for s in req.songs],
+        "version": 1,
+        "createdAt": now,
+        "updatedAt": now,
+    }
+    _save_shared_playlists()
+    analytics.log_event("playlist_share", detail=json.dumps({"shareId": share_id, "songs": len(req.songs), "canEdit": req.canEdit}))
+
+    return {"shareId": share_id, "ownerToken": owner_token, "version": 1}
+
+
+@app.get("/api/playlist/{share_id}")
+async def get_shared_playlist(share_id: str):
+    """Fetch shared playlist data (songs + metadata). Never exposes ownerToken."""
+    playlist = shared_playlists.get(share_id)
+    if not playlist:
+        raise HTTPException(status_code=404, detail="Playlist not found")
+    return {
+        "shareId": playlist["shareId"],
+        "name": playlist["name"],
+        "canEdit": playlist.get("canEdit", False),
+        "songs": playlist["songs"],
+        "version": playlist["version"],
+        "songCount": len(playlist["songs"]),
+    }
+
+
+@app.put("/api/playlist/{share_id}")
+async def update_shared_playlist(share_id: str, req: UpdatePlaylistRequest, request: Request):
+    """Update shared playlist songs. Requires ownerToken if canEdit is false."""
+    playlist = shared_playlists.get(share_id)
+    if not playlist:
+        raise HTTPException(status_code=404, detail="Playlist not found")
+
+    # Auth check: if canEdit is disabled, require owner token
+    if not playlist.get("canEdit", False):
+        token = request.headers.get("x-owner-token", "")
+        if token != playlist["ownerToken"]:
+            raise HTTPException(status_code=403, detail="Not authorized")
+
+    playlist["name"] = req.name
+    playlist["songs"] = [s.dict() for s in req.songs]
+    playlist["version"] += 1
+    playlist["updatedAt"] = time.time()
+    _save_shared_playlists()
+    analytics.log_event("playlist_update", detail=json.dumps({"shareId": share_id, "version": playlist["version"], "songs": len(req.songs)}))
+
+    return {"version": playlist["version"]}
+
+
+@app.get("/api/playlist/{share_id}/version")
+async def get_shared_playlist_version(share_id: str):
+    """Lightweight version check — returns just version and song count."""
+    playlist = shared_playlists.get(share_id)
+    if not playlist:
+        raise HTTPException(status_code=404, detail="Playlist not found")
+    return {
+        "version": playlist["version"],
+        "songCount": len(playlist["songs"]),
+        "name": playlist["name"],
+        "updatedAt": playlist["updatedAt"],
+    }
+
+
+@app.get("/share/playlist/{share_id}", response_class=HTMLResponse)
+async def share_playlist_page(share_id: str, request: Request):
+    """HTML page with Open Graph tags for playlist link previews."""
+    playlist = shared_playlists.get(share_id)
+
+    if not playlist:
+        return HTMLResponse(content=f"""<!DOCTYPE html>
+<html><head><meta charset="utf-8"><title>AudioSync</title>
+<style>body {{ background: #121212; color: #fff; font-family: sans-serif; display: flex; justify-content: center; align-items: center; min-height: 100vh; margin: 0; }}
+.card {{ background: #1e1e1e; border-radius: 16px; padding: 32px; text-align: center; }}</style>
+</head><body><div class="card"><h2>Playlist Not Found</h2><p style="color:#888">This shared playlist no longer exists.</p></div></body></html>""", status_code=200)
+
+    name = playlist["name"]
+    song_count = len(playlist["songs"])
+    thumbnail = playlist["songs"][0]["thumbnail"] if playlist["songs"] and playlist["songs"][0].get("thumbnail") else ""
+    description = f"{song_count} {'song' if song_count == 1 else 'songs'}"
+
+    if playlist["songs"]:
+        titles = [s["title"] for s in playlist["songs"][:3]]
+        description += " — " + ", ".join(titles)
+        if song_count > 3:
+            description += f" +{song_count - 3} more"
+
+    deep_link = f"audiosync://playlist/{share_id}"
+
+    return f"""<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="utf-8">
+    <meta property="og:title" content="{name}" />
+    <meta property="og:description" content="{description}" />
+    <meta property="og:image" content="{thumbnail}" />
+    <meta property="og:url" content="{request.url}" />
+    <meta property="og:type" content="music.playlist" />
+    <meta name="twitter:card" content="summary_large_image" />
+    <meta http-equiv="refresh" content="0;url={deep_link}" />
+    <title>{name} - AudioSync</title>
+    <style>
+        body {{ background: #121212; color: #fff; font-family: -apple-system, sans-serif; display: flex; justify-content: center; align-items: center; min-height: 100vh; margin: 0; }}
+        .card {{ background: #1e1e1e; border-radius: 16px; padding: 32px; max-width: 400px; text-align: center; }}
+        .thumb {{ width: 200px; height: 200px; border-radius: 12px; object-fit: cover; margin-bottom: 16px; }}
+        h2 {{ margin: 8px 0 4px; }}
+        .info {{ color: #888; margin-bottom: 20px; }}
+        .btn {{ display: inline-block; background: #1DB954; color: #fff; padding: 12px 32px; border-radius: 24px; text-decoration: none; font-weight: bold; }}
+    </style>
+</head>
+<body>
+    <div class="card">
+        {"<img class='thumb' src='" + thumbnail + "' />" if thumbnail else ""}
+        <h2>{name}</h2>
+        <p class="info">{description}</p>
+        <a class="btn" href="{deep_link}">Open in AudioSync</a>
+    </div>
+</body>
+</html>"""
 
 
 async def extract_audio_url(video_id: str) -> dict:
