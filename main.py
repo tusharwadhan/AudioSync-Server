@@ -976,7 +976,14 @@ async def browse_charts(country: str = "ZZ"):
         # get_charts returns different structures depending on country
         raw = await asyncio.to_thread(_ytmusic.get_charts, country)
 
+        # Debug: log the raw structure from ytmusicapi
+        print(f"[/browse/charts] Raw keys: {list(raw.keys())}")
         videos = raw.get("videos", {})
+        print(f"[/browse/charts] videos type={type(videos).__name__}, keys={list(videos.keys()) if isinstance(videos, dict) else f'list[{len(videos)}]' if isinstance(videos, list) else 'other'}")
+        if isinstance(videos, dict) and videos:
+            sample_key = next(iter(videos))
+            print(f"[/browse/charts] videos sample key='{sample_key}', val type={type(videos[sample_key]).__name__}")
+
         tracks_raw = []
 
         if isinstance(videos, dict) and videos.get("items"):
@@ -990,8 +997,21 @@ async def browse_charts(country: str = "ZZ"):
                 print(f"[/browse/charts] Fetching chart playlist: {playlist_id}")
                 playlist = await asyncio.to_thread(_ytmusic.get_playlist, playlist_id, 50)
                 tracks_raw = playlist.get("tracks") or []
+        else:
+            # Try other common keys: "trending", "songs" from raw
+            for fallback_key in ["trending", "songs"]:
+                fallback = raw.get(fallback_key, {})
+                if isinstance(fallback, dict) and fallback.get("items"):
+                    tracks_raw = fallback["items"]
+                    print(f"[/browse/charts] Using {len(tracks_raw)} items from raw['{fallback_key}']")
+                    break
+                elif isinstance(fallback, list) and fallback:
+                    tracks_raw = fallback
+                    print(f"[/browse/charts] Using {len(tracks_raw)} items from raw['{fallback_key}'] (list)")
+                    break
 
         if not tracks_raw:
+            print(f"[/browse/charts] No tracks found for country={country}")
             return BrowseChartsResponse(success=False, country=country)
 
         songs = []
