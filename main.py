@@ -776,15 +776,26 @@ async def startup_browse_cache():
             # Pre-warm charts (fetch playlist tracks)
             t2 = time.time()
             raw_charts = await asyncio.to_thread(_ytmusic.get_charts, "ZZ")
-            videos = raw_charts.get("videos", {})
             tracks_raw = []
-            if isinstance(videos, dict) and videos.get("items"):
-                tracks_raw = videos["items"]
-            elif isinstance(videos, list) and videos:
-                pid = videos[0].get("playlistId", "")
-                if pid:
-                    pl = await asyncio.to_thread(_ytmusic.get_playlist, pid, 50)
-                    tracks_raw = pl.get("tracks") or []
+            for src_key in ["daily", "weekly", "videos"]:
+                src = raw_charts.get(src_key)
+                if not src:
+                    continue
+                if isinstance(src, dict) and src.get("items"):
+                    tracks_raw = src["items"]
+                    break
+                if isinstance(src, dict):
+                    pid = src.get("playlist") or src.get("playlistId", "")
+                    if pid:
+                        pl = await asyncio.to_thread(_ytmusic.get_playlist, pid, 50)
+                        tracks_raw = pl.get("tracks") or []
+                        break
+                if isinstance(src, list) and src and isinstance(src[0], dict):
+                    pid = src[0].get("playlistId", "")
+                    if pid:
+                        pl = await asyncio.to_thread(_ytmusic.get_playlist, pid, 50)
+                        tracks_raw = pl.get("tracks") or []
+                        break
             if tracks_raw:
                 songs = []
                 for idx, track in enumerate(tracks_raw):
@@ -976,38 +987,37 @@ async def browse_charts(country: str = "ZZ"):
         # get_charts returns different structures depending on country
         raw = await asyncio.to_thread(_ytmusic.get_charts, country)
 
-        # Debug: log the raw structure from ytmusicapi
         print(f"[/browse/charts] Raw keys: {list(raw.keys())}")
-        videos = raw.get("videos", {})
-        print(f"[/browse/charts] videos type={type(videos).__name__}, keys={list(videos.keys()) if isinstance(videos, dict) else f'list[{len(videos)}]' if isinstance(videos, list) else 'other'}")
-        if isinstance(videos, dict) and videos:
-            sample_key = next(iter(videos))
-            print(f"[/browse/charts] videos sample key='{sample_key}', val type={type(videos[sample_key]).__name__}")
 
         tracks_raw = []
-
-        if isinstance(videos, dict) and videos.get("items"):
-            # Country-specific: videos is a dict with "items" containing tracks directly
-            tracks_raw = videos["items"]
-            print(f"[/browse/charts] Using {len(tracks_raw)} items from charts dict")
-        elif isinstance(videos, list) and videos:
-            # Global ("ZZ"): videos is a list of playlist refs, fetch first playlist
-            playlist_id = videos[0].get("playlistId", "")
-            if playlist_id:
-                print(f"[/browse/charts] Fetching chart playlist: {playlist_id}")
-                playlist = await asyncio.to_thread(_ytmusic.get_playlist, playlist_id, 50)
-                tracks_raw = playlist.get("tracks") or []
-        else:
-            # Try other common keys: "trending", "songs" from raw
-            for fallback_key in ["trending", "songs"]:
-                fallback = raw.get(fallback_key, {})
-                if isinstance(fallback, dict) and fallback.get("items"):
-                    tracks_raw = fallback["items"]
-                    print(f"[/browse/charts] Using {len(tracks_raw)} items from raw['{fallback_key}']")
+        # Country-specific charts have "daily"/"weekly" keys; global has "videos"
+        # Try each source: daily > weekly > videos
+        for source_key in ["daily", "weekly", "videos"]:
+            source = raw.get(source_key)
+            if not source:
+                continue
+            if isinstance(source, dict):
+                items = source.get("items")
+                if items and isinstance(items, list):
+                    tracks_raw = items
+                    print(f"[/browse/charts] Using {len(tracks_raw)} items from '{source_key}.items'")
                     break
-                elif isinstance(fallback, list) and fallback:
-                    tracks_raw = fallback
-                    print(f"[/browse/charts] Using {len(tracks_raw)} items from raw['{fallback_key}'] (list)")
+                # Global "videos" may have a "playlist" key to fetch
+                pid = source.get("playlist") or source.get("playlistId", "")
+                if pid:
+                    print(f"[/browse/charts] Fetching playlist {pid} from '{source_key}'")
+                    pl = await asyncio.to_thread(_ytmusic.get_playlist, pid, 50)
+                    tracks_raw = pl.get("tracks") or []
+                    print(f"[/browse/charts] Got {len(tracks_raw)} tracks from playlist")
+                    break
+            elif isinstance(source, list) and source:
+                # Global "videos" can be a list of playlist refs
+                pid = source[0].get("playlistId", "") if isinstance(source[0], dict) else ""
+                if pid:
+                    print(f"[/browse/charts] Fetching playlist {pid} from '{source_key}[0]'")
+                    pl = await asyncio.to_thread(_ytmusic.get_playlist, pid, 50)
+                    tracks_raw = pl.get("tracks") or []
+                    print(f"[/browse/charts] Got {len(tracks_raw)} tracks from playlist")
                     break
 
         if not tracks_raw:
