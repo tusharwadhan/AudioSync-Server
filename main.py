@@ -776,28 +776,32 @@ async def startup_browse_cache():
             # Pre-warm charts (fetch playlist tracks)
             t2 = time.time()
             raw_charts = await asyncio.to_thread(_ytmusic.get_charts, "ZZ")
-            videos = raw_charts.get("videos", [])
-            if videos and isinstance(videos, list):
+            videos = raw_charts.get("videos", {})
+            if isinstance(videos, dict):
+                playlist_id = videos.get("playlist", "")
+            elif isinstance(videos, list) and videos:
                 playlist_id = videos[0].get("playlistId", "")
-                if playlist_id:
-                    playlist = await asyncio.to_thread(_ytmusic.get_playlist, playlist_id, 50)
-                    songs = []
-                    for idx, track in enumerate(playlist.get("tracks", [])):
-                        vid = track.get("videoId")
-                        if not vid:
-                            continue
-                        thumbs = track.get("thumbnails", [])
-                        thumb = thumbs[-1].get("url") if thumbs and isinstance(thumbs[-1], dict) else None
-                        artists = track.get("artists", [])
-                        artist = artists[0].get("name") if artists and isinstance(artists[0], dict) else None
-                        songs.append(BrowseChartTrack(
-                            videoId=vid, title=track.get("title", "Unknown"),
-                            duration=track.get("duration_seconds"), thumbnail=thumb,
-                            uploader=artist, rank=idx + 1,
-                        ))
-                    response = BrowseChartsResponse(success=True, country="ZZ", songs=songs)
-                    set_browse_cache("charts_ZZ", response)
-                    print(f"[Startup] Browse: charts cached ({len(songs)} songs, {time.time()-t2:.2f}s)")
+            else:
+                playlist_id = ""
+            if playlist_id:
+                playlist = await asyncio.to_thread(_ytmusic.get_playlist, playlist_id, 50)
+                songs = []
+                for idx, track in enumerate(playlist.get("tracks", [])):
+                    vid = track.get("videoId")
+                    if not vid:
+                        continue
+                    thumbs = track.get("thumbnails", [])
+                    thumb = thumbs[-1].get("url") if thumbs and isinstance(thumbs[-1], dict) else None
+                    artists = track.get("artists", [])
+                    artist = artists[0].get("name") if artists and isinstance(artists[0], dict) else None
+                    songs.append(BrowseChartTrack(
+                        videoId=vid, title=track.get("title", "Unknown"),
+                        duration=track.get("duration_seconds"), thumbnail=thumb,
+                        uploader=artist, rank=idx + 1,
+                    ))
+                response = BrowseChartsResponse(success=True, country="ZZ", songs=songs)
+                set_browse_cache("charts_ZZ", response)
+                print(f"[Startup] Browse: charts cached ({len(songs)} songs, {time.time()-t2:.2f}s)")
 
             print(f"[Startup] Browse cache pre-warmed ({time.time()-t:.2f}s total)")
         except Exception as e:
@@ -969,12 +973,15 @@ async def browse_charts(country: str = "ZZ"):
         # get_charts returns playlist references, not individual songs
         raw = await asyncio.to_thread(_ytmusic.get_charts, country)
 
-        videos = raw.get("videos", [])
-        if not videos or not isinstance(videos, list):
+        videos = raw.get("videos", {})
+        # ytmusicapi returns videos as a dict (with "playlist" key) for country-specific,
+        # or as a list of dicts (with "playlistId") for global charts
+        if isinstance(videos, dict):
+            playlist_id = videos.get("playlist", "")
+        elif isinstance(videos, list) and videos:
+            playlist_id = videos[0].get("playlistId", "")
+        else:
             return BrowseChartsResponse(success=False, country=country)
-
-        # Fetch the first chart playlist (e.g. "Top 100 Music Videos Global")
-        playlist_id = videos[0].get("playlistId", "")
         if not playlist_id:
             return BrowseChartsResponse(success=False, country=country)
 
