@@ -264,6 +264,29 @@ async def send_fcm_to_disconnected_members(room_code: str):
             print(f"[FCM] Failed to send to {client_id[:8]}: {e}")
 
 
+def get_best_thumbnail(info: dict) -> str:
+    """Pick the highest resolution thumbnail from yt-dlp or ytmusic info dict."""
+    thumbs = info.get("thumbnails") or []
+    if not thumbs:
+        return info.get("thumbnail") or info.get("thumbnailUrl") or ""
+    best = ""
+    best_score = -1
+    for t in thumbs:
+        if not isinstance(t, dict):
+            continue
+        url = t.get("url", "")
+        if not url:
+            continue
+        # yt-dlp uses 'preference', ytmusic uses 'width'
+        pref = t.get("preference") or 0
+        w = t.get("width") or 0
+        score = pref * 10000 + w
+        if score > best_score:
+            best_score = score
+            best = url
+    return best or info.get("thumbnail") or ""
+
+
 def get_cached(video_id: str) -> Optional[dict]:
     """Get cached audio URL result if still valid"""
     if video_id in _cache:
@@ -595,7 +618,7 @@ def _extract_audio_ytdlp(video_id: str) -> AudioResponse:
             url=audio_url,
             title=info.get("title", "Unknown"),
             duration=info.get("duration", 0),
-            thumbnail=info.get("thumbnail", ""),
+            thumbnail=get_best_thumbnail(info),
             uploader=info.get("uploader", "Unknown"),
             source="ytdlp"
         )
@@ -652,7 +675,7 @@ def _extract_related_ytdlp(video_id: str, limit: int = 50) -> RelatedResponse:
                     videoId=vid,
                     title=entry.get("title", "Unknown"),
                     duration=entry.get("duration"),
-                    thumbnail=entry.get("thumbnail") or entry.get("thumbnails", [{}])[-1].get("url", ""),
+                    thumbnail=get_best_thumbnail(entry),
                     uploader=entry.get("uploader") or entry.get("channel", "Unknown"),
                 ))
 
@@ -804,8 +827,7 @@ async def startup_browse_cache():
                     vid = track.get("videoId")
                     if not vid:
                         continue
-                    thumbs = track.get("thumbnails") or []
-                    thumb = thumbs[-1].get("url") if thumbs and isinstance(thumbs[-1], dict) else None
+                    thumb = get_best_thumbnail(track)
                     artists = track.get("artists") or []
                     artist = artists[0].get("name") if artists and isinstance(artists[0], dict) else None
                     songs.append(BrowseChartTrack(
@@ -926,10 +948,7 @@ async def browse_playlist_detail(playlist_id: str, limit: int = 50):
                 continue
 
             # Get thumbnail
-            thumbnail = None
-            thumbs = t.get("thumbnails", [])
-            if thumbs and isinstance(thumbs, list):
-                thumbnail = thumbs[-1].get("url") if isinstance(thumbs[-1], dict) else None
+            thumbnail = get_best_thumbnail(t)
 
             # Get artist
             uploader = None
@@ -1980,7 +1999,7 @@ async def search(q: str, limit: int = 10):
                             videoId=entry.get("id", ""),
                             title=entry.get("title", "Unknown"),
                             duration=entry.get("duration"),
-                            thumbnail=entry.get("thumbnail") or entry.get("thumbnails", [{}])[0].get("url", ""),
+                            thumbnail=get_best_thumbnail(entry),
                             uploader=entry.get("uploader") or entry.get("channel", "Unknown"),
                         ))
 
