@@ -126,11 +126,11 @@ class RoomListResponse(BaseModel):
 
 # App update configuration - modify these values to control updates
 APP_UPDATE_CONFIG = {
-    "latestVersion": "5.0.0",
-    "latestVersionCode": 19,
+    "latestVersion": "5.2.7",
+    "latestVersionCode": 20,
     # "apkUrl": "https://semidefensive-soledad-unimpeachably.ngrok-free.dev/releases/audiosync.apk",
     "apkUrl": "https://6ce06afd-a5a5-4e05-8439-3b2ac7d0273f-00-mgch2ulxaibh.pike.replit.dev/releases/audiosync.apk",
-    "releaseNotes": "New Home tab with personalized suggestions, trending charts, and mood-based playlists. Camera Ring player \u2014 a floating expanded player with album art, seekbar with haptic ticks, favorite button, and playback controls. Playlist sharing \u2014 share playlists via link with live sync; enable Allow editing to let friends add or remove songs.",
+    "releaseNotes": "Redesigned Home tab with Quick Play pills, auto-scrolling Top Charts, and Continue Listening grid. Search tab now features browse genre pills and recent search history with autocomplete. Library header refined with smaller footprint. Various back navigation and UI fixes.",
     # List of version codes that MUST update (mandatory)
     "mandatoryBelow": 10,  # All versions below this must update
 }
