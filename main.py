@@ -1,4 +1,4 @@
-from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect, Request
+from fastapi import FastAPI, APIRouter, HTTPException, WebSocket, WebSocketDisconnect, Request
 from fastapi.responses import HTMLResponse, JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
@@ -20,7 +20,7 @@ from analytics_api import router as dashboard_router
 import firebase_admin
 from firebase_admin import credentials, messaging
 
-app = FastAPI(title="AudioSync API")
+app = FastAPI(title="SyncAura API")
 
 # Serve release APKs from /releases directory
 os.makedirs(os.path.join(os.path.dirname(__file__), "releases"), exist_ok=True)
@@ -40,6 +40,28 @@ analytics = AnalyticsDB(os.path.join(os.path.dirname(__file__), "analytics.db"))
 
 # Dashboard router
 app.include_router(dashboard_router, prefix="/dashboard")
+
+# Versioned API router — all app endpoints live under /api/v1
+api = APIRouter(prefix="/api/v1")
+
+
+# ==================== API KEY SECURITY ====================
+API_KEY = os.getenv("SYNCAURA_API_KEY", "sk_syncaura_v1_8f3k9x2m7q4w1p6y")
+
+# Endpoints that do NOT require an API key
+PUBLIC_PATHS = ("/update/check", "/releases/", "/share/", "/health", "/", "/docs", "/openapi.json")
+
+
+@app.middleware("http")
+async def api_key_middleware(request: Request, call_next):
+    path = request.url.path
+    # Only /api/v1/* endpoints require an API key (except update check)
+    needs_key = path.startswith("/api/v1/") and not path.startswith("/api/v1/update/check")
+    if needs_key:
+        key = request.headers.get("X-API-Key")
+        if key != API_KEY:
+            return JSONResponse(status_code=401, content={"detail": "Invalid or missing API key"})
+    return await call_next(request)
 
 
 @app.middleware("http")
@@ -126,13 +148,12 @@ class RoomListResponse(BaseModel):
 
 # App update configuration - modify these values to control updates
 APP_UPDATE_CONFIG = {
-    "latestVersion": "5.2.7",
-    "latestVersionCode": 20,
-    # "apkUrl": "https://semidefensive-soledad-unimpeachably.ngrok-free.dev/releases/audiosync.apk",
-    "apkUrl": "https://6ce06afd-a5a5-4e05-8439-3b2ac7d0273f-00-mgch2ulxaibh.pike.replit.dev/releases/audiosync.apk",
-    "releaseNotes": "Redesigned Home tab with Quick Play pills, auto-scrolling Top Charts, and Continue Listening grid. Search tab now features browse genre pills and recent search history with autocomplete. Library header refined with smaller footprint. Various back navigation and UI fixes.",
+    "latestVersion": "5.5.0",
+    "latestVersionCode": 21,
+    "apkUrl": "https://6ce06afd-a5a5-4e05-8439-3b2ac7d0273f-00-mgch2ulxaibh.pike.replit.dev/releases/syncaura-5.5.0.apk",
+    "releaseNotes": "AudioSync is now SyncAura! Please uninstall the old AudioSync app and install SyncAura fresh. New in v5.5.0: Various UI fixes.",
     # List of version codes that MUST update (mandatory)
-    "mandatoryBelow": 10,  # All versions below this must update
+    "mandatoryBelow": 21,  # Force all old AudioSync versions to update
 }
 
 
@@ -847,7 +868,7 @@ async def startup_browse_cache():
 
 # ==================== BROWSE ENDPOINTS (ytmusicapi) ====================
 
-@app.get("/browse/moods", response_model=BrowseMoodsResponse)
+@api.get("/browse/moods", response_model=BrowseMoodsResponse)
 async def browse_moods():
     """Get mood/genre categories from YouTube Music"""
     start = time.time()
@@ -880,7 +901,7 @@ async def browse_moods():
         return BrowseMoodsResponse(success=False)
 
 
-@app.get("/browse/mood_playlists", response_model=BrowseMoodPlaylistsResponse)
+@api.get("/browse/mood_playlists", response_model=BrowseMoodPlaylistsResponse)
 async def browse_mood_playlists(params: str):
     """Get playlists for a specific mood/genre category"""
     start = time.time()
@@ -926,7 +947,7 @@ async def browse_mood_playlists(params: str):
         return BrowseMoodPlaylistsResponse(success=False)
 
 
-@app.get("/browse/playlist/{playlist_id}", response_model=BrowsePlaylistDetailResponse)
+@api.get("/browse/playlist/{playlist_id}", response_model=BrowsePlaylistDetailResponse)
 async def browse_playlist_detail(playlist_id: str, limit: int = 50):
     """Get playlist tracks"""
     start = time.time()
@@ -990,7 +1011,7 @@ async def browse_playlist_detail(playlist_id: str, limit: int = 50):
         return BrowsePlaylistDetailResponse(success=False)
 
 
-@app.get("/browse/charts", response_model=BrowseChartsResponse)
+@api.get("/browse/charts", response_model=BrowseChartsResponse)
 async def browse_charts(country: str = "ZZ"):
     """Get music charts (top songs) — fetches first chart playlist tracks"""
     start = time.time()
@@ -1176,7 +1197,7 @@ async def _fetch_lrclib(title: str, artist: str, duration_secs: int = 0) -> Opti
     return None
 
 
-@app.get("/lyrics/{video_id}", response_model=LyricsResponse)
+@api.get("/lyrics/{video_id}", response_model=LyricsResponse)
 async def get_lyrics_endpoint(video_id: str):
     """Get time-synced lyrics for a song via ytmusicapi with LRCLIB fallback"""
     start = time.time()
@@ -1281,7 +1302,7 @@ async def get_lyrics_endpoint(video_id: str):
         return LyricsResponse(success=False, videoId=video_id, error=str(e))
 
 
-@app.get("/cache/stats")
+@api.get("/cache/stats")
 async def cache_stats():
     """Get cache statistics"""
     now = time.time()
@@ -1295,7 +1316,7 @@ async def cache_stats():
     }
 
 
-@app.delete("/cache/clear")
+@api.delete("/cache/clear")
 async def cache_clear():
     """Clear all cache"""
     url_count = len(_cache)
@@ -1305,7 +1326,7 @@ async def cache_clear():
     return {"cleared_urls": url_count, "cleared_suggestions": sug_count}
 
 
-@app.post("/ytdlp/reset")
+@api.post("/ytdlp/reset")
 async def ytdlp_reset():
     """Reset the reusable yt-dlp instance (forces re-download of player JS)"""
     def _reset():
@@ -1315,7 +1336,7 @@ async def ytdlp_reset():
     return {"status": "reset", "message": "yt-dlp instance reset. Next request will re-download player JS."}
 
 
-@app.get("/update/check", response_model=UpdateResponse)
+@api.get("/update/check", response_model=UpdateResponse)
 async def check_update(versionCode: int, versionName: str = ""):
     """Check if app update is available"""
     latest_code = APP_UPDATE_CONFIG["latestVersionCode"]
@@ -1337,7 +1358,7 @@ async def check_update(versionCode: int, versionName: str = ""):
     )
 
 
-@app.get("/rooms", response_model=RoomListResponse)
+@api.get("/rooms", response_model=RoomListResponse)
 async def list_rooms():
     """List all active rooms for discovery"""
     rooms = room_manager.list_rooms()
@@ -1363,7 +1384,7 @@ async def share_song_page(video_id: str, request: Request):
     if duration_str:
         description += f" • {duration_str}"
 
-    deep_link = f"audiosync://song/{video_id}"
+    deep_link = f"syncaura://song/{video_id}"
 
     return f"""<!DOCTYPE html>
 <html>
@@ -1419,7 +1440,7 @@ async def share_room_page(room_code: str, request: Request, invite: Optional[str
     if current_song:
         description += f" • ♪ {current_song}"
 
-    deep_link = f"audiosync://room/{room_code.upper()}"
+    deep_link = f"syncaura://room/{room_code.upper()}"
     if invite:
         deep_link += f"?invite={invite}"
 
@@ -1452,7 +1473,7 @@ async def share_room_page(room_code: str, request: Request, invite: Optional[str
 </html>"""
 
 
-@app.get("/room/{room_code}")
+@api.get("/room/{room_code}")
 async def get_room_info(room_code: str):
     """JSON endpoint for app to fetch room info when handling deep links."""
     room = room_manager.rooms.get(room_code.upper())
@@ -1471,7 +1492,7 @@ async def get_room_info(room_code: str):
 class InviteRequest(BaseModel):
     clientId: str
 
-@app.post("/room/{room_code}/invite")
+@api.post("/room/{room_code}/invite")
 async def create_room_invite(room_code: str, req: InviteRequest):
     """Generate a single-use invite token for a locked room."""
     room = room_manager.rooms.get(room_code.upper())
@@ -1527,7 +1548,7 @@ class UpdatePlaylistRequest(BaseModel):
     songs: List[SharedPlaylistSong]
 
 
-@app.post("/api/playlist/share")
+@api.post("/playlist/share")
 async def create_shared_playlist(req: SharePlaylistRequest):
     """Upload a playlist to share. Returns shareId and ownerToken."""
     share_id = str(uuid.uuid4())[:8]
@@ -1550,7 +1571,7 @@ async def create_shared_playlist(req: SharePlaylistRequest):
     return {"shareId": share_id, "ownerToken": owner_token, "version": 1}
 
 
-@app.get("/api/playlist/{share_id}")
+@api.get("/playlist/{share_id}")
 async def get_shared_playlist(share_id: str):
     """Fetch shared playlist data (songs + metadata). Never exposes ownerToken."""
     playlist = shared_playlists.get(share_id)
@@ -1566,7 +1587,7 @@ async def get_shared_playlist(share_id: str):
     }
 
 
-@app.put("/api/playlist/{share_id}")
+@api.put("/playlist/{share_id}")
 async def update_shared_playlist(share_id: str, req: UpdatePlaylistRequest, request: Request):
     """Update shared playlist songs. Requires ownerToken if canEdit is false."""
     playlist = shared_playlists.get(share_id)
@@ -1589,7 +1610,7 @@ async def update_shared_playlist(share_id: str, req: UpdatePlaylistRequest, requ
     return {"version": playlist["version"]}
 
 
-@app.get("/api/playlist/{share_id}/version")
+@api.get("/playlist/{share_id}/version")
 async def get_shared_playlist_version(share_id: str):
     """Lightweight version check — returns just version and song count."""
     playlist = shared_playlists.get(share_id)
@@ -1626,7 +1647,7 @@ async def share_playlist_page(share_id: str, request: Request):
         if song_count > 3:
             description += f" +{song_count - 3} more"
 
-    deep_link = f"audiosync://playlist/{share_id}"
+    deep_link = f"syncaura://playlist/{share_id}"
 
     return f"""<!DOCTYPE html>
 <html>
@@ -1707,7 +1728,7 @@ async def extract_audio_url(video_id: str) -> dict:
     }
 
 
-@app.get("/audio/{video_id}", response_model=AudioResponse)
+@api.get("/audio/{video_id}", response_model=AudioResponse)
 async def get_audio(video_id: str, fresh: bool = False):
     """
     Extract audio URL for a YouTube video.
@@ -1728,7 +1749,7 @@ async def get_audio(video_id: str, fresh: bool = False):
     return AudioResponse(**result)
 
 
-@app.get("/stream/{video_id}", response_model=StreamResponse)
+@api.get("/stream/{video_id}", response_model=StreamResponse)
 async def get_stream(video_id: str, include_suggestions: bool = True):
     """
     Get stream URL + suggestions (for prefetching next song).
@@ -1870,7 +1891,7 @@ async def get_stream(video_id: str, include_suggestions: bool = True):
     )
 
 
-@app.get("/related/{video_id}", response_model=RelatedResponse)
+@api.get("/related/{video_id}", response_model=RelatedResponse)
 async def get_related(video_id: str, limit: int = 50):
     """
     Get related songs (suggestions).
@@ -1912,7 +1933,7 @@ async def get_related(video_id: str, limit: int = 50):
     return result
 
 
-@app.get("/prefetch", response_model=PrefetchResponse)
+@api.get("/prefetch", response_model=PrefetchResponse)
 async def prefetch_batch(video_ids: str):
     """
     Prefetch multiple audio URLs in parallel (for rapid skipping).
@@ -1958,7 +1979,7 @@ async def prefetch_batch(video_ids: str):
     )
 
 
-@app.get("/search", response_model=SearchResponse)
+@api.get("/search", response_model=SearchResponse)
 async def search(q: str, limit: int = 10):
     """Search YouTube videos using yt-dlp (no Piped equivalent)"""
     start = time.time()
@@ -2022,7 +2043,7 @@ async def search(q: str, limit: int = 10):
     return result
 
 
-@app.get("/next/{video_id}", response_model=NextResponse)
+@api.get("/next/{video_id}", response_model=NextResponse)
 async def get_next(video_id: str):
     """
     Get next song with audio URL and suggestions.
@@ -2721,7 +2742,7 @@ async def handle_rejoin_room(client_id: str, websocket: WebSocket, msg: dict):
     }, exclude_id=client_id)
 
 
-@app.websocket("/ws")
+@api.websocket("/ws")
 async def websocket_endpoint(websocket: WebSocket):
     await websocket.accept()
     client_id = str(uuid.uuid4())
@@ -2811,6 +2832,10 @@ async def websocket_endpoint(websocket: WebSocket):
         print(f"[WS] Error for {client_id[:8]}: {e}")
         analytics.log_event("ws_disconnect", client_id=client_id)
         await handle_disconnect(client_id)
+
+
+# Register the versioned API router
+app.include_router(api)
 
 
 if __name__ == "__main__":
