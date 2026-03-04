@@ -1336,9 +1336,7 @@ async def ytdlp_reset():
     return {"status": "reset", "message": "yt-dlp instance reset. Next request will re-download player JS."}
 
 
-@api.get("/update/check", response_model=UpdateResponse)
-async def check_update(versionCode: int, versionName: str = ""):
-    """Check if app update is available"""
+def _check_update_logic(versionCode: int, versionName: str = ""):
     latest_code = APP_UPDATE_CONFIG["latestVersionCode"]
     latest_version = APP_UPDATE_CONFIG["latestVersion"]
     mandatory_below = APP_UPDATE_CONFIG["mandatoryBelow"]
@@ -1356,6 +1354,18 @@ async def check_update(versionCode: int, versionName: str = ""):
         apkUrl=APP_UPDATE_CONFIG["apkUrl"] if update_available else None,
         releaseNotes=APP_UPDATE_CONFIG["releaseNotes"] if update_available else None,
     )
+
+
+@api.get("/update/check", response_model=UpdateResponse)
+async def check_update(versionCode: int, versionName: str = ""):
+    """Check if app update is available"""
+    return _check_update_logic(versionCode, versionName)
+
+
+@app.get("/update/check", response_model=UpdateResponse)
+async def check_update_legacy(versionCode: int, versionName: str = ""):
+    """Legacy path for old app versions that don't use /api/v1"""
+    return _check_update_logic(versionCode, versionName)
 
 
 @api.get("/rooms", response_model=RoomListResponse)
