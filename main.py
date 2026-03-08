@@ -148,12 +148,12 @@ class RoomListResponse(BaseModel):
 
 # App update configuration - modify these values to control updates
 APP_UPDATE_CONFIG = {
-    "latestVersion": "5.5.0",
-    "latestVersionCode": 21,
-    "apkUrl": "https://b17516cf-0230-4bdc-8b56-4bbfc0210c87-00-2ysjnfigtdxhs.sisko.replit.dev/releases/syncaura-5.5.0.apk",
-    "releaseNotes": "AudioSync is now SyncAura! Please uninstall the old AudioSync app and install SyncAura fresh. New in v5.5.0: Various UI fixes.",
+    "latestVersion": "5.6.0",
+    "latestVersionCode": 22,
+    "apkUrl": "https://b17516cf-0230-4bdc-8b56-4bbfc0210c87-00-2ysjnfigtdxhs.sisko.replit.dev/releases/syncaura-5.6.0.apk",
+    "releaseNotes": "Server maintenance & stability improvements. The app now gracefully handles server downtime and guides you to your offline backup songs.",
     # List of version codes that MUST update (mandatory)
-    "mandatoryBelow": 21,  # Force all old AudioSync versions to update
+    "mandatoryBelow": 21,  # Force all previous versions to update
 }
 
 
