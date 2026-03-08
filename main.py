@@ -150,7 +150,7 @@ class RoomListResponse(BaseModel):
 APP_UPDATE_CONFIG = {
     "latestVersion": "5.5.0",
     "latestVersionCode": 21,
-    "apkUrl": "https://6ce06afd-a5a5-4e05-8439-3b2ac7d0273f-00-mgch2ulxaibh.pike.replit.dev/releases/syncaura-5.5.0.apk",
+    "apkUrl": "https://b17516cf-0230-4bdc-8b56-4bbfc0210c87-00-2ysjnfigtdxhs.sisko.replit.dev/releases/syncaura-5.5.0.apk",
     "releaseNotes": "AudioSync is now SyncAura! Please uninstall the old AudioSync app and install SyncAura fresh. New in v5.5.0: Various UI fixes.",
     # List of version codes that MUST update (mandatory)
     "mandatoryBelow": 21,  # Force all old AudioSync versions to update
