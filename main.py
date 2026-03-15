@@ -148,10 +148,10 @@ class RoomListResponse(BaseModel):
 
 # App update configuration - modify these values to control updates
 APP_UPDATE_CONFIG = {
-    "latestVersion": "5.7.0",
-    "latestVersionCode": 23,
-    "apkUrl": "https://b2bc1ea8-0906-4359-8e7e-c3f52aa1c77b-00-30fq88h2lpoyx.sisko.repl.co/releases/syncaura-5.7.0.apk",
-    "releaseNotes": "Redesigned home page with hero slider, quick action buttons, and vertical top charts.",
+    "latestVersion": "5.7.1",
+    "latestVersionCode": 24,
+    "apkUrl": "https://b2bc1ea8-0906-4359-8e7e-c3f52aa1c77b-00-30fq88h2lpoyx.sisko.repl.co/releases/syncaura-5.7.1.apk",
+    "releaseNotes": "Redesigned home page with hero slider, quick action buttons, vertical top charts, and fixed previous track functionality.",
     # List of version codes that MUST update (mandatory)
     "mandatoryBelow": 22,  # Force previous versions to update
 }
