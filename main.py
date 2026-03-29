@@ -2884,6 +2884,37 @@ async def transcribe_audio(file_path: str) -> str:
         print(f"[Identify] Whisper exception: {e}")
         return ""
 
+async def transliterate_to_roman(text: str) -> str:
+    """Transliterate Hindi/Punjabi Devanagari text to Roman script using Groq LLM"""
+    if not GROQ_API_KEY or not text:
+        return text
+    try:
+        async with httpx.AsyncClient(timeout=10) as client:
+            resp = await client.post(
+                "https://api.groq.com/openai/v1/chat/completions",
+                headers={
+                    "Authorization": f"Bearer {GROQ_API_KEY}",
+                    "Content-Type": "application/json"
+                },
+                json={
+                    "model": "llama-3.1-8b-instant",
+                    "messages": [
+                        {"role": "system", "content": "Transliterate the following Hindi/Punjabi text to Roman script (like how Indians type in English). Output ONLY the romanized text, nothing else. Keep the original words, just change the script."},
+                        {"role": "user", "content": text}
+                    ],
+                    "temperature": 0.1,
+                    "max_tokens": 200
+                }
+            )
+            if resp.status_code == 200:
+                roman = resp.json()["choices"][0]["message"]["content"].strip()
+                print(f"[Identify] Transliterated: {roman}")
+                return roman
+        return text
+    except Exception as e:
+        print(f"[Identify] Transliteration failed: {e}")
+        return text
+
 async def search_lyrics(query: str) -> list:
     """Search Google via Serper API"""
     if not SERPER_API_KEY:
@@ -3011,25 +3042,28 @@ async def identify_song(file: UploadFile = File(...)):
         tmp_path = tmp.name
 
     try:
-        # Step 1: Transcribe with Whisper
+        # Step 1: Transcribe with Whisper (returns Hindi/Devanagari)
         lyrics_text = await transcribe_audio(tmp_path)
         if not lyrics_text or len(lyrics_text.strip()) < 5:
             print("[Identify] No meaningful transcription")
             return JSONResponse({"identified": False, "reason": "no_transcription"})
 
-        # Step 2: Search Google for the lyrics
-        results = await search_lyrics(lyrics_text)
+        # Step 2: Transliterate to Roman script (lyrics sites index in Roman)
+        roman_text = await transliterate_to_roman(lyrics_text)
+
+        # Step 3: Search Google for the lyrics
+        results = await search_lyrics(roman_text)
         if not results:
             print("[Identify] No search results")
             return JSONResponse({"identified": False, "reason": "no_search_results", "transcription": lyrics_text})
 
-        # Step 3: Parse song + artist from titles
+        # Step 4: Parse song + artist from titles
         parsed = parse_song_from_titles(results)
         if not parsed:
             print("[Identify] Could not parse song from results")
             return JSONResponse({"identified": False, "reason": "parse_failed", "transcription": lyrics_text})
 
-        # Step 4: Generate teasing line based on lyrics meaning
+        # Step 5: Generate teasing line based on lyrics meaning
         teasing = await generate_teasing_line(parsed["song"], parsed["artist"], lyrics_text)
 
         print(f"[Identify] Identified: {parsed['song']} by {parsed['artist']}")
