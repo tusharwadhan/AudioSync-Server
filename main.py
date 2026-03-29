@@ -151,7 +151,7 @@ class RoomListResponse(BaseModel):
 APP_UPDATE_CONFIG = {
     "latestVersion": "5.7.2",
     "latestVersionCode": 25,
-    "apkUrl": "https://b2bc1ea8-0906-4359-8e7e-c3f52aa1c77b-00-30fq88h2lpoyx.sisko.repl.co/releases/syncaura-5.7.2.apk",
+    "apkUrl": "https://ad5c48cd-3f18-4f19-b081-02cd010ea04b-00-3o57bjo1iqvlf.pike.replit.dev/releases/syncaura-5.7.2.apk",
     "releaseNotes": "Updated Server Credentials, Bugs fixes",
     # List of version codes that MUST update (mandatory)
     "mandatoryBelow": 22,  # Force previous versions to update
