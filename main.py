@@ -155,7 +155,7 @@ APP_UPDATE_CONFIG = {
     "releaseNotes": "Updated Server Credentials, Bugs fixes",
     # List of version codes that MUST update (mandatory)
     "mandatoryBelow": 22,  # Force previous versions to update
-}
+} 
 
 
 class SearchResult(BaseModel):
