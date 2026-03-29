@@ -2846,7 +2846,7 @@ async def websocket_endpoint(websocket: WebSocket):
 
 
 # ── Song Identification via Lyrics ──
-_GK = ["gsk_eLH4", "Z9lt2dCi", "YLUBpxmT", "WGdyb3FY", "iydiOUYB", "yqgqnKxf", "u74IAWlz"]
+_GK = ["gsk_eLH4", "z9lt2dCi", "YLUBpxmT", "WGdyb3FY", "iydiOUYB", "yqgqnKxf", "u74IAWlz"]
 GROQ_API_KEY = "".join(_GK)
 SERPER_API_KEY = "862d216d4726" + "76dce339725814" + "05e6878451ad7b"
 
