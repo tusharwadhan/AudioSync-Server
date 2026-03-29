@@ -2861,27 +2861,30 @@ TEASING_TEMPLATES = [
 ]
 
 async def transcribe_audio(file_path: str) -> str:
-    """Send WAV to Groq Whisper for transcription"""
+    """Send audio to Groq Whisper for transcription"""
     if not GROQ_API_KEY:
         return ""
     try:
+        filename = os.path.basename(file_path)
+        content_type = "audio/mpeg" if file_path.endswith(".mp3") else "audio/wav"
         async with httpx.AsyncClient(timeout=30) as client:
             with open(file_path, "rb") as f:
                 resp = await client.post(
                     "https://api.groq.com/openai/v1/audio/transcriptions",
                     headers={"Authorization": f"Bearer {GROQ_API_KEY}"},
-                    files={"file": ("audio.wav", f, "audio/wav")},
+                    files={"file": (filename, f, content_type)},
                     data={"model": "whisper-large-v3", "language": "hi"}
                 )
+            print(f"[Identify] Whisper status: {resp.status_code}, file: {filename}, type: {content_type}, size: {os.path.getsize(file_path)}")
             if resp.status_code == 200:
                 text = resp.json().get("text", "").strip()
-                print(f"[Identify] Whisper transcription: {text}")
+                print(f"[Identify] Whisper transcription: {text[:100]}")
                 return text
             else:
-                print(f"[Identify] Whisper error: {resp.status_code} {resp.text[:200]}")
+                print(f"[Identify] Whisper error: {resp.status_code} {resp.text[:300]}")
                 return ""
     except Exception as e:
-        print(f"[Identify] Whisper exception: {e}")
+        print(f"[Identify] Whisper exception: {type(e).__name__}: {e}")
         return ""
 
 async def transliterate_to_roman(text: str) -> str:
@@ -3032,11 +3035,12 @@ Write ONLY the teasing line, nothing else."""},
 
 @api.post("/identify")
 async def identify_song(file: UploadFile = File(...)):
-    """Identify a song from a WAV audio clip"""
+    """Identify a song from an audio clip (WAV or MP3)"""
     print(f"[Identify] Received file: {file.filename}, size: {file.size}")
 
-    # Save to temp file
-    with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as tmp:
+    # Save to temp file with original extension
+    ext = os.path.splitext(file.filename or "audio.wav")[1] or ".wav"
+    with tempfile.NamedTemporaryFile(suffix=ext, delete=False) as tmp:
         content = await file.read()
         tmp.write(content)
         tmp_path = tmp.name
