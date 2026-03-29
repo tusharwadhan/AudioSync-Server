@@ -2846,8 +2846,8 @@ async def websocket_endpoint(websocket: WebSocket):
 
 
 # ── Song Identification via Lyrics ──
-GROQ_API_KEY = os.environ.get("GROQ_API_KEY", "")
-RENDER_SEARCH_URL = os.environ.get("RENDER_SEARCH_URL", "")
+GROQ_API_KEY = "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"
+SERPER_API_KEY = "862d216d472676dce33972581405e6878451ad7b"
 
 TEASING_TEMPLATES = [
     "We caught you vibing to {song} by {artist}!",
@@ -2884,26 +2884,31 @@ async def transcribe_audio(file_path: str) -> str:
         return ""
 
 async def search_lyrics(query: str) -> list:
-    """Search Google via Render search service"""
-    if not RENDER_SEARCH_URL:
+    """Search Google via Serper API"""
+    if not SERPER_API_KEY:
+        print("[Identify] SERPER_API_KEY not configured")
         return []
     try:
-        search_query = f'"{query}" song lyrics'
-        async with httpx.AsyncClient(timeout=20) as client:
-            resp = await client.get(
-                f"{RENDER_SEARCH_URL}/search",
-                params={"q": search_query}
+        search_query = f'{query} song lyrics'
+        async with httpx.AsyncClient(timeout=15) as client:
+            resp = await client.post(
+                "https://google.serper.dev/search",
+                headers={
+                    "X-API-KEY": SERPER_API_KEY,
+                    "Content-Type": "application/json"
+                },
+                json={"q": search_query, "num": 5}
             )
             if resp.status_code == 200:
                 data = resp.json()
-                results = data.get("results", [])
-                print(f"[Identify] Google search returned {len(results)} results")
+                results = [{"title": r.get("title", ""), "url": r.get("link", "")} for r in data.get("organic", [])]
+                print(f"[Identify] Serper returned {len(results)} results")
                 return results
             else:
-                print(f"[Identify] Search error: {resp.status_code}")
+                print(f"[Identify] Serper error: {resp.status_code}")
                 return []
     except Exception as e:
-        print(f"[Identify] Search exception: {e}")
+        print(f"[Identify] Serper exception: {e}")
         return []
 
 def parse_song_from_titles(results: list) -> dict:
