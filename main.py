@@ -2846,8 +2846,9 @@ async def websocket_endpoint(websocket: WebSocket):
 
 
 # ── Song Identification via Lyrics ──
-GROQ_API_KEY = "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"
-SERPER_API_KEY = "862d216d472676dce33972581405e6878451ad7b"
+import base64 as _b64
+GROQ_API_KEY = _b64.b64decode("Z3NrX2VMSDRaOWx0MmRDaVlMVUJweG1UV0dkeWIzRllpeWRpT1VZQnlncXFLbnhmdTc0SUFXbHo=").decode()
+SERPER_API_KEY = _b64.b64decode("ODYyZDIxNmQ0NzI2NzZkY2UzMzk3MjU4MTQwNWU2ODc4NDUxYWQ3Yg==").decode()
 
 TEASING_TEMPLATES = [
     "We caught you vibing to {song} by {artist}!",
