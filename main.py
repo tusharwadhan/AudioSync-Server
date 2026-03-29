@@ -1,5 +1,6 @@
-from fastapi import FastAPI, APIRouter, HTTPException, WebSocket, WebSocketDisconnect, Request
+from fastapi import FastAPI, APIRouter, HTTPException, WebSocket, WebSocketDisconnect, Request, UploadFile, File
 from fastapi.responses import HTMLResponse, JSONResponse
+import tempfile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
@@ -148,10 +149,10 @@ class RoomListResponse(BaseModel):
 
 # App update configuration - modify these values to control updates
 APP_UPDATE_CONFIG = {
-    "latestVersion": "5.7.1",
-    "latestVersionCode": 24,
-    "apkUrl": "https://b2bc1ea8-0906-4359-8e7e-c3f52aa1c77b-00-30fq88h2lpoyx.sisko.repl.co/releases/syncaura-5.7.1.apk",
-    "releaseNotes": "Redesigned home page with hero slider, quick action buttons, vertical top charts, and fixed previous track functionality.",
+    "latestVersion": "5.7.2",
+    "latestVersionCode": 25,
+    "apkUrl": "https://b2bc1ea8-0906-4359-8e7e-c3f52aa1c77b-00-30fq88h2lpoyx.sisko.repl.co/releases/syncaura-5.7.2.apk",
+    "releaseNotes": "Updated Server Credentials, Bugs fixes",
     # List of version codes that MUST update (mandatory)
     "mandatoryBelow": 22,  # Force previous versions to update
 }
@@ -2842,6 +2843,204 @@ async def websocket_endpoint(websocket: WebSocket):
         print(f"[WS] Error for {client_id[:8]}: {e}")
         analytics.log_event("ws_disconnect", client_id=client_id)
         await handle_disconnect(client_id)
+
+
+# ── Song Identification via Lyrics ──
+GROQ_API_KEY = os.environ.get("GROQ_API_KEY", "")
+RENDER_SEARCH_URL = os.environ.get("RENDER_SEARCH_URL", "")
+
+TEASING_TEMPLATES = [
+    "We caught you vibing to {song} by {artist}!",
+    "Humming {song}? {artist} would be proud!",
+    "Your heart says {song}, we heard it",
+    "Caught red-handed singing {song} by {artist}!",
+    "Someone's got {song} stuck in their head...",
+    "{artist}'s {song} living rent-free in your mind?",
+    "We know that tune... {song} by {artist}!",
+]
+
+async def transcribe_audio(file_path: str) -> str:
+    """Send WAV to Groq Whisper for transcription"""
+    if not GROQ_API_KEY:
+        return ""
+    try:
+        async with httpx.AsyncClient(timeout=30) as client:
+            with open(file_path, "rb") as f:
+                resp = await client.post(
+                    "https://api.groq.com/openai/v1/audio/transcriptions",
+                    headers={"Authorization": f"Bearer {GROQ_API_KEY}"},
+                    files={"file": ("audio.wav", f, "audio/wav")},
+                    data={"model": "whisper-large-v3", "language": "hi"}
+                )
+            if resp.status_code == 200:
+                text = resp.json().get("text", "").strip()
+                print(f"[Identify] Whisper transcription: {text}")
+                return text
+            else:
+                print(f"[Identify] Whisper error: {resp.status_code} {resp.text[:200]}")
+                return ""
+    except Exception as e:
+        print(f"[Identify] Whisper exception: {e}")
+        return ""
+
+async def search_lyrics(query: str) -> list:
+    """Search Google via Render search service"""
+    if not RENDER_SEARCH_URL:
+        return []
+    try:
+        search_query = f'"{query}" song lyrics'
+        async with httpx.AsyncClient(timeout=20) as client:
+            resp = await client.get(
+                f"{RENDER_SEARCH_URL}/search",
+                params={"q": search_query}
+            )
+            if resp.status_code == 200:
+                data = resp.json()
+                results = data.get("results", [])
+                print(f"[Identify] Google search returned {len(results)} results")
+                return results
+            else:
+                print(f"[Identify] Search error: {resp.status_code}")
+                return []
+    except Exception as e:
+        print(f"[Identify] Search exception: {e}")
+        return []
+
+def parse_song_from_titles(results: list) -> dict:
+    """Extract song name and artist from search result titles"""
+    import random
+
+    for r in results:
+        title = r.get("title", "")
+
+        # Pattern: "SONG LYRICS – Artist" or "Song Lyrics - Artist"
+        match = re.match(r'^(.+?)\s+LYRICS?\s*[–\-|:]\s*(.+?)(?:\s*\|.*)?$', title, re.IGNORECASE)
+        if match:
+            song = match.group(1).strip().title()
+            artist = match.group(2).strip()
+            # Clean up common suffixes
+            for suffix in [" Lyrics", " Official", " Video", " Audio", " HD"]:
+                artist = artist.replace(suffix, "").strip()
+            return {"song": song, "artist": artist, "confidence": 90}
+
+        # Pattern: "Song by Artist"
+        match = re.match(r'^(.+?)\s+by\s+(.+?)\s*[–\-|]', title, re.IGNORECASE)
+        if match:
+            song = match.group(1).strip().title()
+            artist = match.group(2).strip()
+            return {"song": song, "artist": artist, "confidence": 80}
+
+        # Pattern: "Song - Artist | Site"
+        match = re.match(r'^(.+?)\s*[–\-]\s*(.+?)(?:\s*\|.*)?$', title)
+        if match:
+            part1 = match.group(1).strip()
+            part2 = match.group(2).strip()
+            # Skip if part2 looks like a website name
+            if not any(w in part2.lower() for w in ['lyrics', 'genius', 'azlyrics', 'musixmatch', 'lyricshub', 'shazam']):
+                song = part1.title()
+                artist = part2
+                return {"song": song, "artist": artist, "confidence": 70}
+
+    return None
+
+async def generate_teasing_line(song: str, artist: str, lyrics: str = "") -> str:
+    """Generate a Hinglish teasing line based on lyrics meaning — like a friend roasting you"""
+    if not GROQ_API_KEY:
+        import random
+        return random.choice(TEASING_TEMPLATES).format(song=song, artist=artist)
+    try:
+        async with httpx.AsyncClient(timeout=10) as client:
+            resp = await client.post(
+                "https://api.groq.com/openai/v1/chat/completions",
+                headers={
+                    "Authorization": f"Bearer {GROQ_API_KEY}",
+                    "Content-Type": "application/json"
+                },
+                json={
+                    "model": "llama-3.3-70b-versatile",
+                    "messages": [
+                        {"role": "system", "content": """You caught your close friend singing/humming a song. Write a warm, playful Hinglish teasing line based on what the lyrics mean. Like a bestfriend smiling and saying something sweet but cheeky.
+
+IMPORTANT RULES:
+- NEVER be offensive, rude, or hurtful
+- NEVER mention family members (baap, maa, behen etc)
+- Keep it light and affectionate — like teasing with love
+- Use simple Hinglish that any young Indian would say
+- Max 12-15 words, one sentence only
+- NO emoji, NO quotes, NO hashtags, NO exclamation marks
+- Sound like a real person, not AI
+- DO NOT repeat or paraphrase the lyrics back
+- React to the EMOTION/SITUATION the lyrics describe
+
+Write ONLY the teasing line, nothing else."""},
+                        {"role": "user", "content": f"Song: {song} by {artist}\nLyrics they were singing: {lyrics}" if lyrics else f"Song: {song} by {artist}"}
+                    ],
+                    "temperature": 0.85,
+                    "max_tokens": 50
+                }
+            )
+            if resp.status_code == 200:
+                line = resp.json()["choices"][0]["message"]["content"].strip().strip('"').strip("'")
+                # Clean up any unwanted prefixes
+                for prefix in ["Here's", "Teasing:", "Line:", "Response:"]:
+                    if line.startswith(prefix):
+                        line = line[len(prefix):].strip()
+                if 3 <= len(line.split()) <= 20:
+                    return line
+        import random
+        return random.choice(TEASING_TEMPLATES).format(song=song, artist=artist)
+    except:
+        import random
+        return random.choice(TEASING_TEMPLATES).format(song=song, artist=artist)
+
+@api.post("/identify")
+async def identify_song(file: UploadFile = File(...)):
+    """Identify a song from a WAV audio clip"""
+    print(f"[Identify] Received file: {file.filename}, size: {file.size}")
+
+    # Save to temp file
+    with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as tmp:
+        content = await file.read()
+        tmp.write(content)
+        tmp_path = tmp.name
+
+    try:
+        # Step 1: Transcribe with Whisper
+        lyrics_text = await transcribe_audio(tmp_path)
+        if not lyrics_text or len(lyrics_text.strip()) < 5:
+            print("[Identify] No meaningful transcription")
+            return JSONResponse({"identified": False, "reason": "no_transcription"})
+
+        # Step 2: Search Google for the lyrics
+        results = await search_lyrics(lyrics_text)
+        if not results:
+            print("[Identify] No search results")
+            return JSONResponse({"identified": False, "reason": "no_search_results", "transcription": lyrics_text})
+
+        # Step 3: Parse song + artist from titles
+        parsed = parse_song_from_titles(results)
+        if not parsed:
+            print("[Identify] Could not parse song from results")
+            return JSONResponse({"identified": False, "reason": "parse_failed", "transcription": lyrics_text})
+
+        # Step 4: Generate teasing line based on lyrics meaning
+        teasing = await generate_teasing_line(parsed["song"], parsed["artist"], lyrics_text)
+
+        print(f"[Identify] Identified: {parsed['song']} by {parsed['artist']}")
+        return JSONResponse({
+            "identified": True,
+            "song": parsed["song"],
+            "artist": parsed["artist"],
+            "teasingLine": teasing,
+            "confidence": parsed["confidence"],
+            "transcription": lyrics_text
+        })
+    finally:
+        # Clean up temp file
+        try:
+            os.unlink(tmp_path)
+        except:
+            pass
 
 
 # Register the versioned API router
