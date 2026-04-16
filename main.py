@@ -1,4 +1,13 @@
-from fastapi import FastAPI, APIRouter, HTTPException, WebSocket, WebSocketDisconnect, Request, UploadFile, File
+from fastapi import (
+    FastAPI,
+    APIRouter,
+    HTTPException,
+    WebSocket,
+    WebSocketDisconnect,
+    Request,
+    UploadFile,
+    File,
+)
 from fastapi.responses import HTMLResponse, JSONResponse
 import tempfile
 from fastapi.middleware.cors import CORSMiddleware
@@ -25,7 +34,11 @@ app = FastAPI(title="SyncAura API")
 
 # Serve release APKs from /releases directory
 os.makedirs(os.path.join(os.path.dirname(__file__), "releases"), exist_ok=True)
-app.mount("/releases", StaticFiles(directory=os.path.join(os.path.dirname(__file__), "releases")), name="releases")
+app.mount(
+    "/releases",
+    StaticFiles(directory=os.path.join(os.path.dirname(__file__), "releases")),
+    name="releases",
+)
 
 # Allow all origins for mobile app access
 app.add_middleware(
@@ -50,18 +63,30 @@ api = APIRouter(prefix="/api/v1")
 API_KEY = os.getenv("SYNCAURA_API_KEY", "sk_syncaura_v1_8f3k9x2m7q4w1p6y")
 
 # Endpoints that do NOT require an API key
-PUBLIC_PATHS = ("/update/check", "/releases/", "/share/", "/health", "/", "/docs", "/openapi.json")
+PUBLIC_PATHS = (
+    "/update/check",
+    "/releases/",
+    "/share/",
+    "/health",
+    "/",
+    "/docs",
+    "/openapi.json",
+)
 
 
 @app.middleware("http")
 async def api_key_middleware(request: Request, call_next):
     path = request.url.path
     # Only /api/v1/* endpoints require an API key (except update check)
-    needs_key = path.startswith("/api/v1/") and not path.startswith("/api/v1/update/check")
+    needs_key = path.startswith("/api/v1/") and not path.startswith(
+        "/api/v1/update/check"
+    )
     if needs_key:
         key = request.headers.get("X-API-Key")
         if key != API_KEY:
-            return JSONResponse(status_code=401, content={"detail": "Invalid or missing API key"})
+            return JSONResponse(
+                status_code=401, content={"detail": "Invalid or missing API key"}
+            )
     return await call_next(request)
 
 
@@ -72,7 +97,8 @@ async def analytics_middleware(request: Request, call_next):
     path = request.url.path
     if not path.startswith("/dashboard"):
         analytics.log_api_request(
-            method=request.method, path=path,
+            method=request.method,
+            path=path,
             status_code=response.status_code,
             response_time_ms=(time.time() - start) * 1000,
             client_ip=request.client.host if request.client else "unknown",
@@ -86,7 +112,9 @@ async def analytics_middleware(request: Request, call_next):
 # Or use docker-compose up -d for both Piped and API
 PIPED_URL = os.getenv("PIPED_URL", "http://localhost:8080")
 PIPED_TIMEOUT = int(os.getenv("PIPED_TIMEOUT", "5"))
-PIPED_ENABLED = os.getenv("PIPED_ENABLED", "false").lower() == "true"  # Disabled by default until Piped is fixed
+PIPED_ENABLED = (
+    os.getenv("PIPED_ENABLED", "false").lower() == "true"
+)  # Disabled by default until Piped is fixed
 
 print(f"[Config] Piped: {'ENABLED' if PIPED_ENABLED else 'DISABLED'} ({PIPED_URL})")
 
@@ -151,11 +179,11 @@ class RoomListResponse(BaseModel):
 APP_UPDATE_CONFIG = {
     "latestVersion": "5.8.0",
     "latestVersionCode": 27,
-    "apkUrl": "https://87288a68-78c6-4426-ba34-915a67f1c9d6-00-dgv6fzdxh5ja.pike.replit.dev/releases/syncaura-5.8.0.apk",
+    "apkUrl": "https://7c30ef4a-1f68-4c7b-862a-582549cd2b25-00-16irhxc7zx5m7.sisko.replit.dev/releases/syncaura-5.8.0.apk",
     "releaseNotes": "Edge Player: queue support, progress indicator, dedicated settings page with side/size/opacity, first-run onboarding. Offline mode: Up Next auto-populates from downloads when server is unreachable.",
     # List of version codes that MUST update (mandatory)
     "mandatoryBelow": 22,  # Force previous versions to update
-} 
+}
 
 
 class SearchResult(BaseModel):
@@ -226,7 +254,10 @@ if _firebase_creds_json:
     print("[FCM] Firebase initialized from FIREBASE_CREDENTIALS env var")
 else:
     # Fallback: load from local file (for local development)
-    _firebase_file = os.path.join(os.path.dirname(__file__), "audiosync-dfee2-firebase-adminsdk-fbsvc-4fe0940bca.json")
+    _firebase_file = os.path.join(
+        os.path.dirname(__file__),
+        "audiosync-dfee2-firebase-adminsdk-fbsvc-4fe0940bca.json",
+    )
     if os.path.exists(_firebase_file):
         _firebase_cred = credentials.Certificate(_firebase_file)
         firebase_admin.initialize_app(_firebase_cred)
@@ -422,10 +453,12 @@ class BrowseChartsResponse(BaseModel):
     country: str = ""
     songs: List[BrowseChartTrack] = []
 
+
 class LyricsLine(BaseModel):
     text: str
     startMs: int
     endMs: int
+
 
 class LyricsResponse(BaseModel):
     success: bool
@@ -438,6 +471,7 @@ class LyricsResponse(BaseModel):
 
 
 # ==================== PIPED FUNCTIONS ====================
+
 
 async def get_from_piped(video_id: str) -> Optional[dict]:
     """
@@ -479,13 +513,15 @@ async def get_from_piped(video_id: str) -> Optional[dict]:
                         vid = vid_url[9:].split("&")[0]
 
                     if vid and vid != video_id and len(vid) == 11:
-                        related.append({
-                            "videoId": vid,
-                            "title": item.get("title", "Unknown"),
-                            "duration": item.get("duration"),
-                            "thumbnail": item.get("thumbnail"),
-                            "uploader": item.get("uploaderName", "Unknown")
-                        })
+                        related.append(
+                            {
+                                "videoId": vid,
+                                "title": item.get("title", "Unknown"),
+                                "duration": item.get("duration"),
+                                "thumbnail": item.get("thumbnail"),
+                                "uploader": item.get("uploaderName", "Unknown"),
+                            }
+                        )
 
                 return {
                     "success": True,
@@ -495,7 +531,7 @@ async def get_from_piped(video_id: str) -> Optional[dict]:
                     "uploader": data.get("uploader"),
                     "duration": data.get("duration"),
                     "thumbnail": data.get("thumbnailUrl"),
-                    "related": related
+                    "related": related,
                 }
 
     except httpx.TimeoutException:
@@ -519,10 +555,14 @@ async def get_stream_url_from_piped(video_id: str) -> Optional[str]:
 # ==================== YT-DLP CONFIGURATION ====================
 
 # Cache directory for yt-dlp (persists player signatures across restarts)
-YTDLP_CACHE_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), ".ytdlp_cache")
+YTDLP_CACHE_DIR = os.path.join(
+    os.path.dirname(os.path.abspath(__file__)), ".ytdlp_cache"
+)
 os.makedirs(YTDLP_CACHE_DIR, exist_ok=True)
 
-YTDLP_COOKIE_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "cookies.txt")
+YTDLP_COOKIE_FILE = os.path.join(
+    os.path.dirname(os.path.abspath(__file__)), "cookies.txt"
+)
 
 # Reusable yt-dlp instance for audio extraction (caches player JS in memory)
 _ydl_audio: yt_dlp.YoutubeDL | None = None
@@ -618,13 +658,13 @@ def _extract_audio_ytdlp(video_id: str) -> AudioResponse:
             info = ydl.extract_info(url, download=False)
             t_extract = time.time()
 
-        print(f"[yt-dlp timing] {video_id}: lock_wait={t_got_lock-t_lock:.2f}s, instance={t_instance-t_got_lock:.2f}s, extract={t_extract-t_instance:.2f}s, total={t_extract-t_lock:.2f}s")
+        print(
+            f"[yt-dlp timing] {video_id}: lock_wait={t_got_lock - t_lock:.2f}s, instance={t_instance - t_got_lock:.2f}s, extract={t_extract - t_instance:.2f}s, total={t_extract - t_lock:.2f}s"
+        )
 
         if not info:
             return AudioResponse(
-                success=False,
-                videoId=video_id,
-                error="Failed to extract video info"
+                success=False, videoId=video_id, error="Failed to extract video info"
             )
 
         # Get the best audio URL
@@ -639,9 +679,7 @@ def _extract_audio_ytdlp(video_id: str) -> AudioResponse:
 
         if not audio_url:
             return AudioResponse(
-                success=False,
-                videoId=video_id,
-                error="No audio URL found"
+                success=False, videoId=video_id, error="No audio URL found"
             )
 
         return AudioResponse(
@@ -652,17 +690,13 @@ def _extract_audio_ytdlp(video_id: str) -> AudioResponse:
             duration=info.get("duration", 0),
             thumbnail=get_best_thumbnail(info),
             uploader=info.get("uploader", "Unknown"),
-            source="ytdlp"
+            source="ytdlp",
         )
 
     except Exception as e:
         # If instance is broken, reset it for next request
         _reset_audio_ydl()
-        return AudioResponse(
-            success=False,
-            videoId=video_id,
-            error=str(e)
-        )
+        return AudioResponse(success=False, videoId=video_id, error=str(e))
 
 
 async def get_audio_ytdlp(video_id: str) -> AudioResponse:
@@ -690,9 +724,7 @@ def _extract_related_ytdlp(video_id: str, limit: int = 50) -> RelatedResponse:
 
             if not info or "entries" not in info:
                 return RelatedResponse(
-                    success=False,
-                    videoId=video_id,
-                    error="No related songs found"
+                    success=False, videoId=video_id, error="No related songs found"
                 )
 
             related = []
@@ -704,30 +736,26 @@ def _extract_related_ytdlp(video_id: str, limit: int = 50) -> RelatedResponse:
                 if not vid or vid == video_id:
                     continue
 
-                related.append(SearchResult(
-                    videoId=vid,
-                    title=entry.get("title", "Unknown"),
-                    duration=entry.get("duration"),
-                    thumbnail=get_best_thumbnail(entry),
-                    uploader=entry.get("uploader") or entry.get("channel", "Unknown"),
-                ))
+                related.append(
+                    SearchResult(
+                        videoId=vid,
+                        title=entry.get("title", "Unknown"),
+                        duration=entry.get("duration"),
+                        thumbnail=get_best_thumbnail(entry),
+                        uploader=entry.get("uploader")
+                        or entry.get("channel", "Unknown"),
+                    )
+                )
 
                 if len(related) >= limit:
                     break
 
             return RelatedResponse(
-                success=True,
-                videoId=video_id,
-                related=related,
-                source="ytdlp"
+                success=True, videoId=video_id, related=related, source="ytdlp"
             )
 
     except Exception as e:
-        return RelatedResponse(
-            success=False,
-            videoId=video_id,
-            error=str(e)
-        )
+        return RelatedResponse(success=False, videoId=video_id, error=str(e))
 
 
 async def get_related_ytdlp(video_id: str, limit: int = 50) -> RelatedResponse:
@@ -737,13 +765,14 @@ async def get_related_ytdlp(video_id: str, limit: int = 50) -> RelatedResponse:
 
 # ==================== API ENDPOINTS ====================
 
+
 @app.get("/")
 async def root():
     return {
         "status": "ok",
         "message": "AudioSync API",
         "piped_enabled": PIPED_ENABLED,
-        "piped_url": PIPED_URL if PIPED_ENABLED else None
+        "piped_url": PIPED_URL if PIPED_ENABLED else None,
     }
 
 
@@ -757,7 +786,11 @@ async def startup_analytics():
     await analytics.init()
     app.state.analytics = analytics
     app.state.room_manager = room_manager
-    app.state.caches = {"audio": _cache, "suggestions": _suggestions_cache, "browse": _browse_cache}
+    app.state.caches = {
+        "audio": _cache,
+        "suggestions": _suggestions_cache,
+        "browse": _browse_cache,
+    }
     app.state.start_time = time.time()
 
 
@@ -772,12 +805,14 @@ async def startup_analytics_cleanup():
         while True:
             await asyncio.sleep(86400)  # Daily
             await analytics.cleanup_old_data()
+
     asyncio.create_task(_cleanup_loop())
 
 
 @app.on_event("startup")
 async def startup_room_cleanup():
     """Periodically clean up zombie rooms with no active host."""
+
     async def _cleanup_loop():
         while True:
             await asyncio.sleep(60)
@@ -787,7 +822,14 @@ async def startup_room_cleanup():
                     continue
                 # If host_id is not in active members, room is a zombie
                 if room.host_id not in room.members:
-                    await analytics.log_room_destroyed(code, room.host_name, room.created_at, room.peak_members, room.songs_played, room.password is not None)
+                    await analytics.log_room_destroyed(
+                        code,
+                        room.host_name,
+                        room.created_at,
+                        room.peak_members,
+                        room.songs_played,
+                        room.password is not None,
+                    )
                     remaining_ws = [m.websocket for m in room.members.values()]
                     for mid in list(room.members.keys()):
                         room_manager._client_to_room.pop(mid, None)
@@ -796,6 +838,7 @@ async def startup_room_cleanup():
                         await ws_send(ws, {"type": "room_closed"})
                     print(f"[Cleanup] Destroyed zombie room {code} (no active host)")
             room_manager.cleanup_stale_disconnects()
+
     asyncio.create_task(_cleanup_loop())
 
 
@@ -810,8 +853,12 @@ async def startup_prewarm():
             with _ydl_audio_lock:
                 ydl = _get_audio_ydl()
                 # Extract a short, well-known video to cache player JS
-                ydl.extract_info("https://www.youtube.com/watch?v=jNQXAC9IVRw", download=False)
-            print(f"[Startup] Pre-warm complete! ({time.time()-t:.2f}s) - subsequent requests will be faster")
+                ydl.extract_info(
+                    "https://www.youtube.com/watch?v=jNQXAC9IVRw", download=False
+                )
+            print(
+                f"[Startup] Pre-warm complete! ({time.time() - t:.2f}s) - subsequent requests will be faster"
+            )
         except Exception as e:
             print(f"[Startup] Pre-warm failed (non-critical): {e}")
 
@@ -821,13 +868,14 @@ async def startup_prewarm():
 @app.on_event("startup")
 async def startup_browse_cache():
     """Pre-warm browse cache on server start (moods + charts)"""
+
     async def _warmup_browse():
         try:
             t = time.time()
             # Pre-warm moods
             moods = await asyncio.to_thread(_ytmusic.get_mood_categories)
             set_browse_cache("moods", moods)
-            print(f"[Startup] Browse: moods cached ({time.time()-t:.2f}s)")
+            print(f"[Startup] Browse: moods cached ({time.time() - t:.2f}s)")
 
             # Pre-warm charts (fetch playlist tracks)
             t2 = time.time()
@@ -862,23 +910,36 @@ async def startup_browse_cache():
                         continue
                     thumb = get_best_thumbnail(track)
                     artists = track.get("artists") or []
-                    artist = artists[0].get("name") if artists and isinstance(artists[0], dict) else None
-                    songs.append(BrowseChartTrack(
-                        videoId=vid, title=track.get("title", "Unknown"),
-                        duration=track.get("duration_seconds"), thumbnail=thumb,
-                        uploader=artist, rank=idx + 1,
-                    ))
+                    artist = (
+                        artists[0].get("name")
+                        if artists and isinstance(artists[0], dict)
+                        else None
+                    )
+                    songs.append(
+                        BrowseChartTrack(
+                            videoId=vid,
+                            title=track.get("title", "Unknown"),
+                            duration=track.get("duration_seconds"),
+                            thumbnail=thumb,
+                            uploader=artist,
+                            rank=idx + 1,
+                        )
+                    )
                 response = BrowseChartsResponse(success=True, country="ZZ", songs=songs)
                 set_browse_cache("charts_ZZ", response)
-                print(f"[Startup] Browse: charts cached ({len(songs)} songs, {time.time()-t2:.2f}s)")
+                print(
+                    f"[Startup] Browse: charts cached ({len(songs)} songs, {time.time() - t2:.2f}s)"
+                )
 
-            print(f"[Startup] Browse cache pre-warmed ({time.time()-t:.2f}s total)")
+            print(f"[Startup] Browse cache pre-warmed ({time.time() - t:.2f}s total)")
         except Exception as e:
             print(f"[Startup] Browse pre-warm failed (non-critical): {e}")
+
     asyncio.create_task(_warmup_browse())
 
 
 # ==================== BROWSE ENDPOINTS (ytmusicapi) ====================
+
 
 @api.get("/browse/moods", response_model=BrowseMoodsResponse)
 async def browse_moods():
@@ -891,9 +952,13 @@ async def browse_moods():
         # Parse cached dict into response
         sections = []
         for section_title, cats in cached.items():
-            categories = [BrowseMoodCategory(title=c["title"], params=c["params"]) for c in cats]
-            sections.append(BrowseMoodSection(title=section_title, categories=categories))
-        print(f"[/browse/moods] CACHE HIT ({time.time()-start:.2f}s)")
+            categories = [
+                BrowseMoodCategory(title=c["title"], params=c["params"]) for c in cats
+            ]
+            sections.append(
+                BrowseMoodSection(title=section_title, categories=categories)
+            )
+        print(f"[/browse/moods] CACHE HIT ({time.time() - start:.2f}s)")
         return BrowseMoodsResponse(success=True, sections=sections)
 
     try:
@@ -902,10 +967,16 @@ async def browse_moods():
 
         sections = []
         for section_title, cats in raw.items():
-            categories = [BrowseMoodCategory(title=c["title"], params=c["params"]) for c in cats]
-            sections.append(BrowseMoodSection(title=section_title, categories=categories))
+            categories = [
+                BrowseMoodCategory(title=c["title"], params=c["params"]) for c in cats
+            ]
+            sections.append(
+                BrowseMoodSection(title=section_title, categories=categories)
+            )
 
-        print(f"[/browse/moods] {sum(len(s.categories) for s in sections)} categories ({time.time()-start:.2f}s)")
+        print(
+            f"[/browse/moods] {sum(len(s.categories) for s in sections)} categories ({time.time() - start:.2f}s)"
+        )
         analytics.log_event("browse", detail=json.dumps({"type": "moods"}))
         return BrowseMoodsResponse(success=True, sections=sections)
     except Exception as e:
@@ -922,7 +993,7 @@ async def browse_mood_playlists(params: str):
 
     cached = get_browse_cached(cache_key)
     if cached is not None:
-        print(f"[/browse/mood_playlists] CACHE HIT ({time.time()-start:.2f}s)")
+        print(f"[/browse/mood_playlists] CACHE HIT ({time.time() - start:.2f}s)")
         return cached
 
     try:
@@ -940,18 +1011,24 @@ async def browse_mood_playlists(params: str):
             for t in p.get("thumbnails", []):
                 if isinstance(t, dict) and t.get("url"):
                     thumbs.append(t["url"])
-            playlists.append(BrowsePlaylistItem(
-                playlistId=playlist_id,
-                title=p.get("title", "Unknown"),
-                thumbnails=thumbs,
-                description=p.get("description"),
-                count=p.get("count"),
-                author=p.get("author"),
-            ))
+            playlists.append(
+                BrowsePlaylistItem(
+                    playlistId=playlist_id,
+                    title=p.get("title", "Unknown"),
+                    thumbnails=thumbs,
+                    description=p.get("description"),
+                    count=p.get("count"),
+                    author=p.get("author"),
+                )
+            )
 
-        response = BrowseMoodPlaylistsResponse(success=True, title="", playlists=playlists)
+        response = BrowseMoodPlaylistsResponse(
+            success=True, title="", playlists=playlists
+        )
         set_browse_cache(cache_key, response)
-        print(f"[/browse/mood_playlists] {len(playlists)} playlists ({time.time()-start:.2f}s)")
+        print(
+            f"[/browse/mood_playlists] {len(playlists)} playlists ({time.time() - start:.2f}s)"
+        )
         analytics.log_event("browse", detail=json.dumps({"type": "mood_playlists"}))
         return response
     except Exception as e:
@@ -968,7 +1045,7 @@ async def browse_playlist_detail(playlist_id: str, limit: int = 50):
 
     cached = get_browse_cached(cache_key)
     if cached is not None:
-        print(f"[/browse/playlist] CACHE HIT ({time.time()-start:.2f}s)")
+        print(f"[/browse/playlist] CACHE HIT ({time.time() - start:.2f}s)")
         return cached
 
     try:
@@ -992,19 +1069,23 @@ async def browse_playlist_detail(playlist_id: str, limit: int = 50):
             # Duration
             duration = t.get("duration_seconds")
 
-            tracks.append(BrowsePlaylistTrack(
-                videoId=video_id,
-                title=t.get("title", "Unknown"),
-                duration=duration,
-                thumbnail=thumbnail,
-                uploader=uploader,
-            ))
+            tracks.append(
+                BrowsePlaylistTrack(
+                    videoId=video_id,
+                    title=t.get("title", "Unknown"),
+                    duration=duration,
+                    thumbnail=thumbnail,
+                    uploader=uploader,
+                )
+            )
 
         # Playlist thumbnail
         pl_thumb = None
         pl_thumbs = raw.get("thumbnails", [])
         if pl_thumbs and isinstance(pl_thumbs, list):
-            pl_thumb = pl_thumbs[-1].get("url") if isinstance(pl_thumbs[-1], dict) else None
+            pl_thumb = (
+                pl_thumbs[-1].get("url") if isinstance(pl_thumbs[-1], dict) else None
+            )
 
         response = BrowsePlaylistDetailResponse(
             success=True,
@@ -1015,8 +1096,10 @@ async def browse_playlist_detail(playlist_id: str, limit: int = 50):
             tracks=tracks,
         )
         set_browse_cache(cache_key, response)
-        print(f"[/browse/playlist] {len(tracks)} tracks ({time.time()-start:.2f}s)")
-        analytics.log_event("browse", video_id=playlist_id, detail=json.dumps({"type": "playlist"}))
+        print(f"[/browse/playlist] {len(tracks)} tracks ({time.time() - start:.2f}s)")
+        analytics.log_event(
+            "browse", video_id=playlist_id, detail=json.dumps({"type": "playlist"})
+        )
         return response
     except Exception as e:
         print(f"[/browse/playlist] ERROR: {e}")
@@ -1032,7 +1115,7 @@ async def browse_charts(country: str = "ZZ"):
 
     cached = get_browse_cached(cache_key)
     if cached is not None:
-        print(f"[/browse/charts] CACHE HIT ({time.time()-start:.2f}s)")
+        print(f"[/browse/charts] CACHE HIT ({time.time() - start:.2f}s)")
         return cached
 
     try:
@@ -1057,7 +1140,9 @@ async def browse_charts(country: str = "ZZ"):
                 if not pid or pid.startswith("OLAK"):
                     continue
                 try:
-                    print(f"[/browse/charts] Fetching '{entry.get('title', '')}' ({pid})")
+                    print(
+                        f"[/browse/charts] Fetching '{entry.get('title', '')}' ({pid})"
+                    )
                     pl = await asyncio.to_thread(_ytmusic.get_playlist, pid, 50)
                     tracks_raw = pl.get("tracks") or []
                     if tracks_raw:
@@ -1085,7 +1170,9 @@ async def browse_charts(country: str = "ZZ"):
             thumbnail = None
             thumbs = track.get("thumbnails") or []
             if thumbs and isinstance(thumbs, list):
-                thumbnail = thumbs[-1].get("url") if isinstance(thumbs[-1], dict) else None
+                thumbnail = (
+                    thumbs[-1].get("url") if isinstance(thumbs[-1], dict) else None
+                )
 
             # Get artist
             uploader = None
@@ -1093,19 +1180,23 @@ async def browse_charts(country: str = "ZZ"):
             if artists and isinstance(artists, list) and isinstance(artists[0], dict):
                 uploader = artists[0].get("name")
 
-            songs.append(BrowseChartTrack(
-                videoId=video_id,
-                title=track.get("title", "Unknown"),
-                duration=track.get("duration_seconds"),
-                thumbnail=thumbnail,
-                uploader=uploader,
-                rank=idx + 1,
-            ))
+            songs.append(
+                BrowseChartTrack(
+                    videoId=video_id,
+                    title=track.get("title", "Unknown"),
+                    duration=track.get("duration_seconds"),
+                    thumbnail=thumbnail,
+                    uploader=uploader,
+                    rank=idx + 1,
+                )
+            )
 
         response = BrowseChartsResponse(success=True, country=country, songs=songs)
         set_browse_cache(cache_key, response)
-        print(f"[/browse/charts] {len(songs)} songs ({time.time()-start:.2f}s)")
-        analytics.log_event("browse", detail=json.dumps({"type": "charts", "country": country}))
+        print(f"[/browse/charts] {len(songs)} songs ({time.time() - start:.2f}s)")
+        analytics.log_event(
+            "browse", detail=json.dumps({"type": "charts", "country": country})
+        )
         return response
     except Exception as e:
         print(f"[/browse/charts] ERROR: {e}")
@@ -1135,18 +1226,28 @@ def _parse_lrc(lrc_text: str) -> List[LyricsLine]:
     entries.sort(key=lambda x: x["startMs"])
     result = []
     for i, entry in enumerate(entries):
-        end_ms = entries[i + 1]["startMs"] if i + 1 < len(entries) else entry["startMs"] + 5000
-        result.append(LyricsLine(text=entry["text"], startMs=entry["startMs"], endMs=end_ms))
+        end_ms = (
+            entries[i + 1]["startMs"]
+            if i + 1 < len(entries)
+            else entry["startMs"] + 5000
+        )
+        result.append(
+            LyricsLine(text=entry["text"], startMs=entry["startMs"], endMs=end_ms)
+        )
     return result
 
 
-async def _lrclib_request(client: httpx.AsyncClient, url: str, params: dict, lrclib_down: list) -> Optional[httpx.Response]:
+async def _lrclib_request(
+    client: httpx.AsyncClient, url: str, params: dict, lrclib_down: list
+) -> Optional[httpx.Response]:
     """Make an LRCLIB request with 1 retry, early exit if LRCLIB is down"""
     if lrclib_down[0]:
         return None
     for attempt in range(2):
         try:
-            resp = await client.get(url, params=params, headers={"User-Agent": "AudioSync/1.0"})
+            resp = await client.get(
+                url, params=params, headers={"User-Agent": "AudioSync/1.0"}
+            )
             if resp.status_code == 200:
                 return resp
             return None  # 404 or other status — don't retry, LRCLIB is reachable
@@ -1161,10 +1262,14 @@ async def _lrclib_request(client: httpx.AsyncClient, url: str, params: dict, lrc
     return None
 
 
-async def _fetch_lrclib(title: str, artist: str, duration_secs: int = 0) -> Optional[dict]:
+async def _fetch_lrclib(
+    title: str, artist: str, duration_secs: int = 0
+) -> Optional[dict]:
     """Fetch synced lyrics from LRCLIB as fallback"""
     # Strip parenthetical suffixes like (From "Movie") for cleaner matching
-    clean_title = re.sub(r'\s*\(From\s+"[^"]*"\)', '', title, flags=re.IGNORECASE).strip()
+    clean_title = re.sub(
+        r'\s*\(From\s+"[^"]*"\)', "", title, flags=re.IGNORECASE
+    ).strip()
     # Handle pipe-separated titles like "SONG NAME | VIDEO SONG | ARTIST"
     if "|" in clean_title:
         clean_title = clean_title.split("|")[0].strip()
@@ -1176,8 +1281,16 @@ async def _fetch_lrclib(title: str, artist: str, duration_secs: int = 0) -> Opti
             # Try exact match first if we have duration
             if duration_secs > 0:
                 for t in titles:
-                    resp = await _lrclib_request(client, "https://lrclib.net/api/get",
-                        {"track_name": t, "artist_name": artist, "duration": duration_secs}, lrclib_down)
+                    resp = await _lrclib_request(
+                        client,
+                        "https://lrclib.net/api/get",
+                        {
+                            "track_name": t,
+                            "artist_name": artist,
+                            "duration": duration_secs,
+                        },
+                        lrclib_down,
+                    )
                     if resp:
                         data = resp.json()
                         if data.get("syncedLyrics"):
@@ -1185,8 +1298,12 @@ async def _fetch_lrclib(title: str, artist: str, duration_secs: int = 0) -> Opti
 
             # Search with artist
             for t in titles:
-                resp = await _lrclib_request(client, "https://lrclib.net/api/search",
-                    {"track_name": t, "artist_name": artist}, lrclib_down)
+                resp = await _lrclib_request(
+                    client,
+                    "https://lrclib.net/api/search",
+                    {"track_name": t, "artist_name": artist},
+                    lrclib_down,
+                )
                 if resp:
                     for r in resp.json():
                         if r.get("syncedLyrics"):
@@ -1194,8 +1311,12 @@ async def _fetch_lrclib(title: str, artist: str, duration_secs: int = 0) -> Opti
 
             # Fallback: search with title only (no artist) for better matching
             for t in titles:
-                resp = await _lrclib_request(client, "https://lrclib.net/api/search",
-                    {"track_name": t}, lrclib_down)
+                resp = await _lrclib_request(
+                    client,
+                    "https://lrclib.net/api/search",
+                    {"track_name": t},
+                    lrclib_down,
+                )
                 if resp:
                     results = resp.json()
                     for r in results:
@@ -1218,7 +1339,7 @@ async def get_lyrics_endpoint(video_id: str):
 
     cached = get_browse_cached(cache_key)
     if cached is not None:
-        print(f"[/lyrics] CACHE HIT ({time.time()-start:.2f}s)")
+        print(f"[/lyrics] CACHE HIT ({time.time() - start:.2f}s)")
         return cached
 
     try:
@@ -1252,7 +1373,9 @@ async def get_lyrics_endpoint(video_id: str):
 
         if lyrics_browse_id:
             try:
-                raw_lyrics = await asyncio.to_thread(_ytmusic.get_lyrics, lyrics_browse_id, True)
+                raw_lyrics = await asyncio.to_thread(
+                    _ytmusic.get_lyrics, lyrics_browse_id, True
+                )
                 if raw_lyrics and raw_lyrics.get("lyrics"):
                     source = raw_lyrics.get("source", "")
                     has_timestamps = raw_lyrics.get("hasTimestamps", False)
@@ -1260,20 +1383,28 @@ async def get_lyrics_endpoint(video_id: str):
 
                     if has_timestamps and isinstance(lyrics_data, list):
                         for entry in lyrics_data:
-                            lines.append(LyricsLine(
-                                text=getattr(entry, "text", ""),
-                                startMs=int(getattr(entry, "start_time", 0)),
-                                endMs=int(getattr(entry, "end_time", 0)),
-                            ))
+                            lines.append(
+                                LyricsLine(
+                                    text=getattr(entry, "text", ""),
+                                    startMs=int(getattr(entry, "start_time", 0)),
+                                    endMs=int(getattr(entry, "end_time", 0)),
+                                )
+                            )
                     elif isinstance(lyrics_data, str):
                         plain_lyrics = lyrics_data
             except Exception as yt_err:
-                print(f"[/lyrics] YTMusic get_lyrics error: {yt_err}, falling back to LRCLIB")
+                print(
+                    f"[/lyrics] YTMusic get_lyrics error: {yt_err}, falling back to LRCLIB"
+                )
 
         # Step 3: Fallback to LRCLIB if no timed lyrics from YouTube Music
         if not lines and track_title:
-            print(f"[/lyrics] YTMusic no timed lyrics, trying LRCLIB for '{track_title}' - '{track_artist}'")
-            lrclib_data = await _fetch_lrclib(track_title, track_artist, track_duration_secs)
+            print(
+                f"[/lyrics] YTMusic no timed lyrics, trying LRCLIB for '{track_title}' - '{track_artist}'"
+            )
+            lrclib_data = await _fetch_lrclib(
+                track_title, track_artist, track_duration_secs
+            )
             if lrclib_data:
                 synced = lrclib_data.get("syncedLyrics")
                 if synced:
@@ -1286,14 +1417,16 @@ async def get_lyrics_endpoint(video_id: str):
                     if plain_text:
                         plain_lyrics = plain_text
                         source = "LRCLIB"
-                        print(f"[/lyrics] LRCLIB: plain lyrics ({len(plain_text)} chars)")
+                        print(
+                            f"[/lyrics] LRCLIB: plain lyrics ({len(plain_text)} chars)"
+                        )
 
         if not lines and not plain_lyrics:
-            print(f"[/lyrics] No lyrics found ({time.time()-start:.2f}s)")
+            print(f"[/lyrics] No lyrics found ({time.time() - start:.2f}s)")
             return LyricsResponse(
                 success=False,
                 videoId=video_id,
-                error="No lyrics available for this song"
+                error="No lyrics available for this song",
             )
 
         response = LyricsResponse(
@@ -1305,8 +1438,14 @@ async def get_lyrics_endpoint(video_id: str):
             source=source,
         )
         set_browse_cache(cache_key, response, ttl=86400)  # Cache for 24 hours
-        print(f"[/lyrics] {len(lines)} timed lines, source={source} ({time.time()-start:.2f}s)")
-        analytics.log_event("lyrics_fetch", video_id=video_id, detail=json.dumps({"source": source, "lines": len(lines)}))
+        print(
+            f"[/lyrics] {len(lines)} timed lines, source={source} ({time.time() - start:.2f}s)"
+        )
+        analytics.log_event(
+            "lyrics_fetch",
+            video_id=video_id,
+            detail=json.dumps({"source": source, "lines": len(lines)}),
+        )
         return response
 
     except Exception as e:
@@ -1319,12 +1458,17 @@ async def cache_stats():
     """Get cache statistics"""
     now = time.time()
     valid_urls = sum(1 for v in _cache.values() if now - v["timestamp"] < CACHE_TTL)
-    valid_suggestions = sum(1 for v in _suggestions_cache.values() if now - v["timestamp"] < CACHE_TTL)
+    valid_suggestions = sum(
+        1 for v in _suggestions_cache.values() if now - v["timestamp"] < CACHE_TTL
+    )
     return {
         "url_cache": {"total": len(_cache), "valid": valid_urls},
-        "suggestions_cache": {"total": len(_suggestions_cache), "valid": valid_suggestions},
+        "suggestions_cache": {
+            "total": len(_suggestions_cache),
+            "valid": valid_suggestions,
+        },
         "cache_ttl_hours": CACHE_TTL / 3600,
-        "cached_video_ids": list(_cache.keys())[:20]
+        "cached_video_ids": list(_cache.keys())[:20],
     }
 
 
@@ -1341,11 +1485,16 @@ async def cache_clear():
 @api.post("/ytdlp/reset")
 async def ytdlp_reset():
     """Reset the reusable yt-dlp instance (forces re-download of player JS)"""
+
     def _reset():
         with _ydl_audio_lock:
             _reset_audio_ydl()
+
     await asyncio.to_thread(_reset)
-    return {"status": "reset", "message": "yt-dlp instance reset. Next request will re-download player JS."}
+    return {
+        "status": "reset",
+        "message": "yt-dlp instance reset. Next request will re-download player JS.",
+    }
 
 
 def _check_update_logic(versionCode: int, versionName: str = ""):
@@ -1384,20 +1533,24 @@ async def check_update_legacy(versionCode: int, versionName: str = ""):
 async def list_rooms():
     """List all active rooms for discovery"""
     rooms = room_manager.list_rooms()
-    return RoomListResponse(
-        success=True,
-        rooms=[RoomListItem(**r) for r in rooms]
-    )
+    return RoomListResponse(success=True, rooms=[RoomListItem(**r) for r in rooms])
 
 
 # ==================== SHARE ENDPOINTS ====================
+
 
 @app.get("/share/song/{video_id}", response_class=HTMLResponse)
 async def share_song_page(video_id: str, request: Request):
     """HTML page with Open Graph tags for song link previews."""
     result = await extract_audio_url(video_id)
-    title = result.get("title", "Unknown Song") if result.get("success") else "Unknown Song"
-    uploader = result.get("uploader", "Unknown Artist") if result.get("success") else "Unknown Artist"
+    title = (
+        result.get("title", "Unknown Song") if result.get("success") else "Unknown Song"
+    )
+    uploader = (
+        result.get("uploader", "Unknown Artist")
+        if result.get("success")
+        else "Unknown Artist"
+    )
     thumbnail = result.get("thumbnail", "") if result.get("success") else ""
     duration = result.get("duration")
     duration_str = f"{duration // 60}:{duration % 60:02d}" if duration else ""
@@ -1441,17 +1594,22 @@ async def share_song_page(video_id: str, request: Request):
 
 
 @app.get("/share/room/{room_code}", response_class=HTMLResponse)
-async def share_room_page(room_code: str, request: Request, invite: Optional[str] = None):
+async def share_room_page(
+    room_code: str, request: Request, invite: Optional[str] = None
+):
     """HTML page with Open Graph tags for room invite link previews."""
     room = room_manager.rooms.get(room_code.upper())
 
     if not room:
-        return HTMLResponse(content=f"""<!DOCTYPE html>
+        return HTMLResponse(
+            content=f"""<!DOCTYPE html>
 <html>
 <head><meta charset="utf-8"><title>AudioSync</title>
 <style>body {{ background: #121212; color: #fff; font-family: sans-serif; display: flex; justify-content: center; align-items: center; min-height: 100vh; margin: 0; }}
 .card {{ background: #1e1e1e; border-radius: 16px; padding: 32px; text-align: center; }} .btn {{ display: inline-block; background: #1DB954; color: #fff; padding: 12px 32px; border-radius: 24px; text-decoration: none; font-weight: bold; margin-top: 16px; }}</style>
-</head><body><div class="card"><h2>Room Not Available</h2><p style="color:#888">This room no longer exists or has been closed.</p></div></body></html>""", status_code=200)
+</head><body><div class="card"><h2>Room Not Available</h2><p style="color:#888">This room no longer exists or has been closed.</p></div></body></html>""",
+            status_code=200,
+        )
 
     host_name = room.host_name
     member_count = len(room.members)
@@ -1507,12 +1665,15 @@ async def get_room_info(room_code: str):
         "memberCount": len(room.members),
         "hasPassword": room.password is not None,
         "currentSong": room.current_song.get("title") if room.current_song else None,
-        "currentSongThumbnail": room.current_song.get("thumbnail") if room.current_song else None,
+        "currentSongThumbnail": room.current_song.get("thumbnail")
+        if room.current_song
+        else None,
     }
 
 
 class InviteRequest(BaseModel):
     clientId: str
+
 
 @api.post("/room/{room_code}/invite")
 async def create_room_invite(room_code: str, req: InviteRequest):
@@ -1531,6 +1692,7 @@ async def create_room_invite(room_code: str, req: InviteRequest):
 PLAYLISTS_FILE = os.path.join(os.path.dirname(__file__), "shared_playlists.json")
 shared_playlists: dict = {}
 
+
 def _load_shared_playlists():
     global shared_playlists
     if os.path.exists(PLAYLISTS_FILE):
@@ -1542,12 +1704,14 @@ def _load_shared_playlists():
             print(f"[SharedPlaylists] Failed to load: {e}")
             shared_playlists = {}
 
+
 def _save_shared_playlists():
     try:
         with open(PLAYLISTS_FILE, "w") as f:
             json.dump(shared_playlists, f)
     except Exception as e:
         print(f"[SharedPlaylists] Failed to save: {e}")
+
 
 _load_shared_playlists()
 
@@ -1560,10 +1724,12 @@ class SharedPlaylistSong(BaseModel):
     thumbnail: Optional[str] = None
     position: int
 
+
 class SharePlaylistRequest(BaseModel):
     name: str
     canEdit: bool = False
     songs: List[SharedPlaylistSong]
+
 
 class UpdatePlaylistRequest(BaseModel):
     name: str
@@ -1588,7 +1754,12 @@ async def create_shared_playlist(req: SharePlaylistRequest):
         "updatedAt": now,
     }
     _save_shared_playlists()
-    analytics.log_event("playlist_share", detail=json.dumps({"shareId": share_id, "songs": len(req.songs), "canEdit": req.canEdit}))
+    analytics.log_event(
+        "playlist_share",
+        detail=json.dumps(
+            {"shareId": share_id, "songs": len(req.songs), "canEdit": req.canEdit}
+        ),
+    )
 
     return {"shareId": share_id, "ownerToken": owner_token, "version": 1}
 
@@ -1610,7 +1781,9 @@ async def get_shared_playlist(share_id: str):
 
 
 @api.put("/playlist/{share_id}")
-async def update_shared_playlist(share_id: str, req: UpdatePlaylistRequest, request: Request):
+async def update_shared_playlist(
+    share_id: str, req: UpdatePlaylistRequest, request: Request
+):
     """Update shared playlist songs. Requires ownerToken if canEdit is false."""
     playlist = shared_playlists.get(share_id)
     if not playlist:
@@ -1627,7 +1800,16 @@ async def update_shared_playlist(share_id: str, req: UpdatePlaylistRequest, requ
     playlist["version"] += 1
     playlist["updatedAt"] = time.time()
     _save_shared_playlists()
-    analytics.log_event("playlist_update", detail=json.dumps({"shareId": share_id, "version": playlist["version"], "songs": len(req.songs)}))
+    analytics.log_event(
+        "playlist_update",
+        detail=json.dumps(
+            {
+                "shareId": share_id,
+                "version": playlist["version"],
+                "songs": len(req.songs),
+            }
+        ),
+    )
 
     return {"version": playlist["version"]}
 
@@ -1652,15 +1834,22 @@ async def share_playlist_page(share_id: str, request: Request):
     playlist = shared_playlists.get(share_id)
 
     if not playlist:
-        return HTMLResponse(content=f"""<!DOCTYPE html>
+        return HTMLResponse(
+            content=f"""<!DOCTYPE html>
 <html><head><meta charset="utf-8"><title>AudioSync</title>
 <style>body {{ background: #121212; color: #fff; font-family: sans-serif; display: flex; justify-content: center; align-items: center; min-height: 100vh; margin: 0; }}
 .card {{ background: #1e1e1e; border-radius: 16px; padding: 32px; text-align: center; }}</style>
-</head><body><div class="card"><h2>Playlist Not Found</h2><p style="color:#888">This shared playlist no longer exists.</p></div></body></html>""", status_code=200)
+</head><body><div class="card"><h2>Playlist Not Found</h2><p style="color:#888">This shared playlist no longer exists.</p></div></body></html>""",
+            status_code=200,
+        )
 
     name = playlist["name"]
     song_count = len(playlist["songs"])
-    thumbnail = playlist["songs"][0]["thumbnail"] if playlist["songs"] and playlist["songs"][0].get("thumbnail") else ""
+    thumbnail = (
+        playlist["songs"][0]["thumbnail"]
+        if playlist["songs"] and playlist["songs"][0].get("thumbnail")
+        else ""
+    )
     description = f"{song_count} {'song' if song_count == 1 else 'songs'}"
 
     if playlist["songs"]:
@@ -1722,7 +1911,7 @@ async def extract_audio_url(video_id: str) -> dict:
             "duration": piped_result.get("duration"),
             "thumbnail": piped_result.get("thumbnail"),
             "uploader": piped_result.get("uploader"),
-            "source": "piped"
+            "source": "piped",
         }
         set_cache(video_id, result)
         return result
@@ -1738,16 +1927,12 @@ async def extract_audio_url(video_id: str) -> dict:
             "duration": ytdlp_result.duration,
             "thumbnail": ytdlp_result.thumbnail,
             "uploader": ytdlp_result.uploader,
-            "source": "ytdlp"
+            "source": "ytdlp",
         }
         set_cache(video_id, result)
         return result
 
-    return {
-        "success": False,
-        "videoId": video_id,
-        "error": ytdlp_result.error
-    }
+    return {"success": False, "videoId": video_id, "error": ytdlp_result.error}
 
 
 @api.get("/audio/{video_id}", response_model=AudioResponse)
@@ -1765,8 +1950,14 @@ async def get_audio(video_id: str, fresh: bool = False):
 
     result = await extract_audio_url(video_id)
     source = result.get("source", "unknown")
-    print(f"[/audio] {video_id} → {source} ({time.time()-start:.2f}s)")
-    analytics.log_event("audio_extract", video_id=video_id, detail=json.dumps({"source": source, "time_ms": round((time.time()-start)*1000)}))
+    print(f"[/audio] {video_id} → {source} ({time.time() - start:.2f}s)")
+    analytics.log_event(
+        "audio_extract",
+        video_id=video_id,
+        detail=json.dumps(
+            {"source": source, "time_ms": round((time.time() - start) * 1000)}
+        ),
+    )
 
     return AudioResponse(**result)
 
@@ -1790,45 +1981,67 @@ async def get_stream(video_id: str, include_suggestions: bool = True):
         if include_suggestions:
             cached_sug = get_cached_suggestions(video_id)
             if cached_sug:
-                suggestions = [
-                    StreamSuggestion(**r) for r in cached_sug[:50]
-                ]
-                print(f"[/stream] {video_id} → FULL CACHE HIT ({time.time()-start:.2f}s)")
+                suggestions = [StreamSuggestion(**r) for r in cached_sug[:50]]
+                print(
+                    f"[/stream] {video_id} → FULL CACHE HIT ({time.time() - start:.2f}s)"
+                )
             else:
                 t1 = time.time()
                 related_response = await get_related_ytdlp(video_id, limit=50)
-                print(f"[/stream] {video_id} → suggestions fetch: {time.time()-t1:.2f}s")
+                print(
+                    f"[/stream] {video_id} → suggestions fetch: {time.time() - t1:.2f}s"
+                )
                 if related_response.success:
                     suggestions = [
                         StreamSuggestion(
-                            videoId=r.videoId, title=r.title, duration=r.duration,
-                            thumbnail=r.thumbnail, uploader=r.uploader
-                        ) for r in related_response.related
+                            videoId=r.videoId,
+                            title=r.title,
+                            duration=r.duration,
+                            thumbnail=r.thumbnail,
+                            uploader=r.uploader,
+                        )
+                        for r in related_response.related
                     ]
-                    set_suggestions_cache(video_id, [r.model_dump() for r in related_response.related])
-        print(f"[/stream] {video_id} → CACHE HIT + {len(suggestions)} suggestions ({time.time()-start:.2f}s)")
-        analytics.log_event("song_play", video_id=video_id, title=cached.get("title"), detail=json.dumps({"source": "cache"}))
+                    set_suggestions_cache(
+                        video_id, [r.model_dump() for r in related_response.related]
+                    )
+        print(
+            f"[/stream] {video_id} → CACHE HIT + {len(suggestions)} suggestions ({time.time() - start:.2f}s)"
+        )
+        analytics.log_event(
+            "song_play",
+            video_id=video_id,
+            title=cached.get("title"),
+            detail=json.dumps({"source": "cache"}),
+        )
         return StreamResponse(
-            success=True, videoId=video_id, audioUrl=cached["url"],
-            title=cached.get("title"), duration=cached.get("duration"),
-            thumbnail=cached.get("thumbnail"), uploader=cached.get("uploader"),
-            suggestions=suggestions
+            success=True,
+            videoId=video_id,
+            audioUrl=cached["url"],
+            title=cached.get("title"),
+            duration=cached.get("duration"),
+            thumbnail=cached.get("thumbnail"),
+            uploader=cached.get("uploader"),
+            suggestions=suggestions,
         )
 
     # Try Piped first (fast, includes related videos)
     piped_result = await get_from_piped(video_id)
     if piped_result and piped_result.get("url"):
         # Cache it
-        set_cache(video_id, {
-            "success": True,
-            "videoId": video_id,
-            "url": piped_result["url"],
-            "title": piped_result.get("title"),
-            "duration": piped_result.get("duration"),
-            "thumbnail": piped_result.get("thumbnail"),
-            "uploader": piped_result.get("uploader"),
-            "source": "piped"
-        })
+        set_cache(
+            video_id,
+            {
+                "success": True,
+                "videoId": video_id,
+                "url": piped_result["url"],
+                "title": piped_result.get("title"),
+                "duration": piped_result.get("duration"),
+                "thumbnail": piped_result.get("thumbnail"),
+                "uploader": piped_result.get("uploader"),
+                "source": "piped",
+            },
+        )
 
         # Get suggestions from Piped response
         if include_suggestions and piped_result.get("related"):
@@ -1838,11 +2051,17 @@ async def get_stream(video_id: str, include_suggestions: bool = True):
                     title=r["title"],
                     duration=r.get("duration"),
                     thumbnail=r.get("thumbnail"),
-                    uploader=r.get("uploader")
-                ) for r in piped_result["related"][:50]
+                    uploader=r.get("uploader"),
+                )
+                for r in piped_result["related"][:50]
             ]
 
-        analytics.log_event("song_play", video_id=video_id, title=piped_result.get("title"), detail=json.dumps({"source": "piped"}))
+        analytics.log_event(
+            "song_play",
+            video_id=video_id,
+            title=piped_result.get("title"),
+            detail=json.dumps({"source": "piped"}),
+        )
         return StreamResponse(
             success=True,
             videoId=video_id,
@@ -1851,33 +2070,35 @@ async def get_stream(video_id: str, include_suggestions: bool = True):
             duration=piped_result.get("duration"),
             thumbnail=piped_result.get("thumbnail"),
             uploader=piped_result.get("uploader"),
-            suggestions=suggestions
+            suggestions=suggestions,
         )
 
     # Fallback to yt-dlp - fetch audio + suggestions IN PARALLEL
     t1 = time.time()
     if include_suggestions:
         ytdlp_result, related_response = await asyncio.gather(
-            get_audio_ytdlp(video_id),
-            get_related_ytdlp(video_id, limit=50)
+            get_audio_ytdlp(video_id), get_related_ytdlp(video_id, limit=50)
         )
     else:
         ytdlp_result = await get_audio_ytdlp(video_id)
         related_response = None
-    print(f"[/stream] {video_id} → yt-dlp parallel fetch: {time.time()-t1:.2f}s")
+    print(f"[/stream] {video_id} → yt-dlp parallel fetch: {time.time() - t1:.2f}s")
 
     if ytdlp_result.success and ytdlp_result.url:
         # Cache yt-dlp result
-        set_cache(video_id, {
-            "success": True,
-            "videoId": video_id,
-            "url": ytdlp_result.url,
-            "title": ytdlp_result.title,
-            "duration": ytdlp_result.duration,
-            "thumbnail": ytdlp_result.thumbnail,
-            "uploader": ytdlp_result.uploader,
-            "source": "ytdlp"
-        })
+        set_cache(
+            video_id,
+            {
+                "success": True,
+                "videoId": video_id,
+                "url": ytdlp_result.url,
+                "title": ytdlp_result.title,
+                "duration": ytdlp_result.duration,
+                "thumbnail": ytdlp_result.thumbnail,
+                "uploader": ytdlp_result.uploader,
+                "source": "ytdlp",
+            },
+        )
 
         # Use suggestions from parallel fetch + cache them
         if related_response and related_response.success:
@@ -1887,13 +2108,23 @@ async def get_stream(video_id: str, include_suggestions: bool = True):
                     title=r.title,
                     duration=r.duration,
                     thumbnail=r.thumbnail,
-                    uploader=r.uploader
-                ) for r in related_response.related
+                    uploader=r.uploader,
+                )
+                for r in related_response.related
             ]
-            set_suggestions_cache(video_id, [r.model_dump() for r in related_response.related])
+            set_suggestions_cache(
+                video_id, [r.model_dump() for r in related_response.related]
+            )
 
-        print(f"[/stream] {video_id} → yt-dlp OK + {len(suggestions)} suggestions ({time.time()-start:.2f}s total)")
-        analytics.log_event("song_play", video_id=video_id, title=ytdlp_result.title, detail=json.dumps({"source": "ytdlp"}))
+        print(
+            f"[/stream] {video_id} → yt-dlp OK + {len(suggestions)} suggestions ({time.time() - start:.2f}s total)"
+        )
+        analytics.log_event(
+            "song_play",
+            video_id=video_id,
+            title=ytdlp_result.title,
+            detail=json.dumps({"source": "ytdlp"}),
+        )
         return StreamResponse(
             success=True,
             videoId=video_id,
@@ -1902,14 +2133,12 @@ async def get_stream(video_id: str, include_suggestions: bool = True):
             duration=ytdlp_result.duration,
             thumbnail=ytdlp_result.thumbnail,
             uploader=ytdlp_result.uploader,
-            suggestions=suggestions
+            suggestions=suggestions,
         )
 
-    print(f"[/stream] {video_id} → FAILED ({time.time()-start:.2f}s)")
+    print(f"[/stream] {video_id} → FAILED ({time.time() - start:.2f}s)")
     return StreamResponse(
-        success=False,
-        videoId=video_id,
-        error="Failed to get stream URL"
+        success=False, videoId=video_id, error="Failed to get stream URL"
     )
 
 
@@ -1925,12 +2154,12 @@ async def get_related(video_id: str, limit: int = 50):
     # Check suggestions cache first
     cached = get_cached_suggestions(video_id)
     if cached:
-        print(f"[/related] {video_id} → CACHE HIT ({time.time()-start:.2f}s)")
+        print(f"[/related] {video_id} → CACHE HIT ({time.time() - start:.2f}s)")
         return RelatedResponse(
             success=True,
             videoId=video_id,
             related=[SearchResult(**r) for r in cached[:limit]],
-            source="cache"
+            source="cache",
         )
 
     # Try Piped first (fast, includes related)
@@ -1938,12 +2167,12 @@ async def get_related(video_id: str, limit: int = 50):
     if piped_result and piped_result.get("related"):
         # Cache suggestions
         set_suggestions_cache(video_id, piped_result["related"])
-        print(f"[/related] {video_id} → PIPED ({time.time()-start:.2f}s)")
+        print(f"[/related] {video_id} → PIPED ({time.time() - start:.2f}s)")
         return RelatedResponse(
             success=True,
             videoId=video_id,
             related=[SearchResult(**r) for r in piped_result["related"][:limit]],
-            source="piped"
+            source="piped",
         )
 
     # Fallback to yt-dlp
@@ -1951,7 +2180,9 @@ async def get_related(video_id: str, limit: int = 50):
     if result.success and result.related:
         # Cache suggestions
         set_suggestions_cache(video_id, [r.model_dump() for r in result.related])
-    print(f"[/related] {video_id} → yt-dlp: {len(result.related)} results ({time.time()-start:.2f}s)")
+    print(
+        f"[/related] {video_id} → yt-dlp: {len(result.related)} results ({time.time() - start:.2f}s)"
+    )
     return result
 
 
@@ -1976,16 +2207,19 @@ async def prefetch_batch(video_ids: str):
         result = await get_from_piped(vid)
         if result and result.get("url"):
             # Cache it
-            set_cache(vid, {
-                "success": True,
-                "videoId": vid,
-                "url": result["url"],
-                "title": result.get("title"),
-                "duration": result.get("duration"),
-                "thumbnail": result.get("thumbnail"),
-                "uploader": result.get("uploader"),
-                "source": "piped"
-            })
+            set_cache(
+                vid,
+                {
+                    "success": True,
+                    "videoId": vid,
+                    "url": result["url"],
+                    "title": result.get("title"),
+                    "duration": result.get("duration"),
+                    "thumbnail": result.get("thumbnail"),
+                    "uploader": result.get("uploader"),
+                    "source": "piped",
+                },
+            )
             return PrefetchResult(videoId=vid, audioUrl=result["url"], success=True)
 
         # Don't fallback to yt-dlp for prefetch (too slow)
@@ -1995,10 +2229,7 @@ async def prefetch_batch(video_ids: str):
     # Fetch all in parallel
     results = await asyncio.gather(*[fetch_one(vid) for vid in ids])
 
-    return PrefetchResponse(
-        success=True,
-        results=list(results)
-    )
+    return PrefetchResponse(success=True, results=list(results))
 
 
 @api.get("/search", response_model=SearchResponse)
@@ -2008,11 +2239,7 @@ async def search(q: str, limit: int = 10):
     print(f"[/search] Request: '{q}'")
 
     if not q or len(q.strip()) == 0:
-        return SearchResponse(
-            success=False,
-            query=q,
-            error="Query cannot be empty"
-        )
+        return SearchResponse(success=False, query=q, error="Query cannot be empty")
 
     def _search_ytdlp():
         ydl_opts = {
@@ -2031,38 +2258,42 @@ async def search(q: str, limit: int = 10):
 
                 if not info or "entries" not in info:
                     return SearchResponse(
-                        success=False,
-                        query=q,
-                        error="No results found"
+                        success=False, query=q, error="No results found"
                     )
 
                 results = []
                 for entry in info["entries"]:
                     if entry:
-                        results.append(SearchResult(
-                            videoId=entry.get("id", ""),
-                            title=entry.get("title", "Unknown"),
-                            duration=entry.get("duration"),
-                            thumbnail=get_best_thumbnail(entry),
-                            uploader=entry.get("uploader") or entry.get("channel", "Unknown"),
-                        ))
+                        results.append(
+                            SearchResult(
+                                videoId=entry.get("id", ""),
+                                title=entry.get("title", "Unknown"),
+                                duration=entry.get("duration"),
+                                thumbnail=get_best_thumbnail(entry),
+                                uploader=entry.get("uploader")
+                                or entry.get("channel", "Unknown"),
+                            )
+                        )
 
-                return SearchResponse(
-                    success=True,
-                    query=q,
-                    results=results
-                )
+                return SearchResponse(success=True, query=q, results=results)
 
         except Exception as e:
-            return SearchResponse(
-                success=False,
-                query=q,
-                error=str(e)
-            )
+            return SearchResponse(success=False, query=q, error=str(e))
 
     result = await asyncio.to_thread(_search_ytdlp)
-    print(f"[/search] '{q}' → {len(result.results)} results ({time.time()-start:.2f}s)")
-    analytics.log_event("search", query=q, detail=json.dumps({"results": len(result.results), "time_ms": round((time.time()-start)*1000)}))
+    print(
+        f"[/search] '{q}' → {len(result.results)} results ({time.time() - start:.2f}s)"
+    )
+    analytics.log_event(
+        "search",
+        query=q,
+        detail=json.dumps(
+            {
+                "results": len(result.results),
+                "time_ms": round((time.time() - start) * 1000),
+            }
+        ),
+    )
     return result
 
 
@@ -2094,13 +2325,23 @@ async def get_next(video_id: str):
                     currentVideoId=video_id,
                     nextSong=NextSongInfo(
                         videoId=next_video_id,
-                        title=next_piped.get("title", first_related.get("title", "Unknown")),
-                        duration=next_piped.get("duration", first_related.get("duration")),
-                        thumbnail=next_piped.get("thumbnail", first_related.get("thumbnail")),
-                        uploader=next_piped.get("uploader", first_related.get("uploader")),
-                        audioUrl=next_piped["url"]
+                        title=next_piped.get(
+                            "title", first_related.get("title", "Unknown")
+                        ),
+                        duration=next_piped.get(
+                            "duration", first_related.get("duration")
+                        ),
+                        thumbnail=next_piped.get(
+                            "thumbnail", first_related.get("thumbnail")
+                        ),
+                        uploader=next_piped.get(
+                            "uploader", first_related.get("uploader")
+                        ),
+                        audioUrl=next_piped["url"],
                     ),
-                    suggestions=[SearchResult(**r) for r in related[1:51]]  # Skip first, next 50
+                    suggestions=[
+                        SearchResult(**r) for r in related[1:51]
+                    ],  # Skip first, next 50
                 )
 
     # Fallback to yt-dlp
@@ -2109,9 +2350,7 @@ async def get_next(video_id: str):
 
     if not related_result.success or not related_result.related:
         return NextResponse(
-            success=False,
-            currentVideoId=video_id,
-            error="No related songs found"
+            success=False, currentVideoId=video_id, error="No related songs found"
         )
 
     # Step 2: Get the first related song
@@ -2120,15 +2359,14 @@ async def get_next(video_id: str):
 
     # Step 3+4: Get audio URL AND suggestions IN PARALLEL
     audio_result, next_suggestions = await asyncio.gather(
-        get_audio_ytdlp(next_video_id),
-        get_related_ytdlp(next_video_id, limit=50)
+        get_audio_ytdlp(next_video_id), get_related_ytdlp(next_video_id, limit=50)
     )
 
     if not audio_result.success or not audio_result.url:
         return NextResponse(
             success=False,
             currentVideoId=video_id,
-            error=f"Failed to get audio URL: {audio_result.error}"
+            error=f"Failed to get audio URL: {audio_result.error}",
         )
 
     return NextResponse(
@@ -2140,13 +2378,14 @@ async def get_next(video_id: str):
             duration=next_song_info.duration,
             thumbnail=next_song_info.thumbnail,
             uploader=next_song_info.uploader,
-            audioUrl=audio_result.url
+            audioUrl=audio_result.url,
         ),
-        suggestions=next_suggestions.related if next_suggestions.success else []
+        suggestions=next_suggestions.related if next_suggestions.success else [],
     )
 
 
 # ==================== WEBSOCKET - LISTEN TOGETHER ====================
+
 
 async def ws_send(websocket: WebSocket, message: dict):
     """Safe send — ignores if connection is closed"""
@@ -2166,16 +2405,29 @@ async def handle_create_room(client_id: str, websocket: WebSocket, msg: dict):
     host_name = msg.get("hostName", "Unknown")
     password = msg.get("password") or None  # treat empty string as None
 
-    room = room_manager.create_room(client_id, websocket, host_name=host_name, password=password)
-    print(f"[WS] Room {room.code} created by {client_id[:8]} ({host_name}), locked={password is not None}")
-    analytics.log_event("room_create", client_id=client_id, client_name=host_name, room_code=room.code, detail=json.dumps({"locked": password is not None}))
-    await ws_send(websocket, {
-        "type": "room_created",
-        "code": room.code,
-        "hostName": host_name,
-        "hasPassword": password is not None,
-        "members": room_manager.get_member_list(room),
-    })
+    room = room_manager.create_room(
+        client_id, websocket, host_name=host_name, password=password
+    )
+    print(
+        f"[WS] Room {room.code} created by {client_id[:8]} ({host_name}), locked={password is not None}"
+    )
+    analytics.log_event(
+        "room_create",
+        client_id=client_id,
+        client_name=host_name,
+        room_code=room.code,
+        detail=json.dumps({"locked": password is not None}),
+    )
+    await ws_send(
+        websocket,
+        {
+            "type": "room_created",
+            "code": room.code,
+            "hostName": host_name,
+            "hasPassword": password is not None,
+            "members": room_manager.get_member_list(room),
+        },
+    )
 
 
 async def handle_join_room(client_id: str, websocket: WebSocket, msg: dict):
@@ -2192,11 +2444,14 @@ async def handle_join_room(client_id: str, websocket: WebSocket, msg: dict):
     elif old_code:
         old_room = room_manager.rooms.get(old_code)
         if old_room:
-            await room_manager.broadcast(old_room, {
-                "type": "member_left",
-                "count": len(old_room.members),
-                "members": room_manager.get_member_list(old_room),
-            })
+            await room_manager.broadcast(
+                old_room,
+                {
+                    "type": "member_left",
+                    "count": len(old_room.members),
+                    "members": room_manager.get_member_list(old_room),
+                },
+            )
 
     # Check room exists first (before joining) to validate password
     room = room_manager.rooms.get(code)
@@ -2218,8 +2473,16 @@ async def handle_join_room(client_id: str, websocket: WebSocket, msg: dict):
     name = msg.get("name", "Unknown")
     room, promoted = room_manager.join_room(code, client_id, websocket, name=name)
     role = "host" if promoted else "guest"
-    print(f"[WS] {client_id[:8]} ({name}) joined room {code} as {role} ({len(room.members)} members)")
-    analytics.log_event("room_join", client_id=client_id, client_name=name, room_code=code, detail=json.dumps({"role": role, "members": len(room.members)}))
+    print(
+        f"[WS] {client_id[:8]} ({name}) joined room {code} as {role} ({len(room.members)} members)"
+    )
+    analytics.log_event(
+        "room_join",
+        client_id=client_id,
+        client_name=name,
+        room_code=code,
+        detail=json.dumps({"role": role, "members": len(room.members)}),
+    )
 
     # Send current room state to the joiner (with personalized queue)
     state = {
@@ -2236,11 +2499,15 @@ async def handle_join_room(client_id: str, websocket: WebSocket, msg: dict):
     await ws_send(websocket, {"type": "room_joined", "state": state})
 
     # Notify others with updated member list
-    await room_manager.broadcast(room, {
-        "type": "member_joined",
-        "count": len(room.members),
-        "members": room_manager.get_member_list(room),
-    }, exclude_id=client_id)
+    await room_manager.broadcast(
+        room,
+        {
+            "type": "member_joined",
+            "count": len(room.members),
+            "members": room_manager.get_member_list(room),
+        },
+        exclude_id=client_id,
+    )
 
 
 async def handle_play(client_id: str, msg: dict):
@@ -2261,25 +2528,36 @@ async def handle_play(client_id: str, msg: dict):
         if top and top.video_id != video_id:
             member = room.members.get(client_id)
             if member:
-                await ws_send(member.websocket, {
-                    "type": "play_blocked",
-                    "reason": "voted_song_pending",
-                    "topVideoId": top.video_id,
-                    "topTitle": top.title,
-                })
+                await ws_send(
+                    member.websocket,
+                    {
+                        "type": "play_blocked",
+                        "reason": "voted_song_pending",
+                        "topVideoId": top.video_id,
+                        "topTitle": top.title,
+                    },
+                )
             return
 
     print(f"[WS] Room {room.code}: host playing {video_id}")
-    analytics.log_event("room_song_change", room_code=room.code, video_id=video_id, title=msg.get("title", ""))
+    analytics.log_event(
+        "room_song_change",
+        room_code=room.code,
+        video_id=video_id,
+        title=msg.get("title", ""),
+    )
     room.songs_played += 1
 
     # Extract audio URL once for everyone
     audio_data = await extract_audio_url(video_id)
     if not audio_data.get("success") or not audio_data.get("url"):
-        await room_manager.broadcast(room, {
-            "type": "error",
-            "message": f"Failed to extract audio: {audio_data.get('error', 'Unknown error')}"
-        })
+        await room_manager.broadcast(
+            room,
+            {
+                "type": "error",
+                "message": f"Failed to extract audio: {audio_data.get('error', 'Unknown error')}",
+            },
+        )
         return
 
     # Update room state
@@ -2297,17 +2575,20 @@ async def handle_play(client_id: str, msg: dict):
 
     # Broadcast to ALL members — each device calculates elapsed time and seeks
     play_start_time = int(time.time() * 1000)
-    await room_manager.broadcast(room, {
-        "type": "sync_play",
-        "videoId": video_id,
-        "title": room.current_song["title"],
-        "audioUrl": audio_data["url"],
-        "thumbnail": room.current_song["thumbnail"],
-        "uploader": room.current_song["uploader"],
-        "duration": room.current_song["duration"],
-        "position": 0,
-        "playStartTime": play_start_time,
-    })
+    await room_manager.broadcast(
+        room,
+        {
+            "type": "sync_play",
+            "videoId": video_id,
+            "title": room.current_song["title"],
+            "audioUrl": audio_data["url"],
+            "thumbnail": room.current_song["thumbnail"],
+            "uploader": room.current_song["uploader"],
+            "duration": room.current_song["duration"],
+            "position": 0,
+            "playStartTime": play_start_time,
+        },
+    )
     await send_fcm_to_disconnected_members(room.code)
 
 
@@ -2323,10 +2604,13 @@ async def handle_pause(client_id: str, msg: dict):
     room.position = position
     print(f"[WS] Room {room.code}: paused at {position:.1f}s")
 
-    await room_manager.broadcast(room, {
-        "type": "sync_pause",
-        "position": position,
-    })
+    await room_manager.broadcast(
+        room,
+        {
+            "type": "sync_pause",
+            "position": position,
+        },
+    )
     await send_fcm_to_disconnected_members(room.code)
 
 
@@ -2345,11 +2629,14 @@ async def handle_resume(client_id: str, msg: dict):
     resume_time = int(time.time() * 1000)
     print(f"[WS] Room {room.code}: resumed at {position:.1f}s")
 
-    await room_manager.broadcast(room, {
-        "type": "sync_resume",
-        "position": position,
-        "resumeTime": resume_time,
-    })
+    await room_manager.broadcast(
+        room,
+        {
+            "type": "sync_resume",
+            "position": position,
+            "resumeTime": resume_time,
+        },
+    )
     await send_fcm_to_disconnected_members(room.code)
 
 
@@ -2366,10 +2653,13 @@ async def handle_seek(client_id: str, msg: dict):
         room.play_start_time = time.time()
     print(f"[WS] Room {room.code}: seek to {position:.1f}s")
 
-    await room_manager.broadcast(room, {
-        "type": "sync_seek",
-        "position": position,
-    })
+    await room_manager.broadcast(
+        room,
+        {
+            "type": "sync_seek",
+            "position": position,
+        },
+    )
     await send_fcm_to_disconnected_members(room.code)
 
 
@@ -2386,7 +2676,9 @@ async def handle_next(client_id: str):
         return
     next_item = sorted_q[0]
     room.queue.remove(next_item)
-    print(f"[WS] Room {room.code}: next → {next_item.video_id} (votes={len(next_item.votes)}, suggestion={next_item.is_suggestion})")
+    print(
+        f"[WS] Room {room.code}: next → {next_item.video_id} (votes={len(next_item.votes)}, suggestion={next_item.is_suggestion})"
+    )
 
     # Broadcast updated queue (personalized)
     await room_manager.broadcast_queue(room)
@@ -2395,15 +2687,23 @@ async def handle_next(client_id: str):
     # We call the play logic directly instead of handle_play to bypass vote-block
     video_id = next_item.video_id
     print(f"[WS] Room {room.code}: host playing {video_id}")
-    analytics.log_event("room_song_change", room_code=room.code, video_id=video_id, title=next_item.title)
+    analytics.log_event(
+        "room_song_change",
+        room_code=room.code,
+        video_id=video_id,
+        title=next_item.title,
+    )
     room.songs_played += 1
 
     audio_data = await extract_audio_url(video_id)
     if not audio_data.get("success") or not audio_data.get("url"):
-        await room_manager.broadcast(room, {
-            "type": "error",
-            "message": f"Failed to extract audio: {audio_data.get('error', 'Unknown error')}"
-        })
+        await room_manager.broadcast(
+            room,
+            {
+                "type": "error",
+                "message": f"Failed to extract audio: {audio_data.get('error', 'Unknown error')}",
+            },
+        )
         return
 
     room.current_song = {
@@ -2419,17 +2719,20 @@ async def handle_next(client_id: str):
     room.play_start_time = time.time()
 
     play_start_time = int(time.time() * 1000)
-    await room_manager.broadcast(room, {
-        "type": "sync_play",
-        "videoId": video_id,
-        "title": room.current_song["title"],
-        "audioUrl": audio_data["url"],
-        "thumbnail": room.current_song["thumbnail"],
-        "uploader": room.current_song["uploader"],
-        "duration": room.current_song["duration"],
-        "position": 0,
-        "playStartTime": play_start_time,
-    })
+    await room_manager.broadcast(
+        room,
+        {
+            "type": "sync_play",
+            "videoId": video_id,
+            "title": room.current_song["title"],
+            "audioUrl": audio_data["url"],
+            "thumbnail": room.current_song["thumbnail"],
+            "uploader": room.current_song["uploader"],
+            "duration": room.current_song["duration"],
+            "position": 0,
+            "playStartTime": play_start_time,
+        },
+    )
     await send_fcm_to_disconnected_members(room.code)
 
 
@@ -2442,21 +2745,24 @@ async def handle_queue_update(client_id: str, msg: dict):
 
     # Preserve existing requests, only replace suggestions
     from room_manager import QueueItem
+
     requests = [q for q in room.queue if not q.is_suggestion]
     new_suggestions = []
     for item in msg.get("queue", []):
-        new_suggestions.append(QueueItem(
-            video_id=item.get("videoId", ""),
-            title=item.get("title", "Unknown"),
-            duration=item.get("duration", 0),
-            thumbnail=item.get("thumbnail", ""),
-            uploader=item.get("uploader", ""),
-            requested_by=client_id,
-            requested_by_name=room.host_name,
-            votes=set(),
-            timestamp=time.time(),
-            is_suggestion=True,
-        ))
+        new_suggestions.append(
+            QueueItem(
+                video_id=item.get("videoId", ""),
+                title=item.get("title", "Unknown"),
+                duration=item.get("duration", 0),
+                thumbnail=item.get("thumbnail", ""),
+                uploader=item.get("uploader", ""),
+                requested_by=client_id,
+                requested_by_name=room.host_name,
+                votes=set(),
+                timestamp=time.time(),
+                is_suggestion=True,
+            )
+        )
     room.queue = requests + new_suggestions
     await room_manager.broadcast_queue(room)
 
@@ -2474,10 +2780,14 @@ async def handle_position_report(client_id: str, msg: dict):
         room.play_start_time = time.time()
 
     # Broadcast position to guests for drift correction
-    await room_manager.broadcast(room, {
-        "type": "sync_seek",
-        "position": position,
-    }, exclude_id=client_id)
+    await room_manager.broadcast(
+        room,
+        {
+            "type": "sync_seek",
+            "position": position,
+        },
+        exclude_id=client_id,
+    )
 
 
 async def handle_chat_message(client_id: str, msg: dict):
@@ -2490,13 +2800,16 @@ async def handle_chat_message(client_id: str, msg: dict):
     member = room.members.get(client_id)
     if not member:
         return
-    await room_manager.broadcast(room, {
-        "type": "chat_message",
-        "senderClientId": client_id,
-        "senderName": member.name,
-        "text": text,
-        "timestamp": int(time.time() * 1000),
-    })
+    await room_manager.broadcast(
+        room,
+        {
+            "type": "chat_message",
+            "senderClientId": client_id,
+            "senderName": member.name,
+            "text": text,
+            "timestamp": int(time.time() * 1000),
+        },
+    )
     await send_fcm_to_disconnected_members(room.code)
 
 
@@ -2520,6 +2833,7 @@ async def handle_song_request(client_id: str, msg: dict):
         return
 
     from room_manager import QueueItem
+
     item = QueueItem(
         video_id=video_id,
         title=msg.get("title", "Unknown"),
@@ -2534,23 +2848,33 @@ async def handle_song_request(client_id: str, msg: dict):
     )
     room.queue.append(item)
     print(f"[WS] Room {room.code}: {member.name} requested '{item.title}'")
-    analytics.log_event("song_request", client_id=client_id, client_name=member.name, room_code=room.code, video_id=video_id, title=item.title)
+    analytics.log_event(
+        "song_request",
+        client_id=client_id,
+        client_name=member.name,
+        room_code=room.code,
+        video_id=video_id,
+        title=item.title,
+    )
 
     # Broadcast updated queue (personalized)
     await room_manager.broadcast_queue(room)
 
     # Broadcast chat message about the suggestion (includes song metadata for card UI)
-    await room_manager.broadcast(room, {
-        "type": "chat_message",
-        "senderClientId": client_id,
-        "senderName": member.name,
-        "text": f"suggested \"{item.title}\"",
-        "timestamp": int(time.time() * 1000),
-        "isSuggestion": True,
-        "suggestionTitle": item.title,
-        "suggestionThumbnail": item.thumbnail,
-        "suggestionUploader": item.uploader,
-    })
+    await room_manager.broadcast(
+        room,
+        {
+            "type": "chat_message",
+            "senderClientId": client_id,
+            "senderName": member.name,
+            "text": f'suggested "{item.title}"',
+            "timestamp": int(time.time() * 1000),
+            "isSuggestion": True,
+            "suggestionTitle": item.title,
+            "suggestionThumbnail": item.thumbnail,
+            "suggestionUploader": item.uploader,
+        },
+    )
 
 
 async def handle_vote_song(client_id: str, msg: dict):
@@ -2608,16 +2932,21 @@ async def handle_kick_member(client_id: str, msg: dict):
     print(f"[WS] Host {client_id[:8]} kicked {target_id[:8]} from room {room.code}")
     # Notify kicked client and close their connection
     try:
-        await ws_send(target_ws, {"type": "kicked", "message": "You were removed from the room"})
+        await ws_send(
+            target_ws, {"type": "kicked", "message": "You were removed from the room"}
+        )
         await target_ws.close()
     except Exception:
         pass
     # Broadcast updated member list to remaining members
-    await room_manager.broadcast(room, {
-        "type": "member_left",
-        "count": len(room.members),
-        "members": room_manager.get_member_list(room),
-    })
+    await room_manager.broadcast(
+        room,
+        {
+            "type": "member_left",
+            "count": len(room.members),
+            "members": room_manager.get_member_list(room),
+        },
+    )
 
 
 async def handle_share_lyrics(client_id: str, msg: dict):
@@ -2629,15 +2958,18 @@ async def handle_share_lyrics(client_id: str, msg: dict):
     if not video_id:
         return
     # Broadcast lyrics to all members (including host for consistency)
-    await room_manager.broadcast(room, {
-        "type": "sync_lyrics",
-        "videoId": video_id,
-        "success": msg.get("success", False),
-        "hasTimestamps": msg.get("hasTimestamps", False),
-        "lines": msg.get("lines", []),
-        "plainLyrics": msg.get("plainLyrics"),
-        "source": msg.get("source"),
-    })
+    await room_manager.broadcast(
+        room,
+        {
+            "type": "sync_lyrics",
+            "videoId": video_id,
+            "success": msg.get("success", False),
+            "hasTimestamps": msg.get("hasTimestamps", False),
+            "lines": msg.get("lines", []),
+            "plainLyrics": msg.get("plainLyrics"),
+            "source": msg.get("source"),
+        },
+    )
 
 
 async def handle_leave(client_id: str):
@@ -2647,14 +2979,26 @@ async def handle_leave(client_id: str):
     room_snapshot = None
     if room:
         room.remove_member_from_queue(client_id)
-        room_snapshot = (room.code, room.host_name, room.created_at, room.peak_members, room.songs_played, room.password is not None)
+        room_snapshot = (
+            room.code,
+            room.host_name,
+            room.created_at,
+            room.peak_members,
+            room.songs_played,
+            room.password is not None,
+        )
 
     code, was_host, remaining_ws = room_manager.leave_room(client_id)
     if not code:
         return
 
     print(f"[WS] {client_id[:8]} left room {code} (was_host={was_host})")
-    analytics.log_event("room_leave", client_id=client_id, room_code=code, detail=json.dumps({"was_host": was_host}))
+    analytics.log_event(
+        "room_leave",
+        client_id=client_id,
+        room_code=code,
+        detail=json.dumps({"was_host": was_host}),
+    )
 
     if was_host:
         if room_snapshot:
@@ -2667,11 +3011,14 @@ async def handle_leave(client_id: str):
         if room:
             # Rebroadcast queue since member's votes/requests were removed
             await room_manager.broadcast_queue(room)
-            await room_manager.broadcast(room, {
-                "type": "member_left",
-                "count": len(room.members),
-                "members": room_manager.get_member_list(room),
-            })
+            await room_manager.broadcast(
+                room,
+                {
+                    "type": "member_left",
+                    "count": len(room.members),
+                    "members": room_manager.get_member_list(room),
+                },
+            )
 
 
 async def handle_disconnect(client_id: str):
@@ -2686,17 +3033,25 @@ async def handle_disconnect(client_id: str):
         return
 
     print(f"[WS] {client_id[:8]} disconnected from room {code} (was_host={was_host})")
-    analytics.log_event("room_leave", client_id=client_id, room_code=code, detail=json.dumps({"was_host": was_host, "disconnect": True}))
+    analytics.log_event(
+        "room_leave",
+        client_id=client_id,
+        room_code=code,
+        detail=json.dumps({"was_host": was_host, "disconnect": True}),
+    )
 
     room = room_manager.rooms.get(code)
     if room:
         # Rebroadcast queue since member's votes/requests were removed
         await room_manager.broadcast_queue(room)
-        await room_manager.broadcast(room, {
-            "type": "member_left",
-            "count": len(room.members),
-            "members": room_manager.get_member_list(room),
-        })
+        await room_manager.broadcast(
+            room,
+            {
+                "type": "member_left",
+                "count": len(room.members),
+                "members": room_manager.get_member_list(room),
+            },
+        )
 
     if was_host and room:
         # Schedule room destruction after grace period
@@ -2714,7 +3069,14 @@ async def destroy_room_after_grace(client_id: str, code: str, delay: int = 30):
     host_active = room.host_id is not None and room.host_id in room.members
     if not host_active:
         # Host didn't rejoin — destroy room and notify remaining guests
-        await analytics.log_room_destroyed(code, room.host_name, room.created_at, room.peak_members, room.songs_played, room.password is not None)
+        await analytics.log_room_destroyed(
+            code,
+            room.host_name,
+            room.created_at,
+            room.peak_members,
+            room.songs_played,
+            room.password is not None,
+        )
         remaining_ws = [m.websocket for m in room.members.values()]
         for mid in list(room.members.keys()):
             room_manager._client_to_room.pop(mid, None)
@@ -2734,10 +3096,19 @@ async def handle_rejoin_room(client_id: str, websocket: WebSocket, msg: dict):
         await ws_send(websocket, {"type": "error", "message": "Room code required"})
         return
 
-    room, was_host = room_manager.rejoin_room(client_id, websocket, code, name,
-                                               previous_client_id=previous_client_id)
+    room, was_host = room_manager.rejoin_room(
+        client_id, websocket, code, name, previous_client_id=previous_client_id
+    )
     if not room:
-        await ws_send(websocket, {"type": "error", "message": "Room no longer exists", "rejoinFailed": True, "code": code})
+        await ws_send(
+            websocket,
+            {
+                "type": "error",
+                "message": "Room no longer exists",
+                "rejoinFailed": True,
+                "code": code,
+            },
+        )
         return
 
     role = "host" if was_host else "guest"
@@ -2758,11 +3129,15 @@ async def handle_rejoin_room(client_id: str, websocket: WebSocket, msg: dict):
     await ws_send(websocket, {"type": "room_joined", "state": state})
 
     # Notify other members
-    await room_manager.broadcast(room, {
-        "type": "member_joined",
-        "count": len(room.members),
-        "members": room_manager.get_member_list(room),
-    }, exclude_id=client_id)
+    await room_manager.broadcast(
+        room,
+        {
+            "type": "member_joined",
+            "count": len(room.members),
+            "members": room_manager.get_member_list(room),
+        },
+        exclude_id=client_id,
+    )
 
 
 @api.websocket("/ws")
@@ -2785,11 +3160,14 @@ async def websocket_endpoint(websocket: WebSocket):
             msg_type = msg.get("type", "")
 
             if msg_type == "ping":
-                await ws_send(websocket, {
-                    "type": "pong",
-                    "clientTime": msg.get("clientTime", 0),
-                    "serverTime": int(time.time() * 1000),
-                })
+                await ws_send(
+                    websocket,
+                    {
+                        "type": "pong",
+                        "clientTime": msg.get("clientTime", 0),
+                        "serverTime": int(time.time() * 1000),
+                    },
+                )
 
             elif msg_type == "create_room":
                 await handle_create_room(client_id, websocket, msg)
@@ -2858,7 +3236,15 @@ async def websocket_endpoint(websocket: WebSocket):
 
 
 # ── Song Identification via Lyrics ──
-_GK = ["gsk_eLH4", "z9lt2dCi", "YLUBpxmT", "WGdyb3FY", "iydiOUYB", "yqgqnKxf", "u74IAWlz"]
+_GK = [
+    "gsk_eLH4",
+    "z9lt2dCi",
+    "YLUBpxmT",
+    "WGdyb3FY",
+    "iydiOUYB",
+    "yqgqnKxf",
+    "u74IAWlz",
+]
 GROQ_API_KEY = "".join(_GK)
 SERPER_API_KEY = "862d216d4726" + "76dce339725814" + "05e6878451ad7b"
 
@@ -2871,6 +3257,7 @@ TEASING_TEMPLATES = [
     "{artist}'s {song} living rent-free in your mind?",
     "We know that tune... {song} by {artist}!",
 ]
+
 
 async def transcribe_audio(file_path: str) -> str:
     """Send audio to Groq Whisper for transcription"""
@@ -2885,9 +3272,11 @@ async def transcribe_audio(file_path: str) -> str:
                     "https://api.groq.com/openai/v1/audio/transcriptions",
                     headers={"Authorization": f"Bearer {GROQ_API_KEY}"},
                     files={"file": (filename, f, content_type)},
-                    data={"model": "whisper-large-v3", "language": "hi"}
+                    data={"model": "whisper-large-v3", "language": "hi"},
                 )
-            print(f"[Identify] Whisper status: {resp.status_code}, file: {filename}, type: {content_type}, size: {os.path.getsize(file_path)}")
+            print(
+                f"[Identify] Whisper status: {resp.status_code}, file: {filename}, type: {content_type}, size: {os.path.getsize(file_path)}"
+            )
             if resp.status_code == 200:
                 text = resp.json().get("text", "").strip()
                 print(f"[Identify] Whisper transcription: {text[:100]}")
@@ -2899,6 +3288,7 @@ async def transcribe_audio(file_path: str) -> str:
         print(f"[Identify] Whisper exception: {type(e).__name__}: {e}")
         return ""
 
+
 async def transliterate_to_roman(text: str) -> str:
     """Transliterate Hindi/Punjabi Devanagari text to Roman script using Groq LLM"""
     if not GROQ_API_KEY or not text:
@@ -2909,17 +3299,20 @@ async def transliterate_to_roman(text: str) -> str:
                 "https://api.groq.com/openai/v1/chat/completions",
                 headers={
                     "Authorization": f"Bearer {GROQ_API_KEY}",
-                    "Content-Type": "application/json"
+                    "Content-Type": "application/json",
                 },
                 json={
                     "model": "llama-3.1-8b-instant",
                     "messages": [
-                        {"role": "system", "content": "Transliterate the following Hindi/Punjabi text to Roman script (like how Indians type in English). Output ONLY the romanized text, nothing else. Keep the original words, just change the script."},
-                        {"role": "user", "content": text}
+                        {
+                            "role": "system",
+                            "content": "Transliterate the following Hindi/Punjabi text to Roman script (like how Indians type in English). Output ONLY the romanized text, nothing else. Keep the original words, just change the script.",
+                        },
+                        {"role": "user", "content": text},
                     ],
                     "temperature": 0.1,
-                    "max_tokens": 200
-                }
+                    "max_tokens": 200,
+                },
             )
             if resp.status_code == 200:
                 roman = resp.json()["choices"][0]["message"]["content"].strip()
@@ -2930,25 +3323,29 @@ async def transliterate_to_roman(text: str) -> str:
         print(f"[Identify] Transliteration failed: {e}")
         return text
 
+
 async def search_lyrics(query: str) -> list:
     """Search Google via Serper API"""
     if not SERPER_API_KEY:
         print("[Identify] SERPER_API_KEY not configured")
         return []
     try:
-        search_query = f'{query} song lyrics'
+        search_query = f"{query} song lyrics"
         async with httpx.AsyncClient(timeout=15) as client:
             resp = await client.post(
                 "https://google.serper.dev/search",
                 headers={
                     "X-API-KEY": SERPER_API_KEY,
-                    "Content-Type": "application/json"
+                    "Content-Type": "application/json",
                 },
-                json={"q": search_query, "num": 5}
+                json={"q": search_query, "num": 5},
             )
             if resp.status_code == 200:
                 data = resp.json()
-                results = [{"title": r.get("title", ""), "url": r.get("link", "")} for r in data.get("organic", [])]
+                results = [
+                    {"title": r.get("title", ""), "url": r.get("link", "")}
+                    for r in data.get("organic", [])
+                ]
                 print(f"[Identify] Serper returned {len(results)} results")
                 return results
             else:
@@ -2958,6 +3355,7 @@ async def search_lyrics(query: str) -> list:
         print(f"[Identify] Serper exception: {e}")
         return []
 
+
 def parse_song_from_titles(results: list) -> dict:
     """Extract song name and artist from search result titles"""
     import random
@@ -2966,7 +3364,9 @@ def parse_song_from_titles(results: list) -> dict:
         title = r.get("title", "")
 
         # Pattern: "SONG LYRICS – Artist" or "Song Lyrics - Artist"
-        match = re.match(r'^(.+?)\s+LYRICS?\s*[–\-|:]\s*(.+?)(?:\s*\|.*)?$', title, re.IGNORECASE)
+        match = re.match(
+            r"^(.+?)\s+LYRICS?\s*[–\-|:]\s*(.+?)(?:\s*\|.*)?$", title, re.IGNORECASE
+        )
         if match:
             song = match.group(1).strip().title()
             artist = match.group(2).strip()
@@ -2976,29 +3376,41 @@ def parse_song_from_titles(results: list) -> dict:
             return {"song": song, "artist": artist, "confidence": 90}
 
         # Pattern: "Song by Artist"
-        match = re.match(r'^(.+?)\s+by\s+(.+?)\s*[–\-|]', title, re.IGNORECASE)
+        match = re.match(r"^(.+?)\s+by\s+(.+?)\s*[–\-|]", title, re.IGNORECASE)
         if match:
             song = match.group(1).strip().title()
             artist = match.group(2).strip()
             return {"song": song, "artist": artist, "confidence": 80}
 
         # Pattern: "Song - Artist | Site"
-        match = re.match(r'^(.+?)\s*[–\-]\s*(.+?)(?:\s*\|.*)?$', title)
+        match = re.match(r"^(.+?)\s*[–\-]\s*(.+?)(?:\s*\|.*)?$", title)
         if match:
             part1 = match.group(1).strip()
             part2 = match.group(2).strip()
             # Skip if part2 looks like a website name
-            if not any(w in part2.lower() for w in ['lyrics', 'genius', 'azlyrics', 'musixmatch', 'lyricshub', 'shazam']):
+            if not any(
+                w in part2.lower()
+                for w in [
+                    "lyrics",
+                    "genius",
+                    "azlyrics",
+                    "musixmatch",
+                    "lyricshub",
+                    "shazam",
+                ]
+            ):
                 song = part1.title()
                 artist = part2
                 return {"song": song, "artist": artist, "confidence": 70}
 
     return None
 
+
 async def generate_teasing_line(song: str, artist: str, lyrics: str = "") -> str:
     """Generate a Hinglish teasing line based on lyrics meaning — like a friend roasting you"""
     if not GROQ_API_KEY:
         import random
+
         return random.choice(TEASING_TEMPLATES).format(song=song, artist=artist)
     try:
         async with httpx.AsyncClient(timeout=10) as client:
@@ -3006,12 +3418,14 @@ async def generate_teasing_line(song: str, artist: str, lyrics: str = "") -> str
                 "https://api.groq.com/openai/v1/chat/completions",
                 headers={
                     "Authorization": f"Bearer {GROQ_API_KEY}",
-                    "Content-Type": "application/json"
+                    "Content-Type": "application/json",
                 },
                 json={
                     "model": "llama-3.3-70b-versatile",
                     "messages": [
-                        {"role": "system", "content": """You caught your close friend singing/humming a song. Write a warm, playful Hinglish teasing line based on what the lyrics mean. Like a bestfriend smiling and saying something sweet but cheeky.
+                        {
+                            "role": "system",
+                            "content": """You caught your close friend singing/humming a song. Write a warm, playful Hinglish teasing line based on what the lyrics mean. Like a bestfriend smiling and saying something sweet but cheeky.
 
 IMPORTANT RULES:
 - NEVER be offensive, rude, or hurtful
@@ -3024,26 +3438,40 @@ IMPORTANT RULES:
 - DO NOT repeat or paraphrase the lyrics back
 - React to the EMOTION/SITUATION the lyrics describe
 
-Write ONLY the teasing line, nothing else."""},
-                        {"role": "user", "content": f"Song: {song} by {artist}\nLyrics they were singing: {lyrics}" if lyrics else f"Song: {song} by {artist}"}
+Write ONLY the teasing line, nothing else.""",
+                        },
+                        {
+                            "role": "user",
+                            "content": f"Song: {song} by {artist}\nLyrics they were singing: {lyrics}"
+                            if lyrics
+                            else f"Song: {song} by {artist}",
+                        },
                     ],
                     "temperature": 0.85,
-                    "max_tokens": 50
-                }
+                    "max_tokens": 50,
+                },
             )
             if resp.status_code == 200:
-                line = resp.json()["choices"][0]["message"]["content"].strip().strip('"').strip("'")
+                line = (
+                    resp.json()["choices"][0]["message"]["content"]
+                    .strip()
+                    .strip('"')
+                    .strip("'")
+                )
                 # Clean up any unwanted prefixes
                 for prefix in ["Here's", "Teasing:", "Line:", "Response:"]:
                     if line.startswith(prefix):
-                        line = line[len(prefix):].strip()
+                        line = line[len(prefix) :].strip()
                 if 3 <= len(line.split()) <= 20:
                     return line
         import random
+
         return random.choice(TEASING_TEMPLATES).format(song=song, artist=artist)
     except:
         import random
+
         return random.choice(TEASING_TEMPLATES).format(song=song, artist=artist)
+
 
 @api.post("/identify")
 async def identify_song(file: UploadFile = File(...)):
@@ -3071,26 +3499,42 @@ async def identify_song(file: UploadFile = File(...)):
         results = await search_lyrics(roman_text)
         if not results:
             print("[Identify] No search results")
-            return JSONResponse({"identified": False, "reason": "no_search_results", "transcription": lyrics_text})
+            return JSONResponse(
+                {
+                    "identified": False,
+                    "reason": "no_search_results",
+                    "transcription": lyrics_text,
+                }
+            )
 
         # Step 4: Parse song + artist from titles
         parsed = parse_song_from_titles(results)
         if not parsed:
             print("[Identify] Could not parse song from results")
-            return JSONResponse({"identified": False, "reason": "parse_failed", "transcription": lyrics_text})
+            return JSONResponse(
+                {
+                    "identified": False,
+                    "reason": "parse_failed",
+                    "transcription": lyrics_text,
+                }
+            )
 
         # Step 5: Generate teasing line based on lyrics meaning
-        teasing = await generate_teasing_line(parsed["song"], parsed["artist"], lyrics_text)
+        teasing = await generate_teasing_line(
+            parsed["song"], parsed["artist"], lyrics_text
+        )
 
         print(f"[Identify] Identified: {parsed['song']} by {parsed['artist']}")
-        return JSONResponse({
-            "identified": True,
-            "song": parsed["song"],
-            "artist": parsed["artist"],
-            "teasingLine": teasing,
-            "confidence": parsed["confidence"],
-            "transcription": lyrics_text
-        })
+        return JSONResponse(
+            {
+                "identified": True,
+                "song": parsed["song"],
+                "artist": parsed["artist"],
+                "teasingLine": teasing,
+                "confidence": parsed["confidence"],
+                "transcription": lyrics_text,
+            }
+        )
     finally:
         # Clean up temp file
         try:
@@ -3105,4 +3549,5 @@ app.include_router(api)
 
 if __name__ == "__main__":
     import uvicorn
+
     uvicorn.run(app, host="0.0.0.0", port=8000)
