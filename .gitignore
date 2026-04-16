@@ -5,3 +5,6 @@ analytics.db
 
 # Firebase service account credentials
 *-firebase-adminsdk-*.json
+
+# YouTube cookies (contains auth tokens)
+cookies.txt

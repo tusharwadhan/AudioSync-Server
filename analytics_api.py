@@ -205,3 +205,48 @@ async def api_fcm_test(request: Request):
             print(f"[FCM] Test failed for {client_id[:8]}: {e}")
 
     return {"success": True, "sent": sent, "failed": failed}
+
+
+# ---- YouTube Cookies Management ----
+
+@router.get("/api/cookies/status", dependencies=[Depends(require_auth)])
+async def api_cookies_status():
+    from main import YTDLP_COOKIE_FILE
+    if os.path.isfile(YTDLP_COOKIE_FILE):
+        stat = os.stat(YTDLP_COOKIE_FILE)
+        return {"exists": True, "size": stat.st_size, "modified": stat.st_mtime}
+    return {"exists": False}
+
+
+@router.post("/api/cookies/upload", dependencies=[Depends(require_auth)])
+async def api_cookies_upload(request: Request):
+    from main import YTDLP_COOKIE_FILE, _ydl_audio_lock, _reset_audio_ydl
+    body = await request.json()
+    content = body.get("content", "").strip()
+    if not content:
+        raise HTTPException(status_code=400, detail="Cookie content is empty")
+
+    with open(YTDLP_COOKIE_FILE, "w", encoding="utf-8") as f:
+        f.write(content + "\n")
+
+    def _reset():
+        with _ydl_audio_lock:
+            _reset_audio_ydl()
+
+    await asyncio.to_thread(_reset)
+    stat = os.stat(YTDLP_COOKIE_FILE)
+    return {"success": True, "size": stat.st_size, "modified": stat.st_mtime}
+
+
+@router.delete("/api/cookies/delete", dependencies=[Depends(require_auth)])
+async def api_cookies_delete():
+    from main import YTDLP_COOKIE_FILE, _ydl_audio_lock, _reset_audio_ydl
+    if os.path.isfile(YTDLP_COOKIE_FILE):
+        os.remove(YTDLP_COOKIE_FILE)
+
+    def _reset():
+        with _ydl_audio_lock:
+            _reset_audio_ydl()
+
+    await asyncio.to_thread(_reset)
+    return {"success": True}

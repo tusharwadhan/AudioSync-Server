@@ -522,6 +522,8 @@ async def get_stream_url_from_piped(video_id: str) -> Optional[str]:
 YTDLP_CACHE_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), ".ytdlp_cache")
 os.makedirs(YTDLP_CACHE_DIR, exist_ok=True)
 
+YTDLP_COOKIE_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "cookies.txt")
+
 # Reusable yt-dlp instance for audio extraction (caches player JS in memory)
 _ydl_audio: yt_dlp.YoutubeDL | None = None
 _ydl_audio_lock = threading.Lock()
@@ -559,7 +561,7 @@ def get_ytdlp_opts():
                 deno_path = "deno"
         js_runtime = f"deno:{deno_path}"
 
-    return {
+    opts = {
         "format": "bestaudio/best",
         "quiet": True,
         "no_warnings": True,
@@ -571,6 +573,14 @@ def get_ytdlp_opts():
             }
         },
     }
+    opts.update(_get_cookie_opts())
+    return opts
+
+
+def _get_cookie_opts() -> dict:
+    if os.path.isfile(YTDLP_COOKIE_FILE):
+        return {"cookiefile": YTDLP_COOKIE_FILE}
+    return {}
 
 
 def _get_audio_ydl() -> yt_dlp.YoutubeDL:
@@ -670,6 +680,7 @@ def _extract_related_ytdlp(video_id: str, limit: int = 50) -> RelatedResponse:
         "skip_download": True,
         "playlist_items": f"1-{limit + 1}",
     }
+    ydl_opts.update(_get_cookie_opts())
 
     try:
         mix_url = f"https://www.youtube.com/watch?v={video_id}&list=RD{video_id}"
@@ -2010,6 +2021,7 @@ async def search(q: str, limit: int = 10):
             "extract_flat": True,
             "skip_download": True,
         }
+        ydl_opts.update(_get_cookie_opts())
 
         try:
             search_query = f"ytsearch{limit}:{q}"
