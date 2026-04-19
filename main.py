@@ -602,14 +602,14 @@ def get_ytdlp_opts():
         js_runtime = f"deno:{deno_path}"
 
     opts = {
-        "format": "bestaudio*/best",
+        "format": "ba/b",
         "quiet": True,
         "no_warnings": True,
         "skip_download": True,
         "cachedir": YTDLP_CACHE_DIR,
         "extractor_args": {
             "youtube": {
-                "player_client": ["android_vr", "web"],
+                "player_client": ["default", "-android_sdkless"],
                 "js_runtimes": [js_runtime],
             }
         },
