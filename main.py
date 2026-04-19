@@ -602,7 +602,7 @@ def get_ytdlp_opts():
         js_runtime = f"deno:{deno_path}"
 
     opts = {
-        "format": "bestaudio/best",
+        "format": "bestaudio*/best",
         "quiet": True,
         "no_warnings": True,
         "skip_download": True,
