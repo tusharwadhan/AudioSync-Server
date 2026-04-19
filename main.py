@@ -609,6 +609,7 @@ def get_ytdlp_opts():
         "cachedir": YTDLP_CACHE_DIR,
         "extractor_args": {
             "youtube": {
+                "player_client": ["android_vr", "web"],
                 "js_runtimes": [js_runtime],
             }
         },
