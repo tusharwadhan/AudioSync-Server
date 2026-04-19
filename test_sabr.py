@@ -9,12 +9,21 @@ Start command:
   uvicorn test_sabr:app --host 0.0.0.0 --port $PORT
 """
 
-from fastapi import FastAPI
+from fastapi import FastAPI, Request
 import yt_dlp
 import time
 import json
+import os
 
 app = FastAPI()
+
+# Cookie file path
+COOKIE_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "cookies.txt")
+
+def _cookie_opts():
+    if os.path.isfile(COOKIE_FILE):
+        return {"cookiefile": COOKIE_FILE}
+    return {}
 
 TEST_VIDEOS = [
     "JGwWNGJdvx8",  # Ed Sheeran
@@ -74,12 +83,16 @@ def test_extraction(video_id: str, opts: dict, label: str) -> dict:
 
 @app.get("/")
 def index():
+    has_cookies = os.path.isfile(COOKIE_FILE)
+    cookie_size = os.path.getsize(COOKIE_FILE) if has_cookies else 0
     return {
-        "message": "SABR branch test server",
+        "message": "SABR branch test server (with cookies support)",
         "yt_dlp_version": yt_dlp.version.__version__,
+        "cookies": {"exists": has_cookies, "size_kb": round(cookie_size / 1024, 1)},
         "endpoints": {
             "/test/{video_id}": "Test all methods on one video",
             "/test-all": "Test all methods on all sample videos",
+            "/upload-cookies": "POST - paste cookies.txt content as JSON {\"content\": \"...\"}",
             "/health": "Health check",
         }
     }
@@ -87,15 +100,31 @@ def index():
 
 @app.get("/health")
 def health():
-    return {"status": "ok", "yt_dlp_version": yt_dlp.version.__version__}
+    return {"status": "ok", "yt_dlp_version": yt_dlp.version.__version__, "cookies": os.path.isfile(COOKIE_FILE)}
+
+
+# Cookie upload
+from fastapi.middleware.cors import CORSMiddleware
+app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"])
+
+@app.post("/upload-cookies")
+async def upload_cookies(request: Request):
+    body = await request.json()
+    content = body.get("content", "").strip()
+    if not content:
+        return {"success": False, "error": "Empty content"}
+    with open(COOKIE_FILE, "w", encoding="utf-8") as f:
+        f.write(content + "\n")
+    return {"success": True, "size_kb": round(os.path.getsize(COOKIE_FILE) / 1024, 1)}
 
 
 @app.get("/test/{video_id}")
 def test_video(video_id: str):
+    cookies = _cookie_opts()
     results = []
 
-    # Test 1: SABR format with web client
-    results.append(test_extraction(video_id, {
+    # Test 1: SABR + cookies + web client
+    opts1 = {
         "format": "ba[protocol=sabr]/ba/b",
         "quiet": True,
         "no_warnings": False,
@@ -106,10 +135,12 @@ def test_video(video_id: str):
                 "player_client": ["web"],
             }
         },
-    }, "sabr_web"))
+    }
+    opts1.update(cookies)
+    results.append(test_extraction(video_id, opts1, "sabr_web_cookies"))
 
-    # Test 2: SABR format with default client
-    results.append(test_extraction(video_id, {
+    # Test 2: SABR + cookies + default client
+    opts2 = {
         "format": "ba[protocol=sabr]/ba/b",
         "quiet": True,
         "no_warnings": False,
@@ -120,37 +151,45 @@ def test_video(video_id: str):
                 "player_client": ["default", "-android_sdkless"],
             }
         },
-    }, "sabr_default"))
+    }
+    opts2.update(cookies)
+    results.append(test_extraction(video_id, opts2, "sabr_default_cookies"))
 
-    # Test 3: Regular format with android client (format 18 fallback)
-    results.append(test_extraction(video_id, {
-        "format": "18/ba/b",
+    # Test 3: Regular ba/b + cookies + default client (no SABR filter)
+    opts3 = {
+        "format": "ba/b",
         "quiet": True,
         "no_warnings": False,
         "skip_download": True,
-        "extractor_args": {
-            "youtube": {
-                "player_client": ["android"],
-            }
-        },
-    }, "android_fmt18"))
-
-    # Test 4: No format restriction, just list what's available
-    results.append(test_extraction(video_id, {
-        "quiet": True,
-        "no_warnings": False,
-        "skip_download": True,
-        "listformats": False,
         "extractor_args": {
             "youtube": {
                 "formats": ["duplicate"],
-                "player_client": ["default"],
+                "player_client": ["default", "-android_sdkless"],
             }
         },
-    }, "list_all_formats"))
+    }
+    opts3.update(cookies)
+    results.append(test_extraction(video_id, opts3, "regular_default_cookies"))
+
+    # Test 4: SABR + cookies + android_vr client
+    opts4 = {
+        "format": "ba[protocol=sabr]/ba/b",
+        "quiet": True,
+        "no_warnings": False,
+        "skip_download": True,
+        "extractor_args": {
+            "youtube": {
+                "formats": ["duplicate"],
+                "player_client": ["android_vr"],
+            }
+        },
+    }
+    opts4.update(cookies)
+    results.append(test_extraction(video_id, opts4, "sabr_android_vr_cookies"))
 
     summary = {
         "video_id": video_id,
+        "cookies_loaded": bool(cookies),
         "any_success": any(r["success"] for r in results),
         "results": results,
     }
@@ -162,4 +201,8 @@ def test_all():
     all_results = {}
     for vid in TEST_VIDEOS:
         all_results[vid] = test_video(vid)
-    return all_results
+    return {
+        "cookies_loaded": bool(_cookie_opts()),
+        "any_success": any(r["any_success"] for r in all_results.values()),
+        "results": all_results,
+    }
