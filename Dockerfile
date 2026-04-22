@@ -2,26 +2,33 @@ FROM python:3.11-slim
 
 WORKDIR /app
 
-# Install system dependencies for yt-dlp
+# System deps: ffmpeg for yt-dlp, curl/ca-certificates for installs, iptables for tailscale
 RUN apt-get update && apt-get install -y \
     ffmpeg \
     curl \
+    ca-certificates \
+    iptables \
+    && curl -fsSL https://tailscale.com/install.sh | sh \
+    && curl -L -o /tmp/gost.gz https://github.com/ginuerzh/gost/releases/download/v2.11.5/gost-linux-amd64-2.11.5.gz \
+    && gunzip /tmp/gost.gz \
+    && mv /tmp/gost /usr/local/bin/gost \
+    && chmod +x /usr/local/bin/gost \
     && rm -rf /var/lib/apt/lists/*
 
-# Copy requirements and install Python dependencies
+# Python deps
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
-# Copy application code
+# App code
 COPY main.py .
 COPY room_manager.py .
 COPY analytics_api.py .
 COPY analytics_db.py .
 COPY config.json .
 COPY dashboard.html .
+COPY start.sh .
+RUN chmod +x start.sh
 
-# Expose port
 EXPOSE 8000
 
-# Run the server
-CMD uvicorn main:app --host 0.0.0.0 --port ${PORT:-8000}
+CMD ["./start.sh"]
