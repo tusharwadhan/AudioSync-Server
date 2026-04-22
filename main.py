@@ -607,6 +607,7 @@ def get_ytdlp_opts():
         "no_warnings": True,
         "skip_download": True,
         "cachedir": YTDLP_CACHE_DIR,
+        "proxy": "socks5://100.82.133.108:1080",
         "extractor_args": {
             "youtube": {
                 "player_client": ["default", "-android_sdkless"],
