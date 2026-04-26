@@ -17,3 +17,16 @@ services:
         value: /opt/render/.deno
       - key: PATH
         value: /opt/render/.deno/bin:/opt/render/project/node_modules/.bin:$PATH
+
+  - type: web
+    name: sabr-test
+    runtime: docker
+    plan: free
+    region: oregon
+    branch: tushar
+    dockerfilePath: ./Dockerfile.sabr_warp
+    dockerContext: .
+    healthCheckPath: /health
+    envVars:
+      - key: WARP_PROXY
+        value: socks5://127.0.0.1:40000

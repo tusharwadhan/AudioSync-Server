@@ -1,0 +1,37 @@
+FROM python:3.11-slim
+
+WORKDIR /app
+
+# Install system dependencies + Cloudflare WARP
+RUN apt-get update && apt-get install -y \
+    curl \
+    gnupg \
+    lsb-release \
+    procps \
+    iproute2 \
+    && rm -rf /var/lib/apt/lists/*
+
+# Add Cloudflare WARP repository
+RUN curl -fsSL https://pkg.cloudflareclient.com/pubkey.gpg | gpg --yes --dearmor --output /usr/share/keyrings/cloudflare-warp-archive-keyring.gpg && \
+    echo "deb [arch=amd64 signed-by=/usr/share/keyrings/cloudflare-warp-archive-keyring.gpg] https://pkg.cloudflareclient.com/ $(lsb_release -cs) main" > /etc/apt/sources.list.d/cloudflare-client.list && \
+    apt-get update && apt-get install -y cloudflare-warp && \
+    rm -rf /var/lib/apt/lists/*
+
+# Install Python deps including SABR branch yt-dlp + protobug
+RUN pip install --no-cache-dir \
+    "https://github.com/bashonly/yt-dlp/archive/refs/heads/feat/youtube/sabr.zip" \
+    fastapi \
+    uvicorn \
+    protobug \
+    pysocks
+
+# Copy app
+COPY test_sabr.py .
+
+# Startup script
+COPY start_warp.sh .
+RUN chmod +x start_warp.sh
+
+EXPOSE 8000
+
+CMD ["./start_warp.sh"]

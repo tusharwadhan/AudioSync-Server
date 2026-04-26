@@ -20,9 +20,17 @@ app = FastAPI()
 # Cookie file path
 COOKIE_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "cookies.txt")
 
+# WARP proxy (set WARP_PROXY env var to enable, e.g. socks5://127.0.0.1:40000)
+WARP_PROXY = os.environ.get("WARP_PROXY", "")
+
 def _cookie_opts():
     if os.path.isfile(COOKIE_FILE):
         return {"cookiefile": COOKIE_FILE}
+    return {}
+
+def _proxy_opts():
+    if WARP_PROXY:
+        return {"proxy": WARP_PROXY}
     return {}
 
 TEST_VIDEOS = [
@@ -86,13 +94,15 @@ def index():
     has_cookies = os.path.isfile(COOKIE_FILE)
     cookie_size = os.path.getsize(COOKIE_FILE) if has_cookies else 0
     return {
-        "message": "SABR branch test server (with cookies support)",
+        "message": "SABR branch test server (with cookies + WARP support)",
         "yt_dlp_version": yt_dlp.version.__version__,
         "cookies": {"exists": has_cookies, "size_kb": round(cookie_size / 1024, 1)},
+        "warp_proxy": WARP_PROXY or "disabled",
         "endpoints": {
             "/test/{video_id}": "Test all methods on one video",
             "/test-all": "Test all methods on all sample videos",
             "/upload-cookies": "POST - paste cookies.txt content as JSON {\"content\": \"...\"}",
+            "/check-ip": "Check current outbound IP",
             "/health": "Health check",
         }
     }
@@ -101,6 +111,58 @@ def index():
 @app.get("/health")
 def health():
     return {"status": "ok", "yt_dlp_version": yt_dlp.version.__version__, "cookies": os.path.isfile(COOKIE_FILE)}
+
+
+@app.get("/check-ip")
+def check_ip():
+    """Check what IP yt-dlp is using - shows direct vs WARP-routed IP."""
+    import urllib.request
+    import socket
+    results = {}
+
+    # Direct IP (Render's IP)
+    try:
+        with urllib.request.urlopen("https://api.ipify.org?format=json", timeout=10) as r:
+            results["direct_ip"] = json.loads(r.read())["ip"]
+    except Exception as e:
+        results["direct_ip_error"] = str(e)
+
+    # WARP-routed IP
+    if WARP_PROXY:
+        try:
+            import socks
+            old_socket = socket.socket
+            # Parse SOCKS5 URL: socks5://host:port
+            host = WARP_PROXY.replace("socks5://", "").split(":")[0]
+            port = int(WARP_PROXY.split(":")[-1])
+            socks.set_default_proxy(socks.SOCKS5, host, port)
+            socket.socket = socks.socksocket
+            try:
+                with urllib.request.urlopen("https://api.ipify.org?format=json", timeout=15) as r:
+                    results["warp_ip"] = json.loads(r.read())["ip"]
+            finally:
+                socket.socket = old_socket
+        except Exception as e:
+            results["warp_ip_error"] = str(e)
+
+    # Cloudflare trace via WARP
+    if WARP_PROXY:
+        try:
+            import socks
+            old_socket = socket.socket
+            host = WARP_PROXY.replace("socks5://", "").split(":")[0]
+            port = int(WARP_PROXY.split(":")[-1])
+            socks.set_default_proxy(socks.SOCKS5, host, port)
+            socket.socket = socks.socksocket
+            try:
+                with urllib.request.urlopen("https://www.cloudflare.com/cdn-cgi/trace", timeout=15) as r:
+                    results["warp_trace"] = r.read().decode()
+            finally:
+                socket.socket = old_socket
+        except Exception as e:
+            results["warp_trace_error"] = str(e)
+
+    return results
 
 
 # Cookie upload
@@ -121,9 +183,10 @@ async def upload_cookies(request: Request):
 @app.get("/test/{video_id}")
 def test_video(video_id: str):
     cookies = _cookie_opts()
+    proxy = _proxy_opts()
     results = []
 
-    # Test 1: SABR + cookies + web client
+    # Test 1: SABR + cookies + web client (via WARP if enabled)
     opts1 = {
         "format": "ba[protocol=sabr]/ba/b",
         "quiet": True,
@@ -137,6 +200,7 @@ def test_video(video_id: str):
         },
     }
     opts1.update(cookies)
+    opts1.update(proxy)
     results.append(test_extraction(video_id, opts1, "sabr_web_cookies"))
 
     # Test 2: SABR + cookies + default client
@@ -153,6 +217,7 @@ def test_video(video_id: str):
         },
     }
     opts2.update(cookies)
+    opts2.update(proxy)
     results.append(test_extraction(video_id, opts2, "sabr_default_cookies"))
 
     # Test 3: Regular ba/b + cookies + default client (no SABR filter)
@@ -169,6 +234,7 @@ def test_video(video_id: str):
         },
     }
     opts3.update(cookies)
+    opts3.update(proxy)
     results.append(test_extraction(video_id, opts3, "regular_default_cookies"))
 
     # Test 4: SABR + cookies + android_vr client
@@ -185,11 +251,13 @@ def test_video(video_id: str):
         },
     }
     opts4.update(cookies)
+    opts4.update(proxy)
     results.append(test_extraction(video_id, opts4, "sabr_android_vr_cookies"))
 
     summary = {
         "video_id": video_id,
         "cookies_loaded": bool(cookies),
+        "warp_proxy": WARP_PROXY or None,
         "any_success": any(r["success"] for r in results),
         "results": results,
     }
