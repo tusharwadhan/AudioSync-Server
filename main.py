@@ -177,10 +177,10 @@ class RoomListResponse(BaseModel):
 
 # App update configuration - modify these values to control updates
 APP_UPDATE_CONFIG = {
-    "latestVersion": "5.8.0",
-    "latestVersionCode": 27,
-    "apkUrl": "https://7c30ef4a-1f68-4c7b-862a-582549cd2b25-00-16irhxc7zx5m7.sisko.replit.dev/releases/syncaura-5.8.0.apk",
-    "releaseNotes": "Edge Player: queue support, progress indicator, dedicated settings page with side/size/opacity, first-run onboarding. Offline mode: Up Next auto-populates from downloads when server is unreachable.",
+    "latestVersion": "5.8.1",
+    "latestVersionCode": 28,
+    "apkUrl": "https://audiosync-server.onrender.com/releases/syncaura-5.8.1.apk",
+    "releaseNotes": "On-device YouTube extraction (NewPipe Extractor) — distributes audio URL fetching across user IPs to avoid server-side YouTube blocks; default-on for testing. Download queue hardening: retry classification, exponential backoff, max-attempts cap, fixed manual-retry bug, stale-row recovery, per-worker notifications. Bulk-download readiness: Wi-Fi-only setting, residential-IP rate limiting, URL freshness checks, partial-download resumption.",
     # List of version codes that MUST update (mandatory)
     "mandatoryBelow": 22,  # Force previous versions to update
 }
