@@ -179,7 +179,7 @@ class RoomListResponse(BaseModel):
 APP_UPDATE_CONFIG = {
     "latestVersion": "5.8.1",
     "latestVersionCode": 28,
-    "apkUrl": "https://raw.githubusercontent.com/tusharwadhan/AudioSync-Server/blob/tushar/releases/syncaura-5.8.1.apk",
+    "apkUrl": "https://raw.githubusercontent.com/tusharwadhan/AudioSync-Server/tushar/releases/syncaura-5.8.1.apk",
     "releaseNotes": "On-device YouTube extraction (NewPipe Extractor) — distributes audio URL fetching across user IPs to avoid server-side YouTube blocks; default-on for testing. Download queue hardening: retry classification, exponential backoff, max-attempts cap, fixed manual-retry bug, stale-row recovery, per-worker notifications. Bulk-download readiness: Wi-Fi-only setting, residential-IP rate limiting, URL freshness checks, partial-download resumption.",
     # List of version codes that MUST update (mandatory)
     "mandatoryBelow": 22,  # Force previous versions to update
