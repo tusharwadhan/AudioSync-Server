@@ -183,10 +183,10 @@ class RoomListResponse(BaseModel):
 
 # App update configuration - modify these values to control updates
 APP_UPDATE_CONFIG = {
-    "latestVersion": "5.8.1",
-    "latestVersionCode": 28,
-    "apkUrl": "https://raw.githubusercontent.com/tusharwadhan/AudioSync-Server/tushar/releases/syncaura-5.8.1.apk",
-    "releaseNotes": "On-device YouTube extraction (NewPipe Extractor) — distributes audio URL fetching across user IPs to avoid server-side YouTube blocks; default-on for testing. Download queue hardening: retry classification, exponential backoff, max-attempts cap, fixed manual-retry bug, stale-row recovery, per-worker notifications. Bulk-download readiness: Wi-Fi-only setting, residential-IP rate limiting, URL freshness checks, partial-download resumption.",
+    "latestVersion": "5.9.0",
+    "latestVersionCode": 29,
+    "apkUrl": "https://raw.githubusercontent.com/tusharwadhan/AudioSync-Server/tushar/releases/syncaura-5.9.0.apk",
+    "releaseNotes": "Cloud sync: sign in with Google to back up favorites, playlists, and listening history across devices. Existing local data syncs silently on first sign-in. Sign-in prompt on app start for signed-out users (dismissible for 7 days).",
     # List of version codes that MUST update (mandatory)
     "mandatoryBelow": 22,  # Force previous versions to update
 }
