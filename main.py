@@ -35,6 +35,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from auth import AuthedUser, get_current_user
 from db import get_session
 import models
+from sync import router as sync_router
 
 app = FastAPI(title="SyncAura API")
 
@@ -3615,6 +3616,11 @@ async def auth_sync(
         created=created,
     )
 
+
+# Mount the sync router under the same /api/v1 prefix as the rest of the
+# user-facing endpoints. Token-gated routes for favorites / playlists /
+# playlist_songs / listen_events all live in sync.py.
+api.include_router(sync_router)
 
 # Register the versioned API router
 app.include_router(api)

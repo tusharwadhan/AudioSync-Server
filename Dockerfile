@@ -29,6 +29,7 @@ COPY start.sh .
 COPY auth.py .
 COPY db.py .
 COPY models.py .
+COPY sync.py .
 COPY alembic.ini .
 COPY alembic ./alembic
 RUN chmod +x start.sh
