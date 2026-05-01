@@ -34,5 +34,17 @@ echo "[gost] Starting chain: 127.0.0.1:1080 -> tailscaled SOCKS -> home proxy 10
 # Small settle delay
 sleep 2
 
+# Apply any pending Alembic migrations before launching the API.
+# Idempotent: if the schema is already at head this is a fast no-op. If
+# DATABASE_URL is unset we skip and warn — the server will still boot,
+# but any DB-backed endpoint (/auth/sync, future sync routes) will 500
+# with a clear error from db.py until the env var is configured.
+if [ -n "${DATABASE_URL:-}" ]; then
+  echo "[Migrate] Running alembic upgrade head..."
+  alembic upgrade head
+else
+  echo "[Migrate] DATABASE_URL not set — skipping migrations (DB endpoints will fail)."
+fi
+
 echo "[App] Launching uvicorn on port ${PORT:-8000}"
 exec uvicorn main:app --host 0.0.0.0 --port "${PORT:-8000}"

@@ -1,6 +1,7 @@
 from fastapi import (
     FastAPI,
     APIRouter,
+    Depends,
     HTTPException,
     WebSocket,
     WebSocketDisconnect,
@@ -26,9 +27,14 @@ import re
 from room_manager import RoomManager
 from ytmusicapi import YTMusic
 from analytics_db import AnalyticsDB
-from analytics_api import router as dashboard_router
 import firebase_admin
 from firebase_admin import credentials, messaging
+from sqlalchemy import select
+from sqlalchemy.ext.asyncio import AsyncSession
+
+from auth import AuthedUser, get_current_user
+from db import get_session
+import models
 
 app = FastAPI(title="SyncAura API")
 
@@ -49,11 +55,10 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# Analytics database
-analytics = AnalyticsDB(os.path.join(os.path.dirname(__file__), "analytics.db"))
-
-# Dashboard router
-app.include_router(dashboard_router, prefix="/dashboard")
+# Analytics is a no-op stub; see analytics_db.py for context. Call sites
+# throughout main.py remain in place so the diff stays small until a real
+# replacement (Postgres-backed) is wired up.
+analytics = AnalyticsDB()
 
 # Versioned API router — all app endpoints live under /api/v1
 api = APIRouter(prefix="/api/v1")
@@ -778,7 +783,10 @@ async def root():
     }
 
 
-@app.get("/health")
+# Accept both GET and HEAD so external uptime pingers (UptimeRobot, etc.)
+# that default to HEAD don't get a 405. HEAD responses automatically have
+# their body stripped by Starlette — we still return the same payload for GET.
+@app.api_route("/health", methods=["GET", "HEAD"])
 async def health():
     return {"status": "healthy", "piped_enabled": PIPED_ENABLED}
 
@@ -3543,6 +3551,69 @@ async def identify_song(file: UploadFile = File(...)):
             os.unlink(tmp_path)
         except:
             pass
+
+
+# ==================== AUTH / USER SYNC ====================
+#
+# Phase 1 of the cloud-sync rollout. The Android client signs in with
+# Google via Firebase Auth, then calls POST /auth/sync once per cold start
+# (and after profile changes) to upsert the `users` row keyed by Firebase
+# UID. Later phases (favorites, playlists, history) all key off this row.
+
+
+class AuthSyncResponse(BaseModel):
+    uid: str
+    email: Optional[str] = None
+    display_name: Optional[str] = None
+    photo_url: Optional[str] = None
+    created: bool  # True the first time we ever saw this user
+
+
+@api.post("/auth/sync", response_model=AuthSyncResponse)
+async def auth_sync(
+    user: AuthedUser = Depends(get_current_user),
+    session: AsyncSession = Depends(get_session),
+):
+    """Upsert the signed-in user's row and bump last_seen.
+
+    Token verification happens in the dependency. By the time we get here
+    `user` is trusted — we just write profile fields and timestamps.
+    """
+    now = models.utc_now()
+    result = await session.execute(
+        select(models.User).where(models.User.id == user["uid"])
+    )
+    row = result.scalar_one_or_none()
+
+    created = False
+    if row is None:
+        row = models.User(
+            id=user["uid"],
+            email=user.get("email"),
+            display_name=user.get("name"),
+            photo_url=user.get("picture"),
+            created_at=now,
+            last_seen=now,
+        )
+        session.add(row)
+        created = True
+    else:
+        # Keep our cached profile in sync with what Firebase reports —
+        # the user may have updated their Google name / photo since last sync.
+        row.email = user.get("email")
+        row.display_name = user.get("name")
+        row.photo_url = user.get("picture")
+        row.last_seen = now
+
+    await session.commit()
+
+    return AuthSyncResponse(
+        uid=row.id,
+        email=row.email,
+        display_name=row.display_name,
+        photo_url=row.photo_url,
+        created=created,
+    )
 
 
 # Register the versioned API router

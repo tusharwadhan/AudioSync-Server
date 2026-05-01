@@ -22,11 +22,15 @@ RUN pip install --no-cache-dir -r requirements.txt
 # App code
 COPY main.py .
 COPY room_manager.py .
-COPY analytics_api.py .
 COPY analytics_db.py .
 COPY config.json .
-COPY dashboard.html .
 COPY start.sh .
+# Cloud-sync surface (Phase 1+): Postgres + Firebase auth + Alembic migrations.
+COPY auth.py .
+COPY db.py .
+COPY models.py .
+COPY alembic.ini .
+COPY alembic ./alembic
 RUN chmod +x start.sh
 
 EXPOSE 8000

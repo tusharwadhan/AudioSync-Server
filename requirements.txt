@@ -9,3 +9,8 @@ aiosqlite>=0.19.0
 firebase-admin>=6.2.0
 python-multipart>=0.0.6
 PySocks>=1.7.1
+
+# ── Postgres data layer (Phase 1: auth + users) ──
+sqlalchemy[asyncio]>=2.0.30
+asyncpg>=0.29.0
+alembic>=1.13.0
