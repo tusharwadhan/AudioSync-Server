@@ -183,10 +183,10 @@ class RoomListResponse(BaseModel):
 
 # App update configuration - modify these values to control updates
 APP_UPDATE_CONFIG = {
-    "latestVersion": "5.9.1",
-    "latestVersionCode": 30,
-    "apkUrl": "https://raw.githubusercontent.com/tusharwadhan/AudioSync-Server/tushar/releases/syncaura-5.9.1.apk",
-    "releaseNotes": "Bugfix release for 5.9.0. Restores cloud-sync data correctly when signing in (watermarks are now per-account so a sign-out/in actually re-pulls). Polished the sign-in prompt — added a cloud icon, the Google G logo, and a colored CTA that's readable on the dark dialog.",
+    "latestVersion": "5.9.2",
+    "latestVersionCode": 31,
+    "apkUrl": "https://raw.githubusercontent.com/tusharwadhan/AudioSync-Server/tushar/releases/syncaura-5.9.2.apk",
+    "releaseNotes": "Cloud sync diagnostics: pull/push counts and before-vs-after local row counts now show in the in-app debug log so restore failures can be pinpointed end-to-end. Latent fix: playlist-songs sync no longer skips a row when the parent playlist hasn't landed locally yet.",
     # List of version codes that MUST update (mandatory)
     "mandatoryBelow": 22,  # Force previous versions to update
 }
