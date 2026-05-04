@@ -183,10 +183,10 @@ class RoomListResponse(BaseModel):
 
 # App update configuration - modify these values to control updates
 APP_UPDATE_CONFIG = {
-    "latestVersion": "5.9.2",
-    "latestVersionCode": 31,
-    "apkUrl": "https://raw.githubusercontent.com/tusharwadhan/AudioSync-Server/tushar/releases/syncaura-5.9.2.apk",
-    "releaseNotes": "Cloud sync diagnostics: pull/push counts and before-vs-after local row counts now show in the in-app debug log so restore failures can be pinpointed end-to-end. Latent fix: playlist-songs sync no longer skips a row when the parent playlist hasn't landed locally yet.",
+    "latestVersion": "5.9.3",
+    "latestVersionCode": 32,
+    "apkUrl": "https://raw.githubusercontent.com/tusharwadhan/AudioSync-Server/tushar/releases/syncaura-5.9.3.apk",
+    "releaseNotes": "Fixed Listen together feature.",
     # List of version codes that MUST update (mandatory)
     "mandatoryBelow": 22,  # Force previous versions to update
 }
@@ -2559,17 +2559,41 @@ async def handle_play(client_id: str, msg: dict):
     )
     room.songs_played += 1
 
-    # Extract audio URL once for everyone
-    audio_data = await extract_audio_url(video_id)
-    if not audio_data.get("success") or not audio_data.get("url"):
-        await room_manager.broadcast(
-            room,
-            {
-                "type": "error",
-                "message": f"Failed to extract audio: {audio_data.get('error', 'Unknown error')}",
-            },
-        )
-        return
+    # Listen Together v2 (Option A): if the host already extracted the URL
+    # on-device and shipped it in the `play` message, use that and skip
+    # the server's own extraction. Empirically YouTube CDN URLs are
+    # portable across IPs in our setup, so the host's URL plays fine for
+    # co-listeners. Falls back to server-side extract if the field is
+    # absent (older client) or rejected by sanity-check.
+    host_supplied_url = msg.get("audioUrl") or ""
+    is_valid_googlevideo = (
+        isinstance(host_supplied_url, str)
+        and host_supplied_url.startswith("https://")
+        and "googlevideo.com" in host_supplied_url
+    )
+
+    if is_valid_googlevideo:
+        print(f"[WS] Room {room.code}: using host-supplied URL for {video_id}")
+        audio_data = {
+            "success": True,
+            "url": host_supplied_url,
+            "title": msg.get("title", ""),
+            "duration": msg.get("duration"),
+            "thumbnail": msg.get("thumbnail", ""),
+            "uploader": msg.get("uploader", ""),
+        }
+    else:
+        # Legacy / fallback path: server extracts.
+        audio_data = await extract_audio_url(video_id)
+        if not audio_data.get("success") or not audio_data.get("url"):
+            await room_manager.broadcast(
+                room,
+                {
+                    "type": "error",
+                    "message": f"Failed to extract audio: {audio_data.get('error', 'Unknown error')}",
+                },
+            )
+            return
 
     # Update room state
     room.current_song = {
