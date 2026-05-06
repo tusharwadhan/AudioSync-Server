@@ -183,10 +183,10 @@ class RoomListResponse(BaseModel):
 
 # App update configuration - modify these values to control updates
 APP_UPDATE_CONFIG = {
-    "latestVersion": "5.9.3",
-    "latestVersionCode": 32,
-    "apkUrl": "https://raw.githubusercontent.com/tusharwadhan/AudioSync-Server/tushar/releases/syncaura-5.9.3.apk",
-    "releaseNotes": "Fixed Listen together feature.",
+    "latestVersion": "5.9.4",
+    "latestVersionCode": 33,
+    "apkUrl": "https://raw.githubusercontent.com/tusharwadhan/AudioSync-Server/tushar/releases/syncaura-5.9.4.apk",
+    "releaseNotes": "Listen Together is back to working smoothly. Queued songs and auto-advance now switch tracks without hiccups, even when the server's having a rough day.",
     # List of version codes that MUST update (mandatory)
     "mandatoryBelow": 22,  # Force previous versions to update
 }
@@ -2698,6 +2698,80 @@ async def handle_seek(client_id: str, msg: dict):
     await send_fcm_to_disconnected_members(room.code)
 
 
+# ── Host-side URL extraction (queue-advance path) ───────────────────────
+#
+# Listen Together v2 step 2: when the server pops a song off the queue
+# (via `next`) it doesn't know in advance which videoId will play, so the
+# host can't pre-ship the audio URL the way they do for `play`. Instead
+# the server asks the host to extract on-device with this request/
+# response pair:
+#
+#   server -> host : { type: "extract_request", requestId, videoId }
+#   host   -> server: { type: "extract_response", requestId, audioUrl }   (success)
+#                  or: { type: "extract_response", requestId, error }      (failure)
+#
+# The server awaits the response with a bounded timeout. On timeout /
+# error / host disconnect, it falls back to its own (legacy) extractor so
+# the room never goes silent because of a single client hiccup.
+
+_pending_extract_requests: dict = {}  # requestId -> asyncio.Future
+
+
+async def request_url_from_host(
+    host_ws,
+    video_id: str,
+    room_code: str,
+    timeout: float = 8.0,
+) -> Optional[str]:
+    """Ask the host to extract `video_id` on-device. Returns URL or None."""
+    request_id = uuid.uuid4().hex
+    loop = asyncio.get_running_loop()
+    future: asyncio.Future = loop.create_future()
+    _pending_extract_requests[request_id] = future
+    try:
+        await ws_send(
+            host_ws,
+            {
+                "type": "extract_request",
+                "requestId": request_id,
+                "videoId": video_id,
+            },
+        )
+        result = await asyncio.wait_for(future, timeout=timeout)
+        if isinstance(result, dict) and result.get("audioUrl"):
+            return result["audioUrl"]
+        # Host returned an error response — caller will fall back.
+        print(
+            f"[WS] Room {room_code}: host extract response for {video_id} had no URL "
+            f"(error={result.get('error') if isinstance(result, dict) else result!r})"
+        )
+        return None
+    except asyncio.TimeoutError:
+        print(
+            f"[WS] Room {room_code}: extract_request for {video_id} timed out after {timeout}s; "
+            f"falling back to server extract"
+        )
+        return None
+    except Exception as e:
+        print(f"[WS] Room {room_code}: extract_request for {video_id} raised: {e}")
+        return None
+    finally:
+        _pending_extract_requests.pop(request_id, None)
+
+
+async def handle_extract_response(client_id: str, msg: dict):
+    """Resolve the matching pending future. Stale/unknown ids are ignored."""
+    request_id = msg.get("requestId", "")
+    if not request_id:
+        return
+    future = _pending_extract_requests.get(request_id)
+    if future is None or future.done():
+        # Either the request already timed out (Future got popped) or
+        # the host is replaying. Drop silently.
+        return
+    future.set_result(msg)
+
+
 async def handle_next(client_id: str):
     if not room_manager.is_host(client_id):
         return
@@ -2730,16 +2804,37 @@ async def handle_next(client_id: str):
     )
     room.songs_played += 1
 
-    audio_data = await extract_audio_url(video_id)
-    if not audio_data.get("success") or not audio_data.get("url"):
-        await room_manager.broadcast(
-            room,
-            {
-                "type": "error",
-                "message": f"Failed to extract audio: {audio_data.get('error', 'Unknown error')}",
-            },
+    # ── Listen Together v2: prefer host-side extraction ──────────────────
+    # Ask the host first. If they fail / time out / are gone, fall back to
+    # the server's legacy extract_audio_url path so the room keeps playing.
+    audio_data: Optional[dict] = None
+    host_member = room.members.get(client_id)
+    if host_member is not None:
+        host_url = await request_url_from_host(
+            host_member.websocket, video_id, room.code
         )
-        return
+        if host_url and host_url.startswith("https://") and "googlevideo.com" in host_url:
+            print(f"[WS] Room {room.code}: using host-extracted URL for {video_id}")
+            audio_data = {
+                "success": True,
+                "url": host_url,
+                "title": next_item.title,
+                "duration": next_item.duration,
+                "thumbnail": next_item.thumbnail,
+                "uploader": next_item.uploader,
+            }
+
+    if audio_data is None:
+        audio_data = await extract_audio_url(video_id)
+        if not audio_data.get("success") or not audio_data.get("url"):
+            await room_manager.broadcast(
+                room,
+                {
+                    "type": "error",
+                    "message": f"Failed to extract audio: {audio_data.get('error', 'Unknown error')}",
+                },
+            )
+            return
 
     room.current_song = {
         "videoId": video_id,
@@ -3224,6 +3319,11 @@ async def websocket_endpoint(websocket: WebSocket):
 
             elif msg_type == "next":
                 await handle_next(client_id)
+
+            elif msg_type == "extract_response":
+                # Host's reply to a server-initiated extract_request.
+                # Resolves the pending future inside handle_next.
+                await handle_extract_response(client_id, msg)
 
             elif msg_type == "queue_update":
                 await handle_queue_update(client_id, msg)
