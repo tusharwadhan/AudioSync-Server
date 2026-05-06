@@ -2909,12 +2909,19 @@ async def handle_position_report(client_id: str, msg: dict):
     if room.is_playing:
         room.play_start_time = time.time()
 
-    # Broadcast position to guests for drift correction
+    # Broadcast as `position_correction` (NOT `sync_seek`) so the client's
+    # smart-drift handler runs — it has a 3s threshold and uses the
+    # rolling-median ping-derived `serverTimeOffset` to compensate for
+    # WS travel time. Sending this as `sync_seek` (the previous behavior)
+    # made guests do an unconditional seek every 30s, causing audible
+    # blips even when perfectly aligned. `sync_seek` is now reserved
+    # for explicit host-initiated seeks only.
     await room_manager.broadcast(
         room,
         {
-            "type": "sync_seek",
+            "type": "position_correction",
             "position": position,
+            "serverTime": int(time.time() * 1000),
         },
         exclude_id=client_id,
     )
