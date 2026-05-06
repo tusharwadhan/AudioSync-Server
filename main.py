@@ -183,10 +183,10 @@ class RoomListResponse(BaseModel):
 
 # App update configuration - modify these values to control updates
 APP_UPDATE_CONFIG = {
-    "latestVersion": "5.9.4",
-    "latestVersionCode": 33,
-    "apkUrl": "https://raw.githubusercontent.com/tusharwadhan/AudioSync-Server/tushar/releases/syncaura-5.9.4.apk",
-    "releaseNotes": "Listen Together is back to working smoothly. Queued songs and auto-advance now switch tracks without hiccups, even when the server's having a rough day.",
+    "latestVersion": "5.9.5",
+    "latestVersionCode": 34,
+    "apkUrl": "https://raw.githubusercontent.com/tusharwadhan/AudioSync-Server/tushar/releases/syncaura-5.9.5.apk",
+    "releaseNotes": "Listen Together gets tighter sync between devices and finally fixes the silent-guest bug — friends who join your room now hear the song you're already playing right away, not after the next track.",
     # List of version codes that MUST update (mandatory)
     "mandatoryBelow": 22,  # Force previous versions to update
 }
@@ -2429,6 +2429,45 @@ async def handle_create_room(client_id: str, websocket: WebSocket, msg: dict):
         room_code=room.code,
         detail=json.dumps({"locked": password is not None}),
     )
+
+    # If the host was already playing a song when they created the room,
+    # seed `room.current_song` immediately so the first guest to join
+    # hears it. We don't broadcast `sync_play` here — the host is the
+    # only member at this moment, and they're already playing locally.
+    seed = msg.get("currentSong")
+    if isinstance(seed, dict):
+        seed_url = seed.get("audioUrl") or ""
+        seed_video_id = seed.get("videoId") or ""
+        if (
+            seed_video_id
+            and isinstance(seed_url, str)
+            and seed_url.startswith("https://")
+            and "googlevideo.com" in seed_url
+        ):
+            position_ms = seed.get("positionMs", 0)
+            try:
+                position_sec = float(position_ms) / 1000.0
+            except (TypeError, ValueError):
+                position_sec = 0.0
+            room.current_song = {
+                "videoId": seed_video_id,
+                "title": seed.get("title", "") or "",
+                "duration": seed.get("duration"),
+                "thumbnail": seed.get("thumbnail", "") or "",
+                "uploader": seed.get("uploader", "") or "",
+                "audioUrl": seed_url,
+            }
+            room.position = position_sec
+            room.is_playing = bool(seed.get("isPlaying", False))
+            # Anchor `play_start_time` so `get_estimated_position()`
+            # returns the right value when a new joiner asks for it:
+            # estimated = position + (now - play_start_time).
+            room.play_start_time = time.time()
+            print(
+                f"[WS] Room {room.code} seeded with currentSong "
+                f"{seed_video_id} @ {position_sec:.2f}s (playing={room.is_playing})"
+            )
+
     await ws_send(
         websocket,
         {
