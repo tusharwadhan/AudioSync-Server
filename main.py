@@ -3364,7 +3364,16 @@ async def websocket_endpoint(websocket: WebSocket):
                 await handle_seek(client_id, msg)
 
             elif msg_type == "next":
-                await handle_next(client_id)
+                # Run as a background task so the receive loop keeps
+                # processing incoming messages — handle_next awaits the
+                # host's `extract_response` via a future, but that
+                # response can only be read by THIS loop. Awaiting
+                # handle_next directly here would deadlock: the response
+                # would sit in the socket buffer until handle_next
+                # gave up (8s timeout + yt-dlp retries = minutes), and
+                # the future would be cancelled by then so the response
+                # would be silently dropped on dispatch.
+                asyncio.create_task(handle_next(client_id))
 
             elif msg_type == "extract_response":
                 # Host's reply to a server-initiated extract_request.
