@@ -183,10 +183,10 @@ class RoomListResponse(BaseModel):
 
 # App update configuration - modify these values to control updates
 APP_UPDATE_CONFIG = {
-    "latestVersion": "5.9.5",
-    "latestVersionCode": 34,
-    "apkUrl": "https://raw.githubusercontent.com/tusharwadhan/AudioSync-Server/tushar/releases/syncaura-5.9.5.apk",
-    "releaseNotes": "Listen Together gets tighter sync between devices and finally fixes the silent-guest bug — friends who join your room now hear the song you're already playing right away, not after the next track.",
+    "latestVersion": "5.9.6",
+    "latestVersionCode": 35,
+    "apkUrl": "https://raw.githubusercontent.com/tusharwadhan/AudioSync-Server/tushar/releases/syncaura-5.9.6.apk",
+    "releaseNotes": "Listen Together gets smarter — if a song in the queue can't be played for some reason, the room automatically skips it and moves on to the next track instead of getting stuck. Quicker recovery, no more dead silence.",
     # List of version codes that MUST update (mandatory)
     "mandatoryBelow": 22,  # Force previous versions to update
 }
@@ -2818,91 +2818,122 @@ async def handle_next(client_id: str):
     if not room or not room.queue:
         return
 
-    # Pop from sorted queue (highest-voted request first, then suggestions)
-    sorted_q = room.get_sorted_queue()
-    if not sorted_q:
-        return
-    next_item = sorted_q[0]
-    room.queue.remove(next_item)
-    print(
-        f"[WS] Room {room.code}: next → {next_item.video_id} (votes={len(next_item.votes)}, suggestion={next_item.is_suggestion})"
-    )
+    # Auto-skip cap: if a song can't be extracted (NewPipe rejects + server
+    # yt-dlp dead, e.g. SOCKS chain offline, or the videoId is genuinely
+    # restricted), pop the next one and try again instead of dead-ending
+    # the room. Streaming services (Spotify / YT Music) do the same. Cap
+    # the loop so a fully-broken queue doesn't churn forever.
+    MAX_SKIPS = 5
+    skipped: list[str] = []
 
-    # Broadcast updated queue (personalized)
-    await room_manager.broadcast_queue(room)
+    for attempt in range(MAX_SKIPS):
+        # Pop from sorted queue (highest-voted request first, then suggestions)
+        sorted_q = room.get_sorted_queue()
+        if not sorted_q:
+            break
+        next_item = sorted_q[0]
+        room.queue.remove(next_item)
+        await room_manager.broadcast_queue(room)
 
-    # Play the next song (reuses handle_play logic — skip the voted check for next)
-    # We call the play logic directly instead of handle_play to bypass vote-block
-    video_id = next_item.video_id
-    print(f"[WS] Room {room.code}: host playing {video_id}")
-    analytics.log_event(
-        "room_song_change",
-        room_code=room.code,
-        video_id=video_id,
-        title=next_item.title,
-    )
-    room.songs_played += 1
-
-    # ── Listen Together v2: prefer host-side extraction ──────────────────
-    # Ask the host first. If they fail / time out / are gone, fall back to
-    # the server's legacy extract_audio_url path so the room keeps playing.
-    audio_data: Optional[dict] = None
-    host_member = room.members.get(client_id)
-    if host_member is not None:
-        host_url = await request_url_from_host(
-            host_member.websocket, video_id, room.code
+        video_id = next_item.video_id
+        print(
+            f"[WS] Room {room.code}: next → {video_id} "
+            f"(votes={len(next_item.votes)}, suggestion={next_item.is_suggestion}, attempt={attempt + 1})"
         )
-        if host_url and host_url.startswith("https://") and "googlevideo.com" in host_url:
-            print(f"[WS] Room {room.code}: using host-extracted URL for {video_id}")
-            audio_data = {
-                "success": True,
-                "url": host_url,
-                "title": next_item.title,
-                "duration": next_item.duration,
-                "thumbnail": next_item.thumbnail,
-                "uploader": next_item.uploader,
-            }
 
-    if audio_data is None:
-        audio_data = await extract_audio_url(video_id)
-        if not audio_data.get("success") or not audio_data.get("url"):
-            await room_manager.broadcast(
-                room,
-                {
-                    "type": "error",
-                    "message": f"Failed to extract audio: {audio_data.get('error', 'Unknown error')}",
-                },
+        # ── Listen Together v2: prefer host-side extraction ──────────────
+        # Ask the host first. If they fail / time out / are gone, fall back
+        # to the server's legacy extract_audio_url path. If both fail,
+        # auto-skip and try the next queued song.
+        audio_data: Optional[dict] = None
+        host_member = room.members.get(client_id)
+        if host_member is not None:
+            host_url = await request_url_from_host(
+                host_member.websocket, video_id, room.code
             )
-            return
+            if host_url and host_url.startswith("https://") and "googlevideo.com" in host_url:
+                print(f"[WS] Room {room.code}: using host-extracted URL for {video_id}")
+                audio_data = {
+                    "success": True,
+                    "url": host_url,
+                    "title": next_item.title,
+                    "duration": next_item.duration,
+                    "thumbnail": next_item.thumbnail,
+                    "uploader": next_item.uploader,
+                }
 
-    room.current_song = {
-        "videoId": video_id,
-        "title": audio_data.get("title") or next_item.title,
-        "duration": audio_data.get("duration") or next_item.duration,
-        "thumbnail": audio_data.get("thumbnail") or next_item.thumbnail,
-        "uploader": audio_data.get("uploader") or next_item.uploader,
-        "audioUrl": audio_data["url"],
-    }
-    room.position = 0.0
-    room.is_playing = True
-    room.play_start_time = time.time()
+        if audio_data is None:
+            server_data = await extract_audio_url(video_id)
+            if server_data.get("success") and server_data.get("url"):
+                audio_data = server_data
 
-    play_start_time = int(time.time() * 1000)
-    await room_manager.broadcast(
-        room,
-        {
-            "type": "sync_play",
+        if audio_data is None:
+            skipped.append(video_id)
+            print(
+                f"[WS] Room {room.code}: skipping unextractable {video_id} "
+                f"({len(skipped)}/{MAX_SKIPS}); trying next queued song"
+            )
+            continue
+
+        # ── Success — wire up room state and broadcast sync_play ────────
+        analytics.log_event(
+            "room_song_change",
+            room_code=room.code,
+            video_id=video_id,
+            title=next_item.title,
+        )
+        room.songs_played += 1
+
+        room.current_song = {
             "videoId": video_id,
-            "title": room.current_song["title"],
+            "title": audio_data.get("title") or next_item.title,
+            "duration": audio_data.get("duration") or next_item.duration,
+            "thumbnail": audio_data.get("thumbnail") or next_item.thumbnail,
+            "uploader": audio_data.get("uploader") or next_item.uploader,
             "audioUrl": audio_data["url"],
-            "thumbnail": room.current_song["thumbnail"],
-            "uploader": room.current_song["uploader"],
-            "duration": room.current_song["duration"],
-            "position": 0,
-            "playStartTime": play_start_time,
-        },
-    )
-    await send_fcm_to_disconnected_members(room.code)
+        }
+        room.position = 0.0
+        room.is_playing = True
+        room.play_start_time = time.time()
+
+        play_start_time = int(time.time() * 1000)
+        await room_manager.broadcast(
+            room,
+            {
+                "type": "sync_play",
+                "videoId": video_id,
+                "title": room.current_song["title"],
+                "audioUrl": audio_data["url"],
+                "thumbnail": room.current_song["thumbnail"],
+                "uploader": room.current_song["uploader"],
+                "duration": room.current_song["duration"],
+                "position": 0,
+                "playStartTime": play_start_time,
+            },
+        )
+        await send_fcm_to_disconnected_members(room.code)
+        if skipped:
+            print(
+                f"[WS] Room {room.code}: auto-skipped {len(skipped)} song(s) "
+                f"before landing on {video_id}: {skipped}"
+            )
+        return
+
+    # Loop exited without a successful play — either the queue ran dry
+    # mid-skip or we hit MAX_SKIPS. Tell the room so the host knows
+    # auto-advance gave up and they can pick a different track.
+    print(f"[WS] Room {room.code}: handle_next gave up after {len(skipped)} skip(s)")
+    if skipped:
+        await room_manager.broadcast(
+            room,
+            {
+                "type": "error",
+                "message": (
+                    f"Skipped {len(skipped)} unplayable song(s) in a row. "
+                    f"Try queueing different ones."
+                ),
+            },
+        )
 
 
 async def handle_queue_update(client_id: str, msg: dict):
