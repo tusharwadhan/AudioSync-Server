@@ -50,6 +50,7 @@ class ChatMessageRecord:
     text: str
     timestamp: int  # ms since epoch
     is_suggestion: bool = False
+    is_share_moment: bool = False  # special tap-to-jump card; non-editable
     suggestion_video_id: Optional[str] = None
     suggestion_title: Optional[str] = None
     suggestion_thumbnail: Optional[str] = None

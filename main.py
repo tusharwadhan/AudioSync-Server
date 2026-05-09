@@ -3198,8 +3198,8 @@ async def handle_edit_message(client_id: str, msg: dict):
         return
     if target.sender_id != client_id:
         return  # only sender can edit
-    if target.is_suggestion:
-        return  # don't allow editing system/suggestion cards
+    if target.is_suggestion or target.is_share_moment:
+        return  # don't allow editing system/suggestion/moment cards
     target.text = new_text
     target.edited_at = int(time.time() * 1000)
     await room_manager.broadcast(
@@ -3283,6 +3283,7 @@ async def handle_share_moment(client_id: str, msg: dict):
         text=text,
         timestamp=now_ms,
         is_suggestion=False,
+        is_share_moment=True,
         suggestion_video_id=video_id,
         suggestion_title=title,
         suggestion_thumbnail=thumbnail,
