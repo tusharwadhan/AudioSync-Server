@@ -3140,13 +3140,16 @@ async def handle_remove_reaction(client_id: str, msg: dict):
     room = room_manager.get_room_for_client(client_id)
     if not room:
         return
+    member = room.members.get(client_id)
+    if not member:
+        return
     msg_id = msg.get("messageId", "")
     emoji = (msg.get("emoji", "") or "").strip()
     if not msg_id or not emoji:
         return
     target = None
     for rec in room.messages:
-        if rec.id == msg_id:
+        if rec.id == msg_id and not rec.deleted:
             target = rec
             break
     if not target:
@@ -3164,6 +3167,7 @@ async def handle_remove_reaction(client_id: str, msg: dict):
             "messageId": msg_id,
             "emoji": emoji,
             "senderClientId": client_id,
+            "senderName": member.name,
             "added": False,
             "count": len(bucket),
         },
