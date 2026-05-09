@@ -3007,17 +3007,331 @@ async def handle_chat_message(client_id: str, msg: dict):
     member = room.members.get(client_id)
     if not member:
         return
+
+    from room_manager import ChatMessageRecord, MAX_CHAT_HISTORY
+
+    msg_id = uuid.uuid4().hex
+    now_ms = int(time.time() * 1000)
+
+    # Optional reply-to fields. Client sends just the id; we look up the
+    # quoted snippet from history so the broadcast is self-contained for
+    # late joiners and for clients that pruned the original locally.
+    reply_to_id = msg.get("replyToId")
+    reply_to_sender_name = None
+    reply_to_text = None
+    if reply_to_id:
+        for prev in room.messages:
+            if prev.id == reply_to_id and not prev.deleted:
+                reply_to_sender_name = prev.sender_name
+                reply_to_text = (prev.text or "")[:120]
+                break
+        else:
+            reply_to_id = None  # quoted message not found / was deleted
+
+    record = ChatMessageRecord(
+        id=msg_id,
+        sender_id=client_id,
+        sender_name=member.name,
+        text=text,
+        timestamp=now_ms,
+        reply_to_id=reply_to_id,
+        reply_to_sender_name=reply_to_sender_name,
+        reply_to_text=reply_to_text,
+    )
+    room.messages.append(record)
+    if len(room.messages) > MAX_CHAT_HISTORY:
+        # Drop oldest first; reactions/replies keyed to dropped ids are
+        # forgivably orphaned (clients hide unresolvable references).
+        del room.messages[: len(room.messages) - MAX_CHAT_HISTORY]
+
+    payload = {
+        "type": "chat_message",
+        "id": msg_id,
+        "senderClientId": client_id,
+        "senderName": member.name,
+        "text": text,
+        "timestamp": now_ms,
+    }
+    if reply_to_id:
+        payload["replyToId"] = reply_to_id
+        payload["replyToSenderName"] = reply_to_sender_name
+        payload["replyToText"] = reply_to_text
+    await room_manager.broadcast(room, payload)
+    await send_fcm_to_disconnected_members(room.code)
+
+
+async def handle_typing(client_id: str, msg: dict):
+    """Lightweight presence ping while a member is composing.
+
+    We don't broadcast every keystroke — clients send `typing` once when
+    they start (debounced ~1s) and `typing_stop` when input clears or
+    after a short idle. We re-broadcast verbatim so other members can
+    show the "<name> is typing…" dots. Stale entries time out client-side
+    via TYPING_TTL_MS so a dropped `typing_stop` doesn't pin the
+    indicator forever.
+    """
+    room = room_manager.get_room_for_client(client_id)
+    if not room:
+        return
+    member = room.members.get(client_id)
+    if not member:
+        return
+    is_typing = bool(msg.get("isTyping", True))
+    if is_typing:
+        room.typing[client_id] = int(time.time() * 1000)
+    else:
+        room.typing.pop(client_id, None)
     await room_manager.broadcast(
         room,
         {
-            "type": "chat_message",
+            "type": "typing",
+            "senderClientId": client_id,
+            "senderName": member.name,
+            "isTyping": is_typing,
+        },
+        exclude_id=client_id,
+    )
+
+
+async def handle_add_reaction(client_id: str, msg: dict):
+    """Add an emoji reaction to a chat message.
+
+    Reactions are a {emoji: set(clientId)} map per message. A given
+    client can hold at most one reaction per emoji on a message; the
+    same client adding the same emoji twice is a no-op (idempotent —
+    safe under retry / double-tap).
+    """
+    room = room_manager.get_room_for_client(client_id)
+    if not room:
+        return
+    member = room.members.get(client_id)
+    if not member:
+        return
+    msg_id = msg.get("messageId", "")
+    emoji = (msg.get("emoji", "") or "").strip()
+    if not msg_id or not emoji or len(emoji) > 16:
+        return
+    target = None
+    for rec in room.messages:
+        if rec.id == msg_id and not rec.deleted:
+            target = rec
+            break
+    if not target:
+        return
+    bucket = target.reactions.setdefault(emoji, set())
+    if client_id in bucket:
+        return  # idempotent
+    bucket.add(client_id)
+    await room_manager.broadcast(
+        room,
+        {
+            "type": "reaction_changed",
+            "messageId": msg_id,
+            "emoji": emoji,
+            "senderClientId": client_id,
+            "senderName": member.name,
+            "added": True,
+            "count": len(bucket),
+        },
+    )
+
+
+async def handle_remove_reaction(client_id: str, msg: dict):
+    room = room_manager.get_room_for_client(client_id)
+    if not room:
+        return
+    msg_id = msg.get("messageId", "")
+    emoji = (msg.get("emoji", "") or "").strip()
+    if not msg_id or not emoji:
+        return
+    target = None
+    for rec in room.messages:
+        if rec.id == msg_id:
+            target = rec
+            break
+    if not target:
+        return
+    bucket = target.reactions.get(emoji)
+    if not bucket or client_id not in bucket:
+        return
+    bucket.discard(client_id)
+    if not bucket:
+        target.reactions.pop(emoji, None)
+    await room_manager.broadcast(
+        room,
+        {
+            "type": "reaction_changed",
+            "messageId": msg_id,
+            "emoji": emoji,
+            "senderClientId": client_id,
+            "added": False,
+            "count": len(bucket),
+        },
+    )
+
+
+async def handle_edit_message(client_id: str, msg: dict):
+    """Edit own message. Only the original sender can edit.
+
+    We mutate the in-memory record so subsequent late-arriving features
+    (history fetch, reaction lookups) see the new text. Broadcast the
+    edited text + an `editedAt` timestamp so clients can show the
+    "(edited)" subscript next to the bubble.
+    """
+    room = room_manager.get_room_for_client(client_id)
+    if not room:
+        return
+    msg_id = msg.get("messageId", "")
+    new_text = (msg.get("text", "") or "").strip()
+    if not msg_id or not new_text or len(new_text) > 500:
+        return
+    target = None
+    for rec in room.messages:
+        if rec.id == msg_id:
+            target = rec
+            break
+    if not target or target.deleted:
+        return
+    if target.sender_id != client_id:
+        return  # only sender can edit
+    if target.is_suggestion:
+        return  # don't allow editing system/suggestion cards
+    target.text = new_text
+    target.edited_at = int(time.time() * 1000)
+    await room_manager.broadcast(
+        room,
+        {
+            "type": "message_edited",
+            "messageId": msg_id,
+            "text": new_text,
+            "editedAt": target.edited_at,
+        },
+    )
+
+
+async def handle_delete_message(client_id: str, msg: dict):
+    """Delete own message. Host can delete anyone's message (moderation).
+
+    Soft-delete: we keep the record so reply-threads still resolve to
+    "(deleted)" instead of vanishing. Reactions are wiped.
+    """
+    room = room_manager.get_room_for_client(client_id)
+    if not room:
+        return
+    msg_id = msg.get("messageId", "")
+    if not msg_id:
+        return
+    target = None
+    for rec in room.messages:
+        if rec.id == msg_id:
+            target = rec
+            break
+    if not target or target.deleted:
+        return
+    is_host = room.host_id == client_id
+    if target.sender_id != client_id and not is_host:
+        return
+    target.deleted = True
+    target.text = ""
+    target.reactions.clear()
+    await room_manager.broadcast(
+        room,
+        {
+            "type": "message_deleted",
+            "messageId": msg_id,
+            "deletedBy": client_id,
+            "byHost": is_host and target.sender_id != client_id,
+        },
+    )
+
+
+async def handle_share_moment(client_id: str, msg: dict):
+    """Share a timestamped moment of the current song into chat.
+
+    Body: { videoId, title, thumbnail, positionMs, note? }.
+    Becomes a special `share_moment` chat card so other members can tap
+    and seek directly to that point. We broadcast a chat-message-shaped
+    payload with an extra `moment` block; clients render it as a card.
+    """
+    room = room_manager.get_room_for_client(client_id)
+    if not room:
+        return
+    member = room.members.get(client_id)
+    if not member:
+        return
+    video_id = msg.get("videoId", "")
+    title = msg.get("title", "")
+    thumbnail = msg.get("thumbnail", "")
+    position_ms = int(msg.get("positionMs", 0) or 0)
+    note = (msg.get("note", "") or "").strip()[:200]
+    if not video_id or position_ms < 0:
+        return
+
+    from room_manager import ChatMessageRecord, MAX_CHAT_HISTORY
+
+    msg_id = uuid.uuid4().hex
+    now_ms = int(time.time() * 1000)
+    text = note if note else f'shared a moment from "{title}"'
+    record = ChatMessageRecord(
+        id=msg_id,
+        sender_id=client_id,
+        sender_name=member.name,
+        text=text,
+        timestamp=now_ms,
+        is_suggestion=False,
+        suggestion_video_id=video_id,
+        suggestion_title=title,
+        suggestion_thumbnail=thumbnail,
+    )
+    room.messages.append(record)
+    if len(room.messages) > MAX_CHAT_HISTORY:
+        del room.messages[: len(room.messages) - MAX_CHAT_HISTORY]
+    await room_manager.broadcast(
+        room,
+        {
+            "type": "share_moment",
+            "id": msg_id,
             "senderClientId": client_id,
             "senderName": member.name,
             "text": text,
+            "timestamp": now_ms,
+            "videoId": video_id,
+            "title": title,
+            "thumbnail": thumbnail,
+            "positionMs": position_ms,
+            "note": note,
+        },
+    )
+
+
+async def handle_song_reaction(client_id: str, msg: dict):
+    """Float an emoji over the album art for everyone in the room.
+
+    Pure ephemeral effect — no chat record, no history. Clients
+    animate the emoji rising from the bottom of the now-playing card
+    when they receive `song_reaction`. Rate limit is a soft 1 per
+    500ms per client (enforced loosely; a tight loop would just stack
+    in the receive buffer and we drop them).
+    """
+    room = room_manager.get_room_for_client(client_id)
+    if not room:
+        return
+    member = room.members.get(client_id)
+    if not member:
+        return
+    emoji = (msg.get("emoji", "") or "").strip()
+    if not emoji or len(emoji) > 8:
+        return
+    await room_manager.broadcast(
+        room,
+        {
+            "type": "song_reaction",
+            "senderClientId": client_id,
+            "senderName": member.name,
+            "emoji": emoji,
             "timestamp": int(time.time() * 1000),
         },
     )
-    await send_fcm_to_disconnected_members(room.code)
 
 
 async def handle_song_request(client_id: str, msg: dict):
@@ -3068,15 +3382,38 @@ async def handle_song_request(client_id: str, msg: dict):
     await room_manager.broadcast_queue(room)
 
     # Broadcast chat message about the suggestion (includes song metadata for card UI)
+    from room_manager import ChatMessageRecord, MAX_CHAT_HISTORY
+
+    msg_id = uuid.uuid4().hex
+    now_ms = int(time.time() * 1000)
+    sug_text = f'suggested "{item.title}"'
+    record = ChatMessageRecord(
+        id=msg_id,
+        sender_id=client_id,
+        sender_name=member.name,
+        text=sug_text,
+        timestamp=now_ms,
+        is_suggestion=True,
+        suggestion_video_id=video_id,
+        suggestion_title=item.title,
+        suggestion_thumbnail=item.thumbnail,
+        suggestion_uploader=item.uploader,
+    )
+    room.messages.append(record)
+    if len(room.messages) > MAX_CHAT_HISTORY:
+        del room.messages[: len(room.messages) - MAX_CHAT_HISTORY]
+
     await room_manager.broadcast(
         room,
         {
             "type": "chat_message",
+            "id": msg_id,
             "senderClientId": client_id,
             "senderName": member.name,
-            "text": f'suggested "{item.title}"',
-            "timestamp": int(time.time() * 1000),
+            "text": sug_text,
+            "timestamp": now_ms,
             "isSuggestion": True,
+            "suggestionVideoId": video_id,
             "suggestionTitle": item.title,
             "suggestionThumbnail": item.thumbnail,
             "suggestionUploader": item.uploader,
@@ -3419,6 +3756,27 @@ async def websocket_endpoint(websocket: WebSocket):
 
             elif msg_type == "chat_message":
                 await handle_chat_message(client_id, msg)
+
+            elif msg_type == "typing":
+                await handle_typing(client_id, msg)
+
+            elif msg_type == "add_reaction":
+                await handle_add_reaction(client_id, msg)
+
+            elif msg_type == "remove_reaction":
+                await handle_remove_reaction(client_id, msg)
+
+            elif msg_type == "edit_message":
+                await handle_edit_message(client_id, msg)
+
+            elif msg_type == "delete_message":
+                await handle_delete_message(client_id, msg)
+
+            elif msg_type == "share_moment":
+                await handle_share_moment(client_id, msg)
+
+            elif msg_type == "song_reaction":
+                await handle_song_reaction(client_id, msg)
 
             elif msg_type == "song_request":
                 await handle_song_request(client_id, msg)

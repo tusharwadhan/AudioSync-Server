@@ -7,6 +7,11 @@ from dataclasses import dataclass, field
 from typing import Optional
 
 
+# Per-room chat caps. Keep memory bounded under heavy chatters.
+MAX_CHAT_HISTORY = 200
+TYPING_TTL_MS = 5_000
+
+
 @dataclass
 class RoomMember:
     client_id: str
@@ -30,6 +35,34 @@ class QueueItem:
 
 
 @dataclass
+class ChatMessageRecord:
+    """In-memory chat message record. Lives only as long as the room exists.
+
+    Required by the chat-redesign features: reactions and replies need a
+    stable identifier per message so clients can address the right one
+    when broadcasting `add_reaction` / `delete_message` / etc. We bound
+    the per-room history list to the most recent N messages so a noisy
+    room doesn't grow the server process unbounded.
+    """
+    id: str  # uuid hex (no dashes)
+    sender_id: str
+    sender_name: str
+    text: str
+    timestamp: int  # ms since epoch
+    is_suggestion: bool = False
+    suggestion_video_id: Optional[str] = None
+    suggestion_title: Optional[str] = None
+    suggestion_thumbnail: Optional[str] = None
+    suggestion_uploader: Optional[str] = None
+    reply_to_id: Optional[str] = None  # message id this is a reply to
+    reply_to_sender_name: Optional[str] = None
+    reply_to_text: Optional[str] = None  # snapshot of original text for display
+    edited_at: Optional[int] = None  # ms since epoch when last edited (None = never)
+    deleted: bool = False  # tombstoned messages stay so clients can grey them out
+    reactions: dict = field(default_factory=dict)  # emoji -> set[client_id]
+
+
+@dataclass
 class RoomState:
     code: str
     host_id: str
@@ -45,6 +78,13 @@ class RoomState:
     invite_tokens: dict = field(default_factory=dict)  # token -> expiry timestamp
     peak_members: int = 1
     songs_played: int = 0
+    # Chat: bounded in-memory history (last MAX_CHAT_HISTORY messages).
+    # Cleared when the room is destroyed; we deliberately do NOT persist
+    # chat across room sessions.
+    messages: list = field(default_factory=list)  # list of ChatMessageRecord
+    # Tracks "X is typing" state. client_id -> last keystroke ts (ms).
+    # Entries auto-expire after TYPING_TTL_MS in handle_typing.
+    typing: dict = field(default_factory=dict)
 
     def get_sorted_queue(self) -> list:
         """Requests sorted by vote count desc, then timestamp asc, followed by suggestions."""
