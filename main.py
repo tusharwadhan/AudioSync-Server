@@ -183,10 +183,10 @@ class RoomListResponse(BaseModel):
 
 # App update configuration - modify these values to control updates
 APP_UPDATE_CONFIG = {
-    "latestVersion": "5.9.7",
-    "latestVersionCode": 36,
-    "apkUrl": "https://raw.githubusercontent.com/tusharwadhan/AudioSync-Server/tushar/releases/syncaura-5.9.7.apk",
-    "releaseNotes": "Listen Together controls behave properly everywhere now — notification, Bluetooth, lock screen, edge player, and the floating pill. Hosts stay in charge of play/pause/seek/skip across every surface, and guests get a friendly nudge instead of accidentally breaking the room when they tap a control they shouldn't.",
+    "latestVersion": "5.10.0",
+    "latestVersionCode": 37,
+    "apkUrl": "https://raw.githubusercontent.com/tusharwadhan/AudioSync-Server/tushar/releases/syncaura-5.10.0.apk",
+    "releaseNotes": "The room chat is completely reimagined — sticky now-playing card, reactions on bubbles, swipe-to-reply, share-the-moment cards, @mentions, and a smoother feel everywhere. Toasts, dialogs, and menus got a SyncAura-branded refresh. Adding a song to the queue now flies it across the screen. Plus a wave of bug fixes.",
     # List of version codes that MUST update (mandatory)
     "mandatoryBelow": 22,  # Force previous versions to update
 }
