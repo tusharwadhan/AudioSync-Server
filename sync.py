@@ -155,6 +155,48 @@ class ListenEventsResponse(BaseModel):
     serverTime: int
 
 
+# ── downloads (offline-download bookkeeping) ─────────────────────────────
+
+
+class DownloadItem(BaseModel):
+    videoId: str
+    title: Optional[str] = None
+    uploader: Optional[str] = None
+    duration: Optional[int] = None
+    thumbnail: Optional[str] = None
+    fileSize: Optional[int] = None
+    isAutoDownloaded: bool = False
+    downloadedAt: int = 0
+    deleted: bool = False
+    # Server-stamped
+    updatedAt: Optional[int] = None
+    deletedAt: Optional[int] = None
+
+
+class DownloadsPushRequest(BaseModel):
+    items: List[DownloadItem]
+
+
+class DownloadsResponse(BaseModel):
+    items: List[DownloadItem]
+    serverTime: int
+
+
+# ── settings (flat key→value app-settings blob) ──────────────────────────
+
+
+class SettingsResponse(BaseModel):
+    # The whole blob as the client stored it; always carries an embedded
+    # "_updated_at" (unix ms) used for last-write-wins. `null` when the
+    # user has never pushed settings.
+    settings: Optional[dict] = None
+    serverTime: int
+
+
+class SettingsPushRequest(BaseModel):
+    settings: dict
+
+
 # Cap on how many rows a single push can contain — defensive against a
 # misbehaving client trying to ship its entire local DB at once.
 MAX_BATCH = 500
@@ -540,3 +582,170 @@ async def push_listen_events(
         )
     await session.commit()
     return ListenEventsResponse(items=out, serverTime=_server_time_ms())
+
+
+# ── /sync/downloads ──────────────────────────────────────────────────────
+
+
+@router.get("/downloads", response_model=DownloadsResponse)
+async def get_downloads(
+    since: int = Query(0, ge=0, description="Unix ms; rows with updated_at > since"),
+    user: AuthedUser = Depends(get_current_user),
+    session: AsyncSession = Depends(get_session),
+):
+    since_dt = _from_ms(since) or datetime.fromtimestamp(0, tz=timezone.utc)
+    rows = (
+        await session.execute(
+            select(models.UserDownload)
+            .where(models.UserDownload.user_id == user["uid"])
+            .where(models.UserDownload.updated_at > since_dt)
+            .order_by(models.UserDownload.updated_at.asc())
+        )
+    ).scalars().all()
+    return DownloadsResponse(
+        items=[
+            DownloadItem(
+                videoId=r.video_id,
+                title=r.title,
+                uploader=r.uploader,
+                duration=r.duration,
+                thumbnail=r.thumbnail,
+                fileSize=r.file_size,
+                isAutoDownloaded=r.is_auto_downloaded,
+                downloadedAt=_ms(r.downloaded_at) or 0,
+                deleted=r.deleted_at is not None,
+                updatedAt=_ms(r.updated_at),
+                deletedAt=_ms(r.deleted_at),
+            )
+            for r in rows
+        ],
+        serverTime=_server_time_ms(),
+    )
+
+
+@router.post("/downloads", response_model=DownloadsResponse)
+async def push_downloads(
+    body: DownloadsPushRequest,
+    user: AuthedUser = Depends(get_current_user),
+    session: AsyncSession = Depends(get_session),
+):
+    _check_batch_size(len(body.items))
+    now = datetime.now(timezone.utc)
+    out: list[DownloadItem] = []
+    for item in body.items:
+        # _from_ms(0) is a *truthy* 1970 datetime, so a plain `or now`
+        # wouldn't catch an omitted timestamp — guard on the raw int.
+        downloaded_dt = _from_ms(item.downloadedAt) if item.downloadedAt and item.downloadedAt > 0 else now
+        values = {
+            "user_id": user["uid"],
+            "video_id": item.videoId,
+            "title": item.title,
+            "uploader": item.uploader,
+            "duration": item.duration,
+            "thumbnail": item.thumbnail,
+            "file_size": item.fileSize,
+            "is_auto_downloaded": item.isAutoDownloaded,
+            "downloaded_at": downloaded_dt,
+            "updated_at": now,
+            "deleted_at": now if item.deleted else None,
+        }
+        stmt = pg_insert(models.UserDownload).values(**values).on_conflict_do_update(
+            index_elements=["user_id", "video_id"],
+            set_={
+                "title": values["title"],
+                "uploader": values["uploader"],
+                "duration": values["duration"],
+                "thumbnail": values["thumbnail"],
+                "file_size": values["file_size"],
+                "is_auto_downloaded": values["is_auto_downloaded"],
+                "downloaded_at": values["downloaded_at"],
+                "updated_at": now,
+                "deleted_at": values["deleted_at"],
+            },
+        )
+        await session.execute(stmt)
+        out.append(
+            DownloadItem(
+                videoId=item.videoId,
+                title=item.title,
+                uploader=item.uploader,
+                duration=item.duration,
+                thumbnail=item.thumbnail,
+                fileSize=item.fileSize,
+                isAutoDownloaded=item.isAutoDownloaded,
+                downloadedAt=item.downloadedAt,
+                deleted=item.deleted,
+                updatedAt=_ms(now),
+                deletedAt=_ms(now) if item.deleted else None,
+            )
+        )
+    await session.commit()
+    return DownloadsResponse(items=out, serverTime=_server_time_ms())
+
+
+# ── /sync/settings ───────────────────────────────────────────────────────
+
+
+@router.get("/settings", response_model=SettingsResponse)
+async def get_settings(
+    user: AuthedUser = Depends(get_current_user),
+    session: AsyncSession = Depends(get_session),
+):
+    row = (
+        await session.execute(
+            select(models.User).where(models.User.id == user["uid"])
+        )
+    ).scalar_one_or_none()
+    return SettingsResponse(
+        settings=(row.settings_json if row else None),
+        serverTime=_server_time_ms(),
+    )
+
+
+@router.post("/settings", response_model=SettingsResponse)
+async def push_settings(
+    body: SettingsPushRequest,
+    user: AuthedUser = Depends(get_current_user),
+    session: AsyncSession = Depends(get_session),
+):
+    incoming = dict(body.settings or {})
+    # Last-write-wins on the embedded "_updated_at" (unix ms). A push
+    # whose timestamp isn't newer than what we have is ignored — protects
+    # against an out-of-order write from a device with a slow clock
+    # clobbering a fresher one. If the client forgot to stamp the blob,
+    # treat it as "now" (and write the stamp back) so the push isn't
+    # silently dropped against a previously-stamped copy.
+    incoming_ts = 0
+    try:
+        incoming_ts = int(incoming.get("_updated_at", 0))
+    except (TypeError, ValueError):
+        incoming_ts = 0
+    if incoming_ts <= 0:
+        incoming_ts = _server_time_ms()
+        incoming["_updated_at"] = incoming_ts
+
+    row = (
+        await session.execute(
+            select(models.User).where(models.User.id == user["uid"])
+        )
+    ).scalar_one_or_none()
+    if row is None:
+        # /auth/sync should have created the user already; if not, just
+        # report back what was sent without persisting (the client retries).
+        return SettingsResponse(settings=incoming, serverTime=_server_time_ms())
+
+    existing = row.settings_json or {}
+    existing_ts = 0
+    try:
+        existing_ts = int(existing.get("_updated_at", 0))
+    except (TypeError, ValueError):
+        existing_ts = 0
+
+    if incoming_ts >= existing_ts:
+        row.settings_json = incoming
+        await session.commit()
+        return SettingsResponse(settings=incoming, serverTime=_server_time_ms())
+    else:
+        # Stored copy is newer — keep it, hand it back so the client can
+        # reconcile.
+        return SettingsResponse(settings=existing, serverTime=_server_time_ms())

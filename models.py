@@ -31,6 +31,7 @@ from sqlalchemy import (
     Integer,
     String,
 )
+from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import Mapped, mapped_column
 
 from db import Base
@@ -60,6 +61,14 @@ class User(Base):
     last_seen: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), default=utc_now, nullable=False
     )
+    # Flat key→value blob of the user's app settings (auto-download
+    # toggle/threshold, wifi-only, client-extraction toggle, hum
+    # on/off + consent, onboarding/prompt flags, display name). The
+    # client owns the schema; the server just stores it. Conflict
+    # resolution is last-write-wins on the embedded "_updated_at" key
+    # (unix ms) — a push with an older "_updated_at" than what's stored
+    # is ignored. Defaults to {} for users created before this column.
+    settings_json: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
 
     def __repr__(self) -> str:
         return f"<User id={self.id} email={self.email}>"
@@ -209,4 +218,46 @@ class UserListenEvent(Base):
 
     __table_args__ = (
         Index("ix_user_listen_events_user_received", "user_id", "received_at"),
+    )
+
+
+class UserDownload(Base):
+    """Bookkeeping for a song the user has downloaded for offline play.
+
+    The audio blob itself is NOT uploaded — only the metadata + flags, so
+    a fresh install can show "you have N downloads in your account; tap to
+    re-download" (the re-download flow is a later client feature). Same
+    tombstone / last-write-wins conventions as user_favorites.
+
+    Deliberately omitted vs. the client's `downloaded_songs` table:
+      * `localPath` — device-specific, meaningless on another device
+      * `downloadStatus` / `fileSize` are advisory; the client re-derives
+        status locally (it's "remote / not downloaded here" after a pull)
+    """
+    __tablename__ = "user_downloads"
+
+    user_id: Mapped[str] = mapped_column(
+        String(128), ForeignKey("users.id", ondelete="CASCADE"), primary_key=True
+    )
+    video_id: Mapped[str] = mapped_column(String(32), primary_key=True)
+    title: Mapped[str | None] = mapped_column(String(512), nullable=True)
+    uploader: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    duration: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    thumbnail: Mapped[str | None] = mapped_column(String(1024), nullable=True)
+    file_size: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+    is_auto_downloaded: Mapped[bool] = mapped_column(
+        Boolean, default=False, nullable=False
+    )
+    downloaded_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utc_now, nullable=False
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utc_now, nullable=False
+    )
+    deleted_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+
+    __table_args__ = (
+        Index("ix_user_downloads_user_updated", "user_id", "updated_at"),
     )
