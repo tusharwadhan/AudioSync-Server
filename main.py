@@ -36,6 +36,7 @@ from auth import AuthedUser, get_current_user
 from db import get_session
 import models
 from sync import router as sync_router
+import social
 
 app = FastAPI(title="SyncAura API")
 
@@ -3809,14 +3810,38 @@ async def websocket_endpoint(websocket: WebSocket):
             elif msg_type == "leave":
                 await handle_leave(client_id)
 
+            # ── Social v1 (lounge / online / DMs) ──
+            elif msg_type == "social_subscribe":
+                await social.handle_social_subscribe(client_id, websocket, msg)
+
+            elif msg_type == "presence_ping":
+                await social.handle_presence_ping(client_id, websocket, msg)
+
+            elif msg_type == "lounge_send":
+                await social.handle_lounge_send(client_id, websocket, msg)
+
+            elif msg_type == "dm_send":
+                await social.handle_dm_send(client_id, websocket, msg)
+
+            elif msg_type == "dm_accept":
+                await social.handle_dm_accept(client_id, websocket, msg)
+
+            elif msg_type == "dm_decline":
+                await social.handle_dm_decline(client_id, websocket, msg)
+
+            elif msg_type == "dm_read":
+                await social.handle_dm_read(client_id, websocket, msg)
+
     except WebSocketDisconnect:
         print(f"[WS] Client disconnected: {client_id[:8]}")
         analytics.log_event("ws_disconnect", client_id=client_id)
         await handle_disconnect(client_id)
+        await social.handle_social_disconnect(client_id)
     except Exception as e:
         print(f"[WS] Error for {client_id[:8]}: {e}")
         analytics.log_event("ws_disconnect", client_id=client_id)
         await handle_disconnect(client_id)
+        await social.handle_social_disconnect(client_id)
 
 
 # ── Song Identification via Lyrics ──
@@ -4195,8 +4220,20 @@ async def auth_sync(
 # playlist_songs / listen_events all live in sync.py.
 api.include_router(sync_router)
 
+# Social v1 — global lounge + online presence + DMs. Routes:
+#   GET /api/v1/social/snapshot
+#   GET /api/v1/social/friends
+# WebSocket dispatch lives inside websocket_endpoint above.
+api.include_router(social.router)
+
 # Register the versioned API router
 app.include_router(api)
+
+
+@app.on_event("startup")
+async def startup_social_prune() -> None:
+    """Start the periodic lounge/DM retention sweeper."""
+    asyncio.create_task(social.prune_loop())
 
 
 if __name__ == "__main__":
