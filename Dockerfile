@@ -30,6 +30,8 @@ COPY auth.py .
 COPY db.py .
 COPY models.py .
 COPY sync.py .
+# Social v1 — global lounge + presence + DMs (imported by main.py).
+COPY social.py .
 COPY alembic.ini .
 COPY alembic ./alembic
 RUN chmod +x start.sh
