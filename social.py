@@ -74,6 +74,17 @@ from auth import AuthedUser, get_current_user
 import db
 import models
 
+# firebase_admin is initialized at app startup in main.py for the
+# existing room-reconnect FCM path; importing the `messaging` module
+# here is safe regardless of init ordering — we guard sends behind
+# `firebase_admin._apps` so we no-op silently if the SDK isn't ready.
+try:
+    import firebase_admin
+    from firebase_admin import messaging as _fcm_messaging
+except Exception:  # pragma: no cover — local dev without firebase_admin
+    firebase_admin = None
+    _fcm_messaging = None
+
 
 router = APIRouter(prefix="/social", tags=["social"])
 
@@ -210,6 +221,51 @@ class PresenceManager:
 
 
 presence = PresenceManager()
+
+
+# ─────────────────────────────────────────────────────────────────────
+# FCM token registry (UID -> device push token)
+# ─────────────────────────────────────────────────────────────────────
+#
+# Populated by the `social_fcm_register` WS message the client sends
+# right after a successful social_subscribe. Used to push DM
+# notifications to recipients whose WebSocket isn't connected at the
+# moment a message lands. Cleared lazily on UnregisteredError replies
+# from FCM (token rotated / app uninstalled).
+
+_fcm_tokens_by_uid: dict[str, str] = {}
+
+
+async def _push_dm_fcm(
+    *,
+    recipient_uid: str,
+    sender_uid: str,
+    sender_name: str,
+    preview: str,
+) -> None:
+    """Send a data-only FCM message for a DM the recipient missed
+    because they weren't connected. Best-effort — silently no-ops if
+    the SDK isn't initialized, no token is stored, or send fails."""
+    token = _fcm_tokens_by_uid.get(recipient_uid)
+    if not token or firebase_admin is None or not firebase_admin._apps:
+        return
+    try:
+        message = _fcm_messaging.Message(
+            data={
+                "type": "dm",
+                "from_uid": sender_uid,
+                "from_name": sender_name[:120],
+                "preview": (preview or "")[:200],
+            },
+            token=token,
+            android=_fcm_messaging.AndroidConfig(priority="high"),
+        )
+        await asyncio.to_thread(_fcm_messaging.send, message)
+    except _fcm_messaging.UnregisteredError:
+        # Stale token — drop from the map so we don't keep retrying.
+        _fcm_tokens_by_uid.pop(recipient_uid, None)
+    except Exception as e:
+        print(f"[social] FCM DM push failed for {recipient_uid[:8]}: {e}")
 
 
 # ─────────────────────────────────────────────────────────────────────
@@ -585,6 +641,22 @@ async def handle_presence_ping(client_id: str, websocket: WebSocket, msg: dict) 
     presence.touch(client_id)
 
 
+async def handle_social_fcm_register(
+    client_id: str, websocket: WebSocket, msg: dict
+) -> None:
+    """Map the WS-authenticated UID to the device's FCM token so we
+    can push DM notifications when the WS isn't connected. Client
+    sends this once after social_subscribe completes."""
+    uid = presence.uid_for_client(client_id)
+    if uid is None:
+        return
+    token = (msg.get("token") or "").strip()
+    if not token:
+        return
+    _fcm_tokens_by_uid[uid] = token
+    print(f"[social] FCM token registered for uid={uid[:8]}")
+
+
 async def handle_lounge_send(client_id: str, websocket: WebSocket, msg: dict) -> None:
     uid = presence.uid_for_client(client_id)
     if uid is None:
@@ -700,11 +772,20 @@ async def handle_dm_send(client_id: str, websocket: WebSocket, msg: dict) -> Non
     sender_payload["type"] = "dm_message"
     await _send(websocket, sender_payload)
 
-    # Deliver to recipient if not soft-blocked.
+    # Deliver to recipient if not soft-blocked. If their WS isn't
+    # connected, fall back to an FCM data push so their device wakes
+    # up and shows a notification.
     if delivered_to_recipient:
         recipient_payload = dict(base)
         recipient_payload["type"] = "dm_message"
-        await _send_to_uid(recipient_uid, recipient_payload)
+        delivered_over_ws = await _send_to_uid(recipient_uid, recipient_payload)
+        if not delivered_over_ws:
+            await _push_dm_fcm(
+                recipient_uid=recipient_uid,
+                sender_uid=sender_uid,
+                sender_name=sender.name,
+                preview=text or "Shared a song",
+            )
 
 
 async def handle_dm_accept(client_id: str, websocket: WebSocket, msg: dict) -> None:

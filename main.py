@@ -3817,6 +3817,9 @@ async def websocket_endpoint(websocket: WebSocket):
             elif msg_type == "presence_ping":
                 await social.handle_presence_ping(client_id, websocket, msg)
 
+            elif msg_type == "social_fcm_register":
+                await social.handle_social_fcm_register(client_id, websocket, msg)
+
             elif msg_type == "lounge_send":
                 await social.handle_lounge_send(client_id, websocket, msg)
 
