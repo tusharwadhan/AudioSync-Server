@@ -32,8 +32,13 @@ from sqlalchemy import (
     Integer,
     String,
     Text,
-    text,
 )
+# Aliased to avoid shadowing inside class bodies — DmMessage and
+# LoungeMessage both declare a `text` column, so referring to the SQL
+# expression helper as `text(...)` inside their __table_args__ would
+# resolve to the column's MappedColumn (Python class-body scoping) and
+# blow up at import time.
+from sqlalchemy import text as sql_text
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import Mapped, mapped_column
 
@@ -389,13 +394,13 @@ class DmMessage(Base):
             "ix_dm_messages_to_unread",
             "to_uid",
             "sent_at",
-            postgresql_where=text("read_at IS NULL"),
+            postgresql_where=sql_text("read_at IS NULL"),
         ),
         Index(
             "ix_dm_messages_from_unread",
             "from_uid",
             "sent_at",
-            postgresql_where=text("read_at IS NULL"),
+            postgresql_where=sql_text("read_at IS NULL"),
         ),
     )
 
@@ -434,5 +439,5 @@ class LoungeMessage(Base):
             name="ck_lounge_messages_has_content",
         ),
         # Newest-first read pattern for the snapshot's "last 200".
-        Index("ix_lounge_messages_sent_at_desc", text("sent_at DESC")),
+        Index("ix_lounge_messages_sent_at_desc", sql_text("sent_at DESC")),
     )
