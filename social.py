@@ -244,10 +244,22 @@ async def _push_dm_fcm(
     preview: str,
 ) -> None:
     """Send a data-only FCM message for a DM the recipient missed
-    because they weren't connected. Best-effort — silently no-ops if
-    the SDK isn't initialized, no token is stored, or send fails."""
+    because they weren't connected. Best-effort, but every branch
+    logs explicitly so the Render dashboard makes the failure mode
+    obvious when a user reports "no notification while offline"."""
+    print(
+        f"[social] FCM attempt -> recipient={recipient_uid[:8]} "
+        f"sender={sender_uid[:8]} (tokens_map_size={len(_fcm_tokens_by_uid)})"
+    )
     token = _fcm_tokens_by_uid.get(recipient_uid)
-    if not token or firebase_admin is None or not firebase_admin._apps:
+    if not token:
+        print(f"[social] FCM skip: no token stored for {recipient_uid[:8]}")
+        return
+    if firebase_admin is None or not firebase_admin._apps:
+        print(
+            f"[social] FCM skip: firebase_admin not initialized "
+            f"(uid={recipient_uid[:8]})"
+        )
         return
     try:
         message = _fcm_messaging.Message(
@@ -260,12 +272,17 @@ async def _push_dm_fcm(
             token=token,
             android=_fcm_messaging.AndroidConfig(priority="high"),
         )
-        await asyncio.to_thread(_fcm_messaging.send, message)
+        message_id = await asyncio.to_thread(_fcm_messaging.send, message)
+        print(
+            f"[social] FCM DM push OK -> {recipient_uid[:8]} "
+            f"message_id={message_id}"
+        )
     except _fcm_messaging.UnregisteredError:
         # Stale token — drop from the map so we don't keep retrying.
         _fcm_tokens_by_uid.pop(recipient_uid, None)
+        print(f"[social] FCM stale token removed for {recipient_uid[:8]}")
     except Exception as e:
-        print(f"[social] FCM DM push failed for {recipient_uid[:8]}: {e}")
+        print(f"[social] FCM DM push FAILED for {recipient_uid[:8]}: {e}")
 
 
 # ─────────────────────────────────────────────────────────────────────
@@ -432,6 +449,12 @@ def _dm_to_dict(m: models.DmMessage, *, with_gate_state: str | None = None) -> d
         "np_thumbnail": m.np_thumbnail,
         "sent_at": _to_ms(m.sent_at),
         "read_at": _to_ms(m.read_at),
+        # Chat-parity fields (migration 0005).
+        "reactions": dict(m.reactions or {}),
+        "reply_to_message_id": m.reply_to_message_id,
+        "edited_at": _to_ms(m.edited_at),
+        "deleted": bool(m.deleted),
+        "share_moment": m.share_moment,
     }
     if with_gate_state is not None:
         d["gate_state"] = with_gate_state
@@ -710,9 +733,19 @@ async def handle_dm_send(client_id: str, websocket: WebSocket, msg: dict) -> Non
 
     text = (msg.get("text") or "").strip() or None
     np_video_id = (msg.get("np_video_id") or "").strip() or None
-    if text is None and np_video_id is None:
-        await _send(websocket, _err("empty_message", "Provide text or np_video_id"))
+    share_moment = msg.get("share_moment")
+    if not isinstance(share_moment, dict):
+        share_moment = None
+    if text is None and np_video_id is None and share_moment is None:
+        await _send(
+            websocket,
+            _err("empty_message", "Provide text, np_video_id, or share_moment"),
+        )
         return
+
+    reply_to_id = msg.get("reply_to_message_id")
+    if reply_to_id is not None and not isinstance(reply_to_id, int):
+        reply_to_id = None
 
     sender = presence.get(sender_uid)
     if sender is None:
@@ -756,6 +789,10 @@ async def handle_dm_send(client_id: str, websocket: WebSocket, msg: dict) -> Non
             np_title=msg.get("np_title"),
             np_artist=msg.get("np_artist"),
             np_thumbnail=msg.get("np_thumbnail"),
+            reply_to_message_id=reply_to_id,
+            share_moment=share_moment,
+            reactions={},
+            deleted=False,
             sent_at=_now(),
         )
         session.add(message)
@@ -874,6 +911,198 @@ async def handle_dm_read(client_id: str, websocket: WebSocket, msg: dict) -> Non
         q = q.values(read_at=_now())
         await session.execute(q)
         await session.commit()
+
+
+# ─────────────────────────────────────────────────────────────────────
+# DM chat-parity handlers (reactions, reply, edit, delete, share-moment,
+# typing). Mirror the room-chat capability set on top of dm_messages.
+# ─────────────────────────────────────────────────────────────────────
+
+
+async def _fetch_dm_message(
+    session: AsyncSession, message_id: int
+) -> models.DmMessage | None:
+    return (
+        await session.execute(
+            select(models.DmMessage).where(models.DmMessage.id == message_id)
+        )
+    ).scalar_one_or_none()
+
+
+def _other_uid(m: models.DmMessage, me: str) -> str:
+    return m.to_uid if m.from_uid == me else m.from_uid
+
+
+async def _broadcast_to_pair(payload: dict, me: str, peer: str) -> None:
+    """Send the same payload to both ends of a DM thread. Used by
+    reactions / edits / deletes / typing so both views stay in sync."""
+    await _send_to_uid(me, payload)
+    await _send_to_uid(peer, payload)
+
+
+async def handle_dm_chat_react(
+    client_id: str, websocket: WebSocket, msg: dict
+) -> None:
+    me = presence.uid_for_client(client_id)
+    if me is None:
+        await _send(websocket, _err("not_subscribed", "Call social_subscribe first"))
+        return
+    message_id = msg.get("message_id")
+    emoji = (msg.get("emoji") or "").strip()
+    if not isinstance(message_id, int) or not emoji:
+        await _send(websocket, _err("bad_request", "message_id + emoji required"))
+        return
+
+    async with _session_scope() as session:
+        m = await _fetch_dm_message(session, message_id)
+        if m is None or (m.from_uid != me and m.to_uid != me):
+            await _send(websocket, _err("not_found", "Message not in your thread"))
+            return
+        # Mutate the JSONB dict in Python then re-assign so SQLAlchemy
+        # marks it dirty (it doesn't track in-place dict mutations).
+        reactions = dict(m.reactions or {})
+        bucket = list(reactions.get(emoji, []))
+        if me not in bucket:
+            bucket.append(me)
+        reactions[emoji] = bucket
+        m.reactions = reactions
+        await session.commit()
+        peer = _other_uid(m, me)
+        updated = dict(reactions)
+
+    await _broadcast_to_pair(
+        {
+            "type": "dm_message_reactions",
+            "message_id": message_id,
+            "reactions": updated,
+        },
+        me,
+        peer,
+    )
+
+
+async def handle_dm_chat_unreact(
+    client_id: str, websocket: WebSocket, msg: dict
+) -> None:
+    me = presence.uid_for_client(client_id)
+    if me is None:
+        await _send(websocket, _err("not_subscribed", "Call social_subscribe first"))
+        return
+    message_id = msg.get("message_id")
+    emoji = (msg.get("emoji") or "").strip()
+    if not isinstance(message_id, int) or not emoji:
+        return
+
+    async with _session_scope() as session:
+        m = await _fetch_dm_message(session, message_id)
+        if m is None or (m.from_uid != me and m.to_uid != me):
+            return
+        reactions = dict(m.reactions or {})
+        bucket = [u for u in reactions.get(emoji, []) if u != me]
+        if bucket:
+            reactions[emoji] = bucket
+        else:
+            reactions.pop(emoji, None)
+        m.reactions = reactions
+        await session.commit()
+        peer = _other_uid(m, me)
+        updated = dict(reactions)
+
+    await _broadcast_to_pair(
+        {
+            "type": "dm_message_reactions",
+            "message_id": message_id,
+            "reactions": updated,
+        },
+        me,
+        peer,
+    )
+
+
+async def handle_dm_chat_edit(
+    client_id: str, websocket: WebSocket, msg: dict
+) -> None:
+    me = presence.uid_for_client(client_id)
+    if me is None:
+        await _send(websocket, _err("not_subscribed", "Call social_subscribe first"))
+        return
+    message_id = msg.get("message_id")
+    new_text = (msg.get("text") or "").strip()
+    if not isinstance(message_id, int) or not new_text:
+        await _send(websocket, _err("bad_request", "message_id + text required"))
+        return
+
+    async with _session_scope() as session:
+        m = await _fetch_dm_message(session, message_id)
+        if m is None or m.from_uid != me:
+            await _send(websocket, _err("not_allowed", "Can only edit own messages"))
+            return
+        if m.deleted:
+            return
+        m.text = new_text
+        m.edited_at = _now()
+        await session.commit()
+        peer = _other_uid(m, me)
+        edited_at_ms = _to_ms(m.edited_at)
+
+    await _broadcast_to_pair(
+        {
+            "type": "dm_message_edited",
+            "message_id": message_id,
+            "text": new_text,
+            "edited_at": edited_at_ms,
+        },
+        me,
+        peer,
+    )
+
+
+async def handle_dm_chat_delete(
+    client_id: str, websocket: WebSocket, msg: dict
+) -> None:
+    me = presence.uid_for_client(client_id)
+    if me is None:
+        await _send(websocket, _err("not_subscribed", "Call social_subscribe first"))
+        return
+    message_id = msg.get("message_id")
+    if not isinstance(message_id, int):
+        return
+
+    async with _session_scope() as session:
+        m = await _fetch_dm_message(session, message_id)
+        if m is None or m.from_uid != me:
+            await _send(websocket, _err("not_allowed", "Can only delete own messages"))
+            return
+        m.deleted = True
+        await session.commit()
+        peer = _other_uid(m, me)
+
+    await _broadcast_to_pair(
+        {"type": "dm_message_deleted", "message_id": message_id},
+        me,
+        peer,
+    )
+
+
+async def handle_dm_chat_typing(
+    client_id: str, websocket: WebSocket, msg: dict
+) -> None:
+    me = presence.uid_for_client(client_id)
+    if me is None:
+        return
+    peer = (msg.get("peer_uid") or "").strip()
+    is_typing = bool(msg.get("isTyping", True))
+    if not peer:
+        return
+    # Typing has no DB side-effect. Just notify the peer.
+    await _send_to_uid(
+        peer,
+        {
+            "type": "dm_typing",
+            "from_uid": me,
+            "is_typing": is_typing,
+        },
+    )
 
 
 # ─────────────────────────────────────────────────────────────────────

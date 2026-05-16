@@ -359,8 +359,17 @@ class DmMessage(Base):
       3. Periodic prune deletes rows where read_at is set + at least
          one hour has passed.
 
-    Either `text` or `np_video_id` must be set (CHECK constraint) — a
-    DM is either a text message, a now-playing share card, or both.
+    Either `text`, `np_video_id`, or `share_moment` must be set
+    (CHECK constraint) — a DM is text, a now-playing share card,
+    a share-moment card, or any combination.
+
+    Chat-parity fields (added in migration 0005):
+      * reactions {emoji -> [uid, ...]} — matches room chat shape
+      * reply_to_message_id — soft reference (no FK; replied-to may
+        have been pruned, client renders a placeholder in that case)
+      * edited_at — set when the sender edits their text
+      * deleted — tombstone; row still rendered as "Message deleted"
+      * share_moment — JSONB payload for share-moment cards
     """
     __tablename__ = "dm_messages"
 
@@ -382,10 +391,21 @@ class DmMessage(Base):
     read_at: Mapped[datetime | None] = mapped_column(
         DateTime(timezone=True), nullable=True
     )
+    reactions: Mapped[dict] = mapped_column(
+        JSONB, default=dict, server_default=sql_text("'{}'::jsonb"), nullable=False
+    )
+    reply_to_message_id: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+    edited_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    deleted: Mapped[bool] = mapped_column(
+        Boolean, default=False, server_default=sql_text("false"), nullable=False
+    )
+    share_moment: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
 
     __table_args__ = (
         CheckConstraint(
-            "text IS NOT NULL OR np_video_id IS NOT NULL",
+            "text IS NOT NULL OR np_video_id IS NOT NULL OR share_moment IS NOT NULL",
             name="ck_dm_messages_has_content",
         ),
         # Partial indexes on unread rows — hot path for snapshot / WS

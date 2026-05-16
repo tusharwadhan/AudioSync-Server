@@ -3835,6 +3835,22 @@ async def websocket_endpoint(websocket: WebSocket):
             elif msg_type == "dm_read":
                 await social.handle_dm_read(client_id, websocket, msg)
 
+            # ── DM chat-parity messages ──
+            elif msg_type == "dm_chat_react":
+                await social.handle_dm_chat_react(client_id, websocket, msg)
+
+            elif msg_type == "dm_chat_unreact":
+                await social.handle_dm_chat_unreact(client_id, websocket, msg)
+
+            elif msg_type == "dm_chat_edit":
+                await social.handle_dm_chat_edit(client_id, websocket, msg)
+
+            elif msg_type == "dm_chat_delete":
+                await social.handle_dm_chat_delete(client_id, websocket, msg)
+
+            elif msg_type == "dm_chat_typing":
+                await social.handle_dm_chat_typing(client_id, websocket, msg)
+
     except WebSocketDisconnect:
         print(f"[WS] Client disconnected: {client_id[:8]}")
         analytics.log_event("ws_disconnect", client_id=client_id)
