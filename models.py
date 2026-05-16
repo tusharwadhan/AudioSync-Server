@@ -23,6 +23,7 @@ from datetime import datetime, timezone
 from sqlalchemy import (
     BigInteger,
     Boolean,
+    CheckConstraint,
     Column,
     DateTime,
     ForeignKey,
@@ -30,6 +31,8 @@ from sqlalchemy import (
     Index,
     Integer,
     String,
+    Text,
+    text,
 )
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import Mapped, mapped_column
@@ -260,4 +263,176 @@ class UserDownload(Base):
 
     __table_args__ = (
         Index("ix_user_downloads_user_updated", "user_id", "updated_at"),
+    )
+
+
+# ─────────────────────────────────────────────────────────────────────
+# Social v1 — lounge, DMs, friendships
+# ─────────────────────────────────────────────────────────────────────
+
+
+def _ordered_pair(uid1: str, uid2: str) -> tuple[str, str]:
+    """Return (uid_a, uid_b) sorted lex-ascending — the canonical pair
+    ordering used by friendships and dm_thread_state."""
+    return (uid1, uid2) if uid1 < uid2 else (uid2, uid1)
+
+
+class Friendship(Base):
+    """Two users who have crossed the DM stranger-gate.
+
+    Created the moment either side taps Accept on a pending request —
+    a single Accept is enough; mutual acceptance is not required. Once
+    a row exists, subsequent dm_sends in either direction bypass the
+    gate and land directly in the recipient's thread.
+
+    `uid_a` is always lexicographically smaller than `uid_b` (CHECK
+    constraint at the DB level) so we never get two rows for the same
+    pair.
+    """
+    __tablename__ = "friendships"
+
+    uid_a: Mapped[str] = mapped_column(
+        String(128), ForeignKey("users.id", ondelete="CASCADE"), primary_key=True
+    )
+    uid_b: Mapped[str] = mapped_column(
+        String(128), ForeignKey("users.id", ondelete="CASCADE"), primary_key=True
+    )
+    formed_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utc_now, nullable=False
+    )
+
+    __table_args__ = (
+        CheckConstraint("uid_a < uid_b", name="ck_friendships_uid_order"),
+        Index("ix_friendships_uid_a", "uid_a"),
+        Index("ix_friendships_uid_b", "uid_b"),
+    )
+
+
+class DmThreadState(Base):
+    """Per-pair stranger-gate state for DMs.
+
+    States:
+      * 'pending_from_a' — uid_a sent first; uid_b has not yet acted.
+      * 'pending_from_b' — uid_b sent first; uid_a has not yet acted.
+      * 'accepted'       — either side accepted; a Friendship row also
+                            exists. New messages flow as normal DMs.
+      * 'declined_by_a'  — uid_a tapped Decline. Sender (uid_b) never
+                            sees a read/delivered signal; their messages
+                            sit in unread state forever from their side,
+                            while uid_a's view only ever shows the
+                            latest unread declined message.
+      * 'declined_by_b'  — mirror of declined_by_a.
+
+    The pair (uid_a, uid_b) is always stored with uid_a < uid_b.
+    """
+    __tablename__ = "dm_thread_state"
+
+    uid_a: Mapped[str] = mapped_column(
+        String(128), ForeignKey("users.id", ondelete="CASCADE"), primary_key=True
+    )
+    uid_b: Mapped[str] = mapped_column(
+        String(128), ForeignKey("users.id", ondelete="CASCADE"), primary_key=True
+    )
+    state: Mapped[str] = mapped_column(String(32), nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utc_now, nullable=False
+    )
+
+    __table_args__ = (
+        CheckConstraint("uid_a < uid_b", name="ck_dm_thread_uid_order"),
+    )
+
+
+class DmMessage(Base):
+    """A single direct message between two users.
+
+    Lifecycle:
+      1. Insert with `read_at = NULL`. Server pushes to recipient over
+         WS if connected, FCM otherwise.
+      2. Recipient opens the thread → client sends `dm_read` → server
+         sets `read_at = now()`.
+      3. Periodic prune deletes rows where read_at is set + at least
+         one hour has passed.
+
+    Either `text` or `np_video_id` must be set (CHECK constraint) — a
+    DM is either a text message, a now-playing share card, or both.
+    """
+    __tablename__ = "dm_messages"
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
+    from_uid: Mapped[str] = mapped_column(
+        String(128), ForeignKey("users.id", ondelete="CASCADE"), nullable=False
+    )
+    to_uid: Mapped[str] = mapped_column(
+        String(128), ForeignKey("users.id", ondelete="CASCADE"), nullable=False
+    )
+    text: Mapped[str | None] = mapped_column(Text, nullable=True)
+    np_video_id: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    np_title: Mapped[str | None] = mapped_column(String(512), nullable=True)
+    np_artist: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    np_thumbnail: Mapped[str | None] = mapped_column(String(1024), nullable=True)
+    sent_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utc_now, nullable=False
+    )
+    read_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+
+    __table_args__ = (
+        CheckConstraint(
+            "text IS NOT NULL OR np_video_id IS NOT NULL",
+            name="ck_dm_messages_has_content",
+        ),
+        # Partial indexes on unread rows — hot path for snapshot / WS
+        # reconnect catch-up.
+        Index(
+            "ix_dm_messages_to_unread",
+            "to_uid",
+            "sent_at",
+            postgresql_where=text("read_at IS NULL"),
+        ),
+        Index(
+            "ix_dm_messages_from_unread",
+            "from_uid",
+            "sent_at",
+            postgresql_where=text("read_at IS NULL"),
+        ),
+    )
+
+
+class LoungeMessage(Base):
+    """A message posted in the global lounge.
+
+    `from_name` / `from_avatar_url` are snapshots at send-time so old
+    messages keep their original identity even if the user later
+    renames or signs out of Google. Retention: a periodic prune task
+    keeps only the most recent 200 rows.
+
+    Either `text` or `np_video_id` must be set — a lounge post is
+    either chat text, a now-playing share card, or both.
+    """
+    __tablename__ = "lounge_messages"
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
+    from_uid: Mapped[str] = mapped_column(
+        String(128), ForeignKey("users.id", ondelete="CASCADE"), nullable=False
+    )
+    from_name: Mapped[str] = mapped_column(String(255), nullable=False)
+    from_avatar_url: Mapped[str | None] = mapped_column(String(1024), nullable=True)
+    text: Mapped[str | None] = mapped_column(Text, nullable=True)
+    np_video_id: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    np_title: Mapped[str | None] = mapped_column(String(512), nullable=True)
+    np_artist: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    np_thumbnail: Mapped[str | None] = mapped_column(String(1024), nullable=True)
+    sent_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utc_now, nullable=False
+    )
+
+    __table_args__ = (
+        CheckConstraint(
+            "text IS NOT NULL OR np_video_id IS NOT NULL",
+            name="ck_lounge_messages_has_content",
+        ),
+        # Newest-first read pattern for the snapshot's "last 200".
+        Index("ix_lounge_messages_sent_at_desc", text("sent_at DESC")),
     )
