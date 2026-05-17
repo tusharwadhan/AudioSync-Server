@@ -473,6 +473,9 @@ def _lounge_to_dict(m: models.LoungeMessage) -> dict:
         "np_artist": m.np_artist,
         "np_thumbnail": m.np_thumbnail,
         "sent_at": _to_ms(m.sent_at),
+        # Chat-parity fields (migration 0006).
+        "reactions": dict(m.reactions or {}),
+        "reply_to_message_id": m.reply_to_message_id,
     }
 
 
@@ -692,6 +695,10 @@ async def handle_lounge_send(client_id: str, websocket: WebSocket, msg: dict) ->
         await _send(websocket, _err("empty_message", "Provide text or np_video_id"))
         return
 
+    reply_to_id = msg.get("reply_to_message_id")
+    if reply_to_id is not None and not isinstance(reply_to_id, int):
+        reply_to_id = None
+
     entry = presence.get(uid)
     if entry is None:
         return
@@ -706,6 +713,8 @@ async def handle_lounge_send(client_id: str, websocket: WebSocket, msg: dict) ->
             np_title=msg.get("np_title"),
             np_artist=msg.get("np_artist"),
             np_thumbnail=msg.get("np_thumbnail"),
+            reply_to_message_id=reply_to_id,
+            reactions={},
             sent_at=_now(),
         )
         session.add(row)
@@ -715,6 +724,81 @@ async def handle_lounge_send(client_id: str, websocket: WebSocket, msg: dict) ->
 
     payload["type"] = "lounge_message"
     await _broadcast(payload)
+
+
+async def _fetch_lounge_message(
+    session: AsyncSession, message_id: int
+) -> models.LoungeMessage | None:
+    return (
+        await session.execute(
+            select(models.LoungeMessage).where(models.LoungeMessage.id == message_id)
+        )
+    ).scalar_one_or_none()
+
+
+async def handle_lounge_react(
+    client_id: str, websocket: WebSocket, msg: dict
+) -> None:
+    me = presence.uid_for_client(client_id)
+    if me is None:
+        await _send(websocket, _err("not_subscribed", "Call social_subscribe first"))
+        return
+    message_id = msg.get("message_id")
+    emoji = (msg.get("emoji") or "").strip()
+    if not isinstance(message_id, int) or not emoji:
+        await _send(websocket, _err("bad_request", "message_id + emoji required"))
+        return
+
+    async with _session_scope() as session:
+        m = await _fetch_lounge_message(session, message_id)
+        if m is None:
+            return
+        reactions = dict(m.reactions or {})
+        bucket = list(reactions.get(emoji, []))
+        if me not in bucket:
+            bucket.append(me)
+        reactions[emoji] = bucket
+        m.reactions = reactions
+        await session.commit()
+        updated = dict(reactions)
+
+    await _broadcast({
+        "type": "lounge_message_reactions",
+        "message_id": message_id,
+        "reactions": updated,
+    })
+
+
+async def handle_lounge_unreact(
+    client_id: str, websocket: WebSocket, msg: dict
+) -> None:
+    me = presence.uid_for_client(client_id)
+    if me is None:
+        return
+    message_id = msg.get("message_id")
+    emoji = (msg.get("emoji") or "").strip()
+    if not isinstance(message_id, int) or not emoji:
+        return
+
+    async with _session_scope() as session:
+        m = await _fetch_lounge_message(session, message_id)
+        if m is None:
+            return
+        reactions = dict(m.reactions or {})
+        bucket = [u for u in reactions.get(emoji, []) if u != me]
+        if bucket:
+            reactions[emoji] = bucket
+        else:
+            reactions.pop(emoji, None)
+        m.reactions = reactions
+        await session.commit()
+        updated = dict(reactions)
+
+    await _broadcast({
+        "type": "lounge_message_reactions",
+        "message_id": message_id,
+        "reactions": updated,
+    })
 
 
 async def handle_dm_send(client_id: str, websocket: WebSocket, msg: dict) -> None:

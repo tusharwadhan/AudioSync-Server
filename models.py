@@ -452,6 +452,12 @@ class LoungeMessage(Base):
     sent_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), default=utc_now, nullable=False
     )
+    # Chat-parity fields (migration 0006). Lounge intentionally does
+    # NOT get edit / delete / typing — see migration docstring.
+    reactions: Mapped[dict] = mapped_column(
+        JSONB, default=dict, server_default=sql_text("'{}'::jsonb"), nullable=False
+    )
+    reply_to_message_id: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
 
     __table_args__ = (
         CheckConstraint(
