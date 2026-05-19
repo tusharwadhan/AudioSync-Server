@@ -3858,6 +3858,9 @@ async def websocket_endpoint(websocket: WebSocket):
             elif msg_type == "lounge_unreact":
                 await social.handle_lounge_unreact(client_id, websocket, msg)
 
+            elif msg_type == "dm_unfriend":
+                await social.handle_dm_unfriend(client_id, websocket, msg)
+
     except WebSocketDisconnect:
         print(f"[WS] Client disconnected: {client_id[:8]}")
         analytics.log_event("ws_disconnect", client_id=client_id)

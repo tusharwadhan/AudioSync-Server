@@ -403,10 +403,11 @@ async def _ensure_thread_state(
 
 
 async def _friend_summaries(session: AsyncSession, uid: str) -> list[dict]:
-    """Return [{uid, name, avatar_url, is_online}] for all friends of uid."""
-    # JOIN against users to pick up display_name + photo_url. Friendship
-    # rows store the pair with uid_a < uid_b, so the friend's uid is
-    # whichever side isn't `uid`.
+    """Return [{uid, name, avatar_url, is_online, last_seen_ms}] for all
+    friends of uid."""
+    # JOIN against users to pick up display_name + photo_url + last_seen.
+    # Friendship rows store the pair with uid_a < uid_b, so the friend's
+    # uid is whichever side isn't `uid`.
     other_col = func.coalesce(
         func.nullif(models.Friendship.uid_a, uid), models.Friendship.uid_b
     ).label("friend_uid")
@@ -415,6 +416,7 @@ async def _friend_summaries(session: AsyncSession, uid: str) -> list[dict]:
             other_col,
             models.User.display_name,
             models.User.photo_url,
+            models.User.last_seen,
         )
         .select_from(models.Friendship)
         .join(models.User, models.User.id == other_col)
@@ -432,8 +434,9 @@ async def _friend_summaries(session: AsyncSession, uid: str) -> list[dict]:
             "name": display_name or "",
             "avatar_url": photo_url,
             "is_online": presence.is_online(friend_uid),
+            "last_seen_ms": _to_ms(last_seen),
         }
-        for (friend_uid, display_name, photo_url) in rows
+        for (friend_uid, display_name, photo_url, last_seen) in rows
     ]
 
 
@@ -660,7 +663,62 @@ async def handle_social_disconnect(client_id: str) -> None:
     kicked = presence.unsubscribe_by_client(client_id)
     if kicked is None:
         return
+    # Stamp last_seen on the user row so friends' clients can show
+    # "last seen X ago" in their DM header subtitles.
+    try:
+        async with _session_scope() as session:
+            await session.execute(
+                update(models.User)
+                .where(models.User.id == kicked.uid)
+                .values(last_seen=_now())
+            )
+            await session.commit()
+    except Exception as e:
+        print(f"[social] last_seen update failed for {kicked.uid[:8]}: {e}")
     await _broadcast({"type": "presence_leave", "uid": kicked.uid})
+
+
+async def handle_dm_unfriend(client_id: str, websocket: WebSocket, msg: dict) -> None:
+    """Drop the friendship between caller and peer. Also blows away
+    the thread state so a future dm_send goes through the gate
+    again. Idempotent — no-ops if there's no friendship."""
+    me = presence.uid_for_client(client_id)
+    if me is None:
+        await _send(websocket, _err("not_subscribed", "Call social_subscribe first"))
+        return
+    peer = (msg.get("peer_uid") or "").strip()
+    if not peer:
+        return
+    a, b = _ordered_pair(me, peer)
+    async with _session_scope() as session:
+        await session.execute(
+            delete(models.Friendship).where(
+                models.Friendship.uid_a == a,
+                models.Friendship.uid_b == b,
+            )
+        )
+        await session.execute(
+            delete(models.DmThreadState).where(
+                models.DmThreadState.uid_a == a,
+                models.DmThreadState.uid_b == b,
+            )
+        )
+        # Wipe undelivered DMs on both directions so the peer doesn't
+        # see a phantom unread after being unfriended.
+        await session.execute(
+            delete(models.DmMessage).where(
+                or_(
+                    and_(models.DmMessage.from_uid == me, models.DmMessage.to_uid == peer),
+                    and_(models.DmMessage.from_uid == peer, models.DmMessage.to_uid == me),
+                )
+            )
+        )
+        await session.commit()
+
+    # Notify both sides so their UIs drop the friend chip + thread.
+    payload = {"type": "dm_unfriended", "peer_uid_for_recipient": me, "by_uid": me}
+    await _send_to_uid(peer, dict(payload, peer_uid_for_recipient=me))
+    await _send_to_uid(me, dict(payload, peer_uid_for_recipient=peer))
 
 
 async def handle_presence_ping(client_id: str, websocket: WebSocket, msg: dict) -> None:
@@ -984,6 +1042,7 @@ async def handle_dm_read(client_id: str, websocket: WebSocket, msg: dict) -> Non
     if not peer:
         return
 
+    read_at = _now()
     async with _session_scope() as session:
         q = update(models.DmMessage).where(
             models.DmMessage.to_uid == me,
@@ -992,9 +1051,25 @@ async def handle_dm_read(client_id: str, websocket: WebSocket, msg: dict) -> Non
         )
         if isinstance(up_to, int):
             q = q.where(models.DmMessage.id <= up_to)
-        q = q.values(read_at=_now())
-        await session.execute(q)
+        q = q.values(read_at=read_at)
+        result = await session.execute(q)
         await session.commit()
+        rows_marked = result.rowcount or 0
+
+    # Tell the sender (peer) which of their messages just got read so
+    # their UI can flip "Sent" → "Read". Without this push the sender
+    # has no way to know — they'd be stuck on "Sent" forever even
+    # though the DB row has read_at set.
+    if rows_marked > 0:
+        await _send_to_uid(
+            peer,
+            {
+                "type": "dm_messages_read",
+                "reader_uid": me,
+                "up_to_message_id": up_to if isinstance(up_to, int) else None,
+                "read_at": _to_ms(read_at),
+            },
+        )
 
 
 # ─────────────────────────────────────────────────────────────────────
