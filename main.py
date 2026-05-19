@@ -184,12 +184,14 @@ class RoomListResponse(BaseModel):
 
 # App update configuration - modify these values to control updates
 APP_UPDATE_CONFIG = {
-    "latestVersion": "5.11.0",
-    "latestVersionCode": 38,
-    "apkUrl": "https://raw.githubusercontent.com/tusharwadhan/AudioSync-Server/tushar/releases/syncaura-5.11.0.apk",
-    "releaseNotes": "Signing back in actually brings your library back now — favorites, playlists, and listening history, reliably, across devices. New “Restore from cloud” button in Settings. First launch is cleaner too: just sign in (your name fills in from Google), and the Edge Player intro waits for next time. Plus per-song download progress and a one-tap “Download all” for favorites.",
-    # List of version codes that MUST update (mandatory)
-    "mandatoryBelow": 22,  # Force previous versions to update
+    "latestVersion": "5.13.0",
+    "latestVersionCode": 39,
+    "apkUrl": "https://raw.githubusercontent.com/tusharwadhan/AudioSync-Server/tushar/releases/syncaura-5.13.0.apk",
+    "releaseNotes": "Say hi. Social is here — lounge, DMs, see who's online right now.",
+    # List of version codes that MUST update (mandatory). 5.13.0 ships
+    # the Social hub + a lot of polish — optional update, so leave
+    # mandatoryBelow untouched.
+    "mandatoryBelow": 22,
 }
 
 

@@ -440,7 +440,12 @@ async def _friend_summaries(session: AsyncSession, uid: str) -> list[dict]:
     ]
 
 
-def _dm_to_dict(m: models.DmMessage, *, with_gate_state: str | None = None) -> dict:
+def _dm_to_dict(
+    m: models.DmMessage,
+    *,
+    with_gate_state: str | None = None,
+    user_lookup: dict[str, tuple[str | None, str | None]] | None = None,
+) -> dict:
     d = {
         "id": m.id,
         "from_uid": m.from_uid,
@@ -461,6 +466,13 @@ def _dm_to_dict(m: models.DmMessage, *, with_gate_state: str | None = None) -> d
     }
     if with_gate_state is not None:
         d["gate_state"] = with_gate_state
+    # Sender identity for the snapshot's pending_requests etc., so
+    # the client doesn't have to fall back to "Message request" when
+    # rendering rows for senders it can't otherwise identify.
+    if user_lookup is not None:
+        name, avatar = user_lookup.get(m.from_uid, (None, None))
+        d["from_name"] = name
+        d["from_avatar_url"] = avatar
     return d
 
 
@@ -528,6 +540,23 @@ async def _build_snapshot(session: AsyncSession, uid: str) -> dict:
         )
     ).scalars().all()
 
+    # Build a uid -> (display_name, photo_url) lookup for every
+    # sender referenced in the snapshot so client rows can render
+    # real names (and avatars) without their own per-message
+    # JOIN. Especially important for pending stranger requests
+    # where the recipient has never seen the sender otherwise.
+    sender_uids = {m.from_uid for m in incoming} | {m.from_uid for m in sent_pending}
+    user_lookup: dict[str, tuple[str | None, str | None]] = {}
+    if sender_uids:
+        user_rows = (
+            await session.execute(
+                select(models.User.id, models.User.display_name, models.User.photo_url)
+                .where(models.User.id.in_(sender_uids))
+            )
+        ).all()
+        for u_id, dname, photo in user_rows:
+            user_lookup[u_id] = (dname, photo)
+
     # Pull all thread states involving me — used to bucket incoming
     # messages into pending vs accepted.
     thread_states = (
@@ -559,11 +588,17 @@ async def _build_snapshot(session: AsyncSession, uid: str) -> dict:
             # state == None should not happen if the sender went through
             # dm_send, but be defensive — treat orphans as pending.
             if state is None:
-                pending_requests.append(_dm_to_dict(m, with_gate_state="pending"))
+                pending_requests.append(
+                    _dm_to_dict(m, with_gate_state="pending", user_lookup=user_lookup)
+                )
             else:
-                unread_dms.append(_dm_to_dict(m, with_gate_state="accepted"))
+                unread_dms.append(
+                    _dm_to_dict(m, with_gate_state="accepted", user_lookup=user_lookup)
+                )
         elif state in ("pending_from_a", "pending_from_b"):
-            pending_requests.append(_dm_to_dict(m, with_gate_state="pending"))
+            pending_requests.append(
+                _dm_to_dict(m, with_gate_state="pending", user_lookup=user_lookup)
+            )
         elif state in ("declined_by_a", "declined_by_b"):
             # Keep only the newest per peer.
             existing = declined_latest.get(peer)
@@ -571,11 +606,16 @@ async def _build_snapshot(session: AsyncSession, uid: str) -> dict:
                 declined_latest[peer] = m
 
     for m in declined_latest.values():
-        pending_requests.append(_dm_to_dict(m, with_gate_state="declined"))
+        pending_requests.append(
+            _dm_to_dict(m, with_gate_state="declined", user_lookup=user_lookup)
+        )
 
     # Outgoing-still-unread (for the sender's view of their own
     # in-flight messages). Group by peer for the client.
-    sent_unread = [_dm_to_dict(m, with_gate_state="accepted") for m in sent_pending]
+    sent_unread = [
+        _dm_to_dict(m, with_gate_state="accepted", user_lookup=user_lookup)
+        for m in sent_pending
+    ]
 
     return {
         "online": online,
