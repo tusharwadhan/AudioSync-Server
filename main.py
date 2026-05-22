@@ -69,6 +69,11 @@ api = APIRouter(prefix="/api/v1")
 # ==================== API KEY SECURITY ====================
 API_KEY = os.getenv("SYNCAURA_API_KEY", "sk_syncaura_v1_8f3k9x2m7q4w1p6y")
 
+# Extra secret guarding admin-only actions (e.g. broadcasting a silent
+# app update to every install). Must be set as an env var in production;
+# when unset the admin endpoints refuse all requests.
+ADMIN_SECRET = os.getenv("SYNCAURA_ADMIN_SECRET", "")
+
 # Endpoints that do NOT require an API key
 PUBLIC_PATHS = (
     "/update/check",
@@ -1539,6 +1544,57 @@ async def check_update(versionCode: int, versionName: str = ""):
 async def check_update_legacy(versionCode: int, versionName: str = ""):
     """Legacy path for old app versions that don't use /api/v1"""
     return _check_update_logic(versionCode, versionName)
+
+
+@api.post("/admin/broadcast-update")
+async def broadcast_update(request: Request):
+    """
+    Admin-only: wake EVERY install with an "app_update" FCM data message
+    (topic "app_updates") so the on-device UpdateWorker downloads + silently
+    installs the latest APK in the background. Reads the target version from
+    APP_UPDATE_CONFIG, so bump that (and upload the APK) before calling.
+
+    Guarded by the X-Admin-Secret header in addition to the usual X-API-Key.
+    Call manually only when you actually intend to ship a release:
+
+        curl -X POST https://<host>/api/v1/admin/broadcast-update \\
+             -H "X-API-Key: <api key>" \\
+             -H "X-Admin-Secret: <admin secret>"
+    """
+    if not ADMIN_SECRET or request.headers.get("X-Admin-Secret") != ADMIN_SECRET:
+        raise HTTPException(status_code=403, detail="Forbidden")
+    if not firebase_admin._apps:
+        raise HTTPException(status_code=503, detail="FCM not initialized")
+
+    cfg = APP_UPDATE_CONFIG
+    message = messaging.Message(
+        # Data-only (no notification block) so it never shows a banner —
+        # it just wakes onMessageReceived to enqueue the UpdateWorker.
+        data={
+            "type": "app_update",
+            "latestVersion": str(cfg["latestVersion"]),
+            "latestVersionCode": str(cfg["latestVersionCode"]),
+        },
+        topic="app_updates",
+        android=messaging.AndroidConfig(priority="high"),
+    )
+    try:
+        msg_id = await asyncio.to_thread(messaging.send, message)
+    except Exception as e:
+        print(f"[FCM] app_update broadcast FAILED: {e}")
+        raise HTTPException(status_code=500, detail=f"broadcast failed: {e}")
+
+    print(
+        f"[FCM] app_update broadcast to topic 'app_updates' "
+        f"(v{cfg['latestVersion']} code {cfg['latestVersionCode']}): {msg_id}"
+    )
+    return {
+        "status": "sent",
+        "messageId": msg_id,
+        "topic": "app_updates",
+        "latestVersion": cfg["latestVersion"],
+        "latestVersionCode": cfg["latestVersionCode"],
+    }
 
 
 @api.get("/rooms", response_model=RoomListResponse)
