@@ -348,6 +348,12 @@ class DmThreadState(Base):
         String(128), ForeignKey("users.id", ondelete="CASCADE"), primary_key=True
     )
     state: Mapped[str] = mapped_column(String(32), nullable=False)
+    # Conversation retention: 'keep' (default — full history persists) or
+    # 'disappear' (messages deleted once the other party views + leaves
+    # the chat). Either user can switch it; last-write-wins.
+    retention_mode: Mapped[str] = mapped_column(
+        String(16), default="keep", server_default="keep", nullable=False
+    )
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), default=utc_now, nullable=False
     )
@@ -411,6 +417,12 @@ class DmMessage(Base):
         Boolean, default=False, server_default=sql_text("false"), nullable=False
     )
     share_moment: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
+    # System notice marker. NULL for normal messages; e.g.
+    # 'retention_keep' / 'retention_disappear' for the inline
+    # "X switched the conversation" banner. Event rows carry the mode
+    # string in `text` (to satisfy the content CHECK) but the client
+    # renders them from event_type, and the disappear sweep skips them.
+    event_type: Mapped[str | None] = mapped_column(String(32), nullable=True)
 
     __table_args__ = (
         CheckConstraint(

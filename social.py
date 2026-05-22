@@ -493,6 +493,7 @@ def _dm_to_dict(
         "edited_at": _to_ms(m.edited_at),
         "deleted": bool(m.deleted),
         "share_moment": m.share_moment,
+        "event_type": m.event_type,
     }
     if with_gate_state is not None:
         d["gate_state"] = with_gate_state
@@ -600,9 +601,11 @@ async def _build_snapshot(session: AsyncSession, uid: str) -> dict:
         )
     ).scalars().all()
     state_by_peer: dict[str, str] = {}
+    mode_by_peer: dict[str, str] = {}
     for ts in thread_states:
         peer = ts.uid_b if ts.uid_a == uid else ts.uid_a
         state_by_peer[peer] = ts.state
+        mode_by_peer[peer] = ts.retention_mode or "keep"
 
     # Bucket incoming. For declined threads, only the LATEST unread
     # message is returned (the user wanted older declined messages
@@ -647,6 +650,49 @@ async def _build_snapshot(session: AsyncSession, uid: str) -> dict:
         for m in sent_pending
     ]
 
+    # Keep-mode threads: include recent READ history (both directions) so
+    # the client can rebuild the full conversation on launch, not just the
+    # unread tail. Disappear threads intentionally return unread only.
+    keep_peers = {p for p, mode in mode_by_peer.items() if mode == "keep"}
+    history: list[dict] = []
+    if keep_peers:
+        hist_rows = (
+            await session.execute(
+                select(models.DmMessage)
+                .where(
+                    or_(
+                        models.DmMessage.from_uid == uid,
+                        models.DmMessage.to_uid == uid,
+                    ),
+                    models.DmMessage.read_at.is_not(None),
+                    or_(
+                        models.DmMessage.from_uid.in_(keep_peers),
+                        models.DmMessage.to_uid.in_(keep_peers),
+                    ),
+                )
+                .order_by(models.DmMessage.sent_at.desc())
+                .limit(500)
+            )
+        ).scalars().all()
+        # Ensure sender names resolve for history rows too.
+        missing = {m.from_uid for m in hist_rows} - set(user_lookup.keys())
+        if missing:
+            extra = (
+                await session.execute(
+                    select(
+                        models.User.id,
+                        models.User.display_name,
+                        models.User.photo_url,
+                    ).where(models.User.id.in_(missing))
+                )
+            ).all()
+            for u_id, dname, photo in extra:
+                user_lookup[u_id] = (dname, photo)
+        history = [
+            _dm_to_dict(m, with_gate_state="accepted", user_lookup=user_lookup)
+            for m in reversed(hist_rows)
+        ]
+
     return {
         "online": online,
         "friends": friends,
@@ -654,6 +700,10 @@ async def _build_snapshot(session: AsyncSession, uid: str) -> dict:
         "unread_dms": unread_dms,
         "pending_requests": pending_requests,
         "sent_unread_dms": sent_unread,
+        # Read history for keep-mode threads (empty for disappear threads).
+        "history_dms": history,
+        # Per-peer retention mode so the client header reflects it.
+        "dm_modes": mode_by_peer,
         "server_time": _to_ms(_now()),
     }
 
@@ -1163,6 +1213,120 @@ async def handle_dm_read(client_id: str, websocket: WebSocket, msg: dict) -> Non
         )
 
 
+async def handle_dm_set_retention(
+    client_id: str, websocket: WebSocket, msg: dict
+) -> None:
+    """`dm_set_retention {peer_uid, mode}` — switch the conversation
+    between 'keep' (persist history) and 'disappear' (delete on
+    view+leave). Either user may switch it; last-write-wins. Both sides
+    get a `dm_retention_changed` carrying an inline system notice."""
+    me = presence.uid_for_client(client_id)
+    if me is None:
+        await _send(websocket, _err("not_subscribed", "Call social_subscribe first"))
+        return
+    peer = (msg.get("peer_uid") or "").strip()
+    mode = (msg.get("mode") or "").strip()
+    if not peer or mode not in ("keep", "disappear"):
+        await _send(websocket, _err("bad_request", "peer_uid + mode(keep|disappear)"))
+        return
+
+    sender = presence.get(me)
+    by_name = sender.name if sender is not None else ""
+
+    async with _session_scope() as session:
+        state_row, _ = await _ensure_thread_state(session, me, peer)
+        state_row.retention_mode = mode
+        state_row.updated_at = _now()
+
+        # Inline notice so both clients can render "<name> turned on …".
+        # text carries the mode (satisfies the content CHECK); the client
+        # renders from event_type. read_at is stamped so it never counts
+        # as unread.
+        event = models.DmMessage(
+            from_uid=me,
+            to_uid=peer,
+            text=mode,
+            event_type=f"retention_{mode}",
+            reactions={},
+            deleted=False,
+            sent_at=_now(),
+            read_at=_now(),
+        )
+        session.add(event)
+        await session.commit()
+        await session.refresh(event)
+
+    event_dict = _dm_to_dict(event, with_gate_state="accepted")
+    event_dict["from_name"] = by_name
+
+    # Tailor peer_uid per recipient (it's always "the other side").
+    await _send_to_uid(
+        me,
+        {
+            "type": "dm_retention_changed",
+            "peer_uid": peer,
+            "mode": mode,
+            "by_uid": me,
+            "by_name": by_name,
+            "message": event_dict,
+        },
+    )
+    await _send_to_uid(
+        peer,
+        {
+            "type": "dm_retention_changed",
+            "peer_uid": me,
+            "mode": mode,
+            "by_uid": me,
+            "by_name": by_name,
+            "message": event_dict,
+        },
+    )
+
+
+async def handle_dm_clear_on_leave(
+    client_id: str, websocket: WebSocket, msg: dict
+) -> None:
+    """`dm_clear_on_leave {peer_uid}` — the recipient just left a
+    disappear-mode chat after viewing it. Delete the content messages
+    they read (from this peer) and tell both ends to drop them."""
+    me = presence.uid_for_client(client_id)
+    if me is None:
+        return
+    peer = (msg.get("peer_uid") or "").strip()
+    if not peer:
+        return
+
+    async with _session_scope() as session:
+        state = await _get_thread_state(session, me, peer)
+        if state is None or (state.retention_mode or "keep") != "disappear":
+            return  # only disappear threads vanish on leave
+
+        # Content messages I (the leaver) read from this peer. System
+        # notices (event_type set) are kept.
+        rows = (
+            await session.execute(
+                select(models.DmMessage.id).where(
+                    models.DmMessage.to_uid == me,
+                    models.DmMessage.from_uid == peer,
+                    models.DmMessage.read_at.is_not(None),
+                    models.DmMessage.event_type.is_(None),
+                )
+            )
+        ).scalars().all()
+        if not rows:
+            return
+        ids = [int(r) for r in rows]
+        await session.execute(
+            delete(models.DmMessage).where(models.DmMessage.id.in_(ids))
+        )
+        await session.commit()
+
+    # Both ends drop the same ids (sender sees their sent bubbles vanish).
+    await _send_to_uid(me, {"type": "dm_messages_cleared", "peer_uid": peer, "ids": ids})
+    await _send_to_uid(peer, {"type": "dm_messages_cleared", "peer_uid": me, "ids": ids})
+
+
 # ─────────────────────────────────────────────────────────────────────
 # DM chat-parity handlers (reactions, reply, edit, delete, share-moment,
 # typing). Mirror the room-chat capability set on top of dm_messages.
@@ -1389,14 +1553,45 @@ async def prune_loop(interval_seconds: int = 300) -> None:
                     )
                 )
 
-                # DMs: clear out anything read > 1 hour ago.
+                # DMs — disappear-mode safety net: delete read content
+                # messages older than 1h ONLY in threads currently set to
+                # 'disappear'. The primary delete is on-leave (dm_clear_on_leave);
+                # this catches the case where the app was killed before the
+                # leave signal fired. Keep-mode threads are never swept here.
+                # System notices (event_type set) are always preserved.
                 cutoff = _now() - timedelta(hours=1)
+                dm = models.DmMessage
+                ts = models.DmThreadState
+                disappear_exists = (
+                    select(ts.uid_a)
+                    .where(
+                        ts.uid_a == func.least(dm.from_uid, dm.to_uid),
+                        ts.uid_b == func.greatest(dm.from_uid, dm.to_uid),
+                        ts.retention_mode == "disappear",
+                    )
+                    .exists()
+                )
                 await session.execute(
-                    delete(models.DmMessage).where(
-                        models.DmMessage.read_at.is_not(None),
-                        models.DmMessage.read_at < cutoff,
+                    delete(dm).where(
+                        dm.read_at.is_not(None),
+                        dm.read_at < cutoff,
+                        dm.event_type.is_(None),
+                        disappear_exists,
                     )
                 )
+
+                # Bound every thread to its most recent 500 messages so
+                # keep-mode history can't grow without limit.
+                rn = func.row_number().over(
+                    partition_by=[
+                        func.least(dm.from_uid, dm.to_uid),
+                        func.greatest(dm.from_uid, dm.to_uid),
+                    ],
+                    order_by=dm.sent_at.desc(),
+                ).label("rn")
+                ranked = select(dm.id, rn).subquery()
+                overflow = select(ranked.c.id).where(ranked.c.rn > 500)
+                await session.execute(delete(dm).where(dm.id.in_(overflow)))
 
                 await session.commit()
         except Exception as e:

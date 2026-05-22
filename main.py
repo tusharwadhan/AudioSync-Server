@@ -3891,6 +3891,12 @@ async def websocket_endpoint(websocket: WebSocket):
             elif msg_type == "dm_read":
                 await social.handle_dm_read(client_id, websocket, msg)
 
+            elif msg_type == "dm_set_retention":
+                await social.handle_dm_set_retention(client_id, websocket, msg)
+
+            elif msg_type == "dm_clear_on_leave":
+                await social.handle_dm_clear_on_leave(client_id, websocket, msg)
+
             # ── DM chat-parity messages ──
             elif msg_type == "dm_chat_react":
                 await social.handle_dm_chat_react(client_id, websocket, msg)
