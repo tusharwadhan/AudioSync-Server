@@ -77,6 +77,15 @@ class User(Base):
     # (unix ms) — a push with an older "_updated_at" than what's stored
     # is ignored. Defaults to {} for users created before this column.
     settings_json: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
+    # Latest FCM device token for this user, persisted so DM push
+    # notifications survive a server restart/redeploy. Without this the
+    # token lived only in social.py's in-memory map and was wiped on
+    # every deploy, so offline users stopped getting DM pushes until
+    # they reopened the app and reconnected the social WebSocket.
+    fcm_token: Mapped[str | None] = mapped_column(String(512), nullable=True)
+    fcm_token_updated_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
 
     def __repr__(self) -> str:
         return f"<User id={self.id} email={self.email}>"

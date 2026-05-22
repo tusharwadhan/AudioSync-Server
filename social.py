@@ -253,6 +253,25 @@ async def _push_dm_fcm(
     )
     token = _fcm_tokens_by_uid.get(recipient_uid)
     if not token:
+        # Cold in-memory cache (e.g. right after a deploy). Fall back to
+        # the token persisted on the user row so offline recipients still
+        # get pushed, then warm the cache for next time.
+        try:
+            async with _session_scope() as session:
+                token = (
+                    await session.execute(
+                        select(models.User.fcm_token).where(
+                            models.User.id == recipient_uid
+                        )
+                    )
+                ).scalar_one_or_none()
+        except Exception as e:
+            print(f"[social] FCM token DB lookup failed for {recipient_uid[:8]}: {e}")
+            token = None
+        if token:
+            _fcm_tokens_by_uid[recipient_uid] = token
+            print(f"[social] FCM token loaded from DB for {recipient_uid[:8]}")
+    if not token:
         print(f"[social] FCM skip: no token stored for {recipient_uid[:8]}")
         return
     if firebase_admin is None or not firebase_admin._apps:
@@ -278,8 +297,19 @@ async def _push_dm_fcm(
             f"message_id={message_id}"
         )
     except _fcm_messaging.UnregisteredError:
-        # Stale token — drop from the map so we don't keep retrying.
+        # Stale token — drop from the map AND clear the persisted copy so
+        # we don't keep retrying a dead token after the next restart.
         _fcm_tokens_by_uid.pop(recipient_uid, None)
+        try:
+            async with _session_scope() as session:
+                await session.execute(
+                    update(models.User)
+                    .where(models.User.id == recipient_uid)
+                    .values(fcm_token=None, fcm_token_updated_at=_now())
+                )
+                await session.commit()
+        except Exception as e:
+            print(f"[social] FCM stale token DB clear failed for {recipient_uid[:8]}: {e}")
         print(f"[social] FCM stale token removed for {recipient_uid[:8]}")
     except Exception as e:
         print(f"[social] FCM DM push FAILED for {recipient_uid[:8]}: {e}")
@@ -778,6 +808,18 @@ async def handle_social_fcm_register(
     if not token:
         return
     _fcm_tokens_by_uid[uid] = token
+    # Persist so the token survives a server restart/redeploy — otherwise
+    # an offline user can't be pushed a DM until they reconnect the WS.
+    try:
+        async with _session_scope() as session:
+            await session.execute(
+                update(models.User)
+                .where(models.User.id == uid)
+                .values(fcm_token=token, fcm_token_updated_at=_now())
+            )
+            await session.commit()
+    except Exception as e:
+        print(f"[social] FCM token DB persist failed for uid={uid[:8]}: {e}")
     print(f"[social] FCM token registered for uid={uid[:8]}")
 
 
@@ -929,6 +971,13 @@ async def handle_dm_send(client_id: str, websocket: WebSocket, msg: dict) -> Non
     if reply_to_id is not None and not isinstance(reply_to_id, int):
         reply_to_id = None
 
+    # Client-generated correlation id for optimistic UI. We echo it back
+    # (only to the sender) so their client can swap the local "Sending"
+    # bubble for the persisted message instead of appending a duplicate.
+    client_nonce = msg.get("client_nonce")
+    if client_nonce is not None and not isinstance(client_nonce, str):
+        client_nonce = None
+
     sender = presence.get(sender_uid)
     if sender is None:
         return
@@ -989,6 +1038,8 @@ async def handle_dm_send(client_id: str, websocket: WebSocket, msg: dict) -> Non
     # without waiting for snapshot.
     sender_payload = dict(base)
     sender_payload["type"] = "dm_message"
+    if client_nonce is not None:
+        sender_payload["client_nonce"] = client_nonce
     await _send(websocket, sender_payload)
 
     # Deliver to recipient if not soft-blocked. If their WS isn't
