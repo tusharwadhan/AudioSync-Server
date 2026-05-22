@@ -184,13 +184,11 @@ class RoomListResponse(BaseModel):
 
 # App update configuration - modify these values to control updates
 APP_UPDATE_CONFIG = {
-    "latestVersion": "5.13.0",
-    "latestVersionCode": 39,
-    "apkUrl": "https://raw.githubusercontent.com/tusharwadhan/AudioSync-Server/tushar/releases/syncaura-5.13.0.apk",
-    "releaseNotes": "Say hi. Social is here — lounge, DMs, see who's online right now.",
-    # List of version codes that MUST update (mandatory). 5.13.0 ships
-    # the Social hub + a lot of polish — optional update, so leave
-    # mandatoryBelow untouched.
+    "latestVersion": "5.14.0",
+    "latestVersionCode": 40,
+    "apkUrl": "https://raw.githubusercontent.com/tusharwadhan/AudioSync-Server/tushar/releases/syncaura-5.14.0.apk",
+    "releaseNotes": "Chats just got expressive. Send any emoji and watch it move.",
+    # Optional update — leave mandatoryBelow untouched.
     "mandatoryBelow": 22,
 }
 
