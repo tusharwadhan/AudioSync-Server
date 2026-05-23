@@ -1302,15 +1302,26 @@ async def handle_dm_clear_on_leave(
         if state is None or (state.retention_mode or "keep") != "disappear":
             return  # only disappear threads vanish on leave
 
-        # Content messages I (the leaver) read from this peer. System
-        # notices (event_type set) are kept.
+        # All already-VIEWED content messages between me and this peer,
+        # both directions: the peer's messages I read, AND my messages the
+        # peer has read (read_at stamped). Unviewed messages (read_at NULL)
+        # stay — they haven't been seen yet. System notices (event_type
+        # set) are always kept.
         rows = (
             await session.execute(
                 select(models.DmMessage.id).where(
-                    models.DmMessage.to_uid == me,
-                    models.DmMessage.from_uid == peer,
                     models.DmMessage.read_at.is_not(None),
                     models.DmMessage.event_type.is_(None),
+                    or_(
+                        and_(
+                            models.DmMessage.to_uid == me,
+                            models.DmMessage.from_uid == peer,
+                        ),
+                        and_(
+                            models.DmMessage.from_uid == me,
+                            models.DmMessage.to_uid == peer,
+                        ),
+                    ),
                 )
             )
         ).scalars().all()
