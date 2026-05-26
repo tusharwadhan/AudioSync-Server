@@ -242,6 +242,7 @@ async def _push_dm_fcm(
     sender_uid: str,
     sender_name: str,
     preview: str,
+    sender_avatar_url: str | None = None,
 ) -> None:
     """Send a data-only FCM message for a DM the recipient missed
     because they weren't connected. Best-effort, but every branch
@@ -281,13 +282,18 @@ async def _push_dm_fcm(
         )
         return
     try:
+        data = {
+            "type": "dm",
+            "from_uid": sender_uid,
+            "from_name": sender_name[:120],
+            "preview": (preview or "")[:200],
+        }
+        if sender_avatar_url:
+            # Carry the avatar so the recipient's notification can render
+            # the sender's face (drives Android 11+ Conversation classification).
+            data["from_avatar_url"] = sender_avatar_url[:512]
         message = _fcm_messaging.Message(
-            data={
-                "type": "dm",
-                "from_uid": sender_uid,
-                "from_name": sender_name[:120],
-                "preview": (preview or "")[:200],
-            },
+            data=data,
             token=token,
             android=_fcm_messaging.AndroidConfig(priority="high"),
         )
@@ -1104,6 +1110,7 @@ async def handle_dm_send(client_id: str, websocket: WebSocket, msg: dict) -> Non
                 recipient_uid=recipient_uid,
                 sender_uid=sender_uid,
                 sender_name=sender.name,
+                sender_avatar_url=sender.avatar_url,
                 preview=text or "Shared a song",
             )
 
