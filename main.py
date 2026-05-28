@@ -201,10 +201,10 @@ class RoomListResponse(BaseModel):
 
 # App update configuration - modify these values to control updates
 APP_UPDATE_CONFIG = {
-    "latestVersion": "5.15.2",
-    "latestVersionCode": 43,
-    "apkUrl": "https://raw.githubusercontent.com/tusharwadhan/AudioSync-Server/tushar/releases/syncaura-5.15.2.apk",
-    "releaseNotes": "Reverted the \"Favourite\" label back to \"Favourites\", and fixed silent self-install so it now honours TestFlight-style targeted rollouts.",
+    "latestVersion": "5.15.3",
+    "latestVersionCode": 44,
+    "apkUrl": "https://raw.githubusercontent.com/tusharwadhan/AudioSync-Server/tushar/releases/syncaura-5.15.3.apk",
+    "releaseNotes": "Silent install smoke-test: flipped the \"Favourites\" chip back to \"Favourite\" so a successful background install is visible on home without opening Settings.",
     # 5.15.0 → 5.15.1 is a patch-level bump → the client classifier
     # routes this to the Minor tier (quiet card in Settings, red dot
     # on the home gear). `mandatoryBelow` is effectively ignored for
