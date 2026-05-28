@@ -201,27 +201,26 @@ class RoomListResponse(BaseModel):
 
 # App update configuration - modify these values to control updates
 APP_UPDATE_CONFIG = {
-    "latestVersion": "5.15.0",
-    "latestVersionCode": 41,
-    "apkUrl": "https://raw.githubusercontent.com/tusharwadhan/AudioSync-Server/tushar/releases/syncaura-5.15.0.apk",
-    "releaseNotes": "• New update system: minor / major / emergency tiers + announcement modal\n• Edge Player social FAB redesigned and clipped properly\n• Chat list shows last-seen + Sent/Read delivery state\n• Song-share cards get Play Now / Play Next buttons\n• YouTube extraction restored via ANDROID_VR client (audio playback works again)",
-    # Mandatory release: every install at versionCode < 41 (i.e. 5.14.0
-    # and earlier) gets the no-Later, can't-dismiss Major dialog. Forces
-    # everyone onto the new update system + the restored audio
-    # extraction path. Bump this in lockstep with latestVersionCode for
-    # each subsequent mandatory release.
+    "latestVersion": "5.15.1",
+    "latestVersionCode": 42,
+    "apkUrl": "https://raw.githubusercontent.com/tusharwadhan/AudioSync-Server/tushar/releases/syncaura-5.15.1.apk",
+    "releaseNotes": "Tiny tweak: \"Favourites\" chip label is now \"Favourite\".",
+    # 5.15.0 → 5.15.1 is a patch-level bump → the client classifier
+    # routes this to the Minor tier (quiet card in Settings, red dot
+    # on the home gear). `mandatoryBelow` is effectively ignored for
+    # Minor — leaving it at 41 simply means anyone still on <5.15.0
+    # would get the standard mandatory treatment for THIS version
+    # too if they somehow reached this far without 5.15.0.
     "mandatoryBelow": 41,
-    # When true, the client renders the aggressive emergency screen instead
-    # of the standard major-update modal. Forces mandatory semantics. Set
-    # only for security fixes / "playback fundamentally broken" releases.
     "isEmergency": False,
-    # TestFlight-style targeted rollout. When non-empty, ONLY users
-    # whose email (sent by the client as `?email=`) appears in this
-    # list are offered the update; everyone else sees
-    # `updateAvailable: false`. Leave empty `[]` for a normal
-    # everyone-gets-it release. Emails are matched case-insensitively
-    # against the normalized lowercase form.
-    "targetEmails": [],
+    # First real TestFlight-style rollout. ONLY these two emails see
+    # the update; everyone else sees `updateAvailable: false`. Once
+    # we want to widen it, push an empty list (or run the
+    # /admin/set-target-emails endpoint).
+    "targetEmails": [
+        "tushar.code05@gmail.com",
+        "sushil3994kumar@gmail.com",
+    ],
 }
 
 
