@@ -74,24 +74,23 @@ API_KEY = os.getenv("SYNCAURA_API_KEY", "sk_syncaura_v1_8f3k9x2m7q4w1p6y")
 # when unset the admin endpoints refuse all requests.
 ADMIN_SECRET = os.getenv("SYNCAURA_ADMIN_SECRET", "")
 
-# Endpoints that do NOT require an API key
-PUBLIC_PATHS = (
-    "/update/check",
-    "/releases/",
-    "/share/",
-    "/health",
-    "/",
-    "/docs",
-    "/openapi.json",
+# Endpoints under /api/v1/* that bypass the API-key check. Add new public
+# /api/v1 routes here (don't add prefixes for routes that already live at
+# the root — those are never API-key-gated to begin with).
+PUBLIC_API_V1_PATHS = (
+    "/api/v1/update/check",
+    "/api/v1/announcement",
 )
 
 
 @app.middleware("http")
 async def api_key_middleware(request: Request, call_next):
     path = request.url.path
-    # Only /api/v1/* endpoints require an API key (except update check)
-    needs_key = path.startswith("/api/v1/") and not path.startswith(
-        "/api/v1/update/check"
+    # Only /api/v1/* endpoints require an API key, minus the small public
+    # allowlist above (first-launch / signed-out devices need to be able to
+    # read these before they have credentials).
+    needs_key = path.startswith("/api/v1/") and not any(
+        path.startswith(p) for p in PUBLIC_API_V1_PATHS
     )
     if needs_key:
         key = request.headers.get("X-API-Key")
@@ -172,6 +171,19 @@ class UpdateResponse(BaseModel):
     currentVersionCode: int
     apkUrl: Optional[str] = None
     releaseNotes: Optional[str] = None
+    # Emergency flag — when true the client renders the aggressive red/orange
+    # full-screen blocker instead of the standard major-update modal. Forces
+    # `mandatory` semantics regardless of the mandatoryBelow gate. Reserve for
+    # security fixes and "playback fundamentally broken" releases.
+    isEmergency: bool = False
+
+
+class AnnouncementResponse(BaseModel):
+    """Server-controlled message shown to every user on every cold start
+    until [visible] is flipped back to false. Independent of update flow —
+    the announcement modal renders even when no update is pending."""
+    visible: bool
+    message: Optional[str] = None
 
 
 class RoomListItem(BaseModel):
@@ -189,12 +201,36 @@ class RoomListResponse(BaseModel):
 
 # App update configuration - modify these values to control updates
 APP_UPDATE_CONFIG = {
-    "latestVersion": "5.14.0",
-    "latestVersionCode": 40,
-    "apkUrl": "https://raw.githubusercontent.com/tusharwadhan/AudioSync-Server/tushar/releases/syncaura-5.14.0.apk",
-    "releaseNotes": "Chats just got expressive. Send any emoji and watch it move.",
-    # Optional update — leave mandatoryBelow untouched.
-    "mandatoryBelow": 22,
+    "latestVersion": "5.15.0",
+    "latestVersionCode": 41,
+    "apkUrl": "https://raw.githubusercontent.com/tusharwadhan/AudioSync-Server/tushar/releases/syncaura-5.15.0.apk",
+    "releaseNotes": "• New update system: minor / major / emergency tiers + announcement modal\n• Edge Player social FAB redesigned and clipped properly\n• Chat list shows last-seen + Sent/Read delivery state\n• Song-share cards get Play Now / Play Next buttons\n• YouTube extraction restored via ANDROID_VR client (audio playback works again)",
+    # Mandatory release: every install at versionCode < 41 (i.e. 5.14.0
+    # and earlier) gets the no-Later, can't-dismiss Major dialog. Forces
+    # everyone onto the new update system + the restored audio
+    # extraction path. Bump this in lockstep with latestVersionCode for
+    # each subsequent mandatory release.
+    "mandatoryBelow": 41,
+    # When true, the client renders the aggressive emergency screen instead
+    # of the standard major-update modal. Forces mandatory semantics. Set
+    # only for security fixes / "playback fundamentally broken" releases.
+    "isEmergency": False,
+    # TestFlight-style targeted rollout. When non-empty, ONLY users
+    # whose email (sent by the client as `?email=`) appears in this
+    # list are offered the update; everyone else sees
+    # `updateAvailable: false`. Leave empty `[]` for a normal
+    # everyone-gets-it release. Emails are matched case-insensitively
+    # against the normalized lowercase form.
+    "targetEmails": [],
+}
+
+
+# Announcement configuration - independent of update flow.
+# When `visible` is true, the client shows a modal on every cold start
+# with `message` as the body. Flip to false to suppress immediately.
+ANNOUNCEMENT_CONFIG = {
+    "visible": False,
+    "message": "",
 }
 
 
@@ -1514,36 +1550,139 @@ async def ytdlp_reset():
     }
 
 
-def _check_update_logic(versionCode: int, versionName: str = ""):
+def _check_update_logic(versionCode: int, versionName: str = "", email: str = ""):
     latest_code = APP_UPDATE_CONFIG["latestVersionCode"]
     latest_version = APP_UPDATE_CONFIG["latestVersion"]
     mandatory_below = APP_UPDATE_CONFIG["mandatoryBelow"]
+    target_emails = APP_UPDATE_CONFIG.get("targetEmails") or []
 
     update_available = versionCode < latest_code
+
+    # TestFlight-style targeted rollout. When the config has a non-empty
+    # `targetEmails` list, the update is offered ONLY to clients whose
+    # email matches one of those entries. Clients with no email (old
+    # builds that don't send `?email=`, or signed-out users) and
+    # clients not in the list see `updateAvailable: false` — they keep
+    # running their current version until the rollout opens up.
+    # Empty list = no targeting = update offered to everyone (the normal
+    # release case).
+    if update_available and target_emails:
+        normalized = (email or "").strip().lower()
+        allow = {e.strip().lower() for e in target_emails if e}
+        if normalized not in allow:
+            update_available = False
+
     is_mandatory = versionCode < mandatory_below
+
+    is_emergency = bool(APP_UPDATE_CONFIG.get("isEmergency", False))
 
     return UpdateResponse(
         updateAvailable=update_available,
-        mandatory=is_mandatory if update_available else False,
+        # Emergency releases force mandatory semantics; the client uses both
+        # flags together (isEmergency → red blocker, mandatory → cannot skip).
+        mandatory=(is_mandatory or is_emergency) if update_available else False,
         latestVersion=latest_version,
         latestVersionCode=latest_code,
         currentVersion=versionName,
         currentVersionCode=versionCode,
         apkUrl=APP_UPDATE_CONFIG["apkUrl"] if update_available else None,
         releaseNotes=APP_UPDATE_CONFIG["releaseNotes"] if update_available else None,
+        isEmergency=is_emergency if update_available else False,
     )
 
 
 @api.get("/update/check", response_model=UpdateResponse)
-async def check_update(versionCode: int, versionName: str = ""):
-    """Check if app update is available"""
-    return _check_update_logic(versionCode, versionName)
+async def check_update(versionCode: int, versionName: str = "", email: str = ""):
+    """Check if app update is available.
+
+    `email` is optional — when provided (by signed-in clients only) it
+    is matched against the `targetEmails` allowlist in APP_UPDATE_CONFIG
+    for TestFlight-style rollouts. Old clients that don't send it are
+    treated as "not in the test cohort" when targeting is active.
+    """
+    return _check_update_logic(versionCode, versionName, email)
 
 
 @app.get("/update/check", response_model=UpdateResponse)
-async def check_update_legacy(versionCode: int, versionName: str = ""):
+async def check_update_legacy(versionCode: int, versionName: str = "", email: str = ""):
     """Legacy path for old app versions that don't use /api/v1"""
-    return _check_update_logic(versionCode, versionName)
+    return _check_update_logic(versionCode, versionName, email)
+
+
+@api.get("/announcement", response_model=AnnouncementResponse)
+async def get_announcement():
+    """Return the current announcement. Always returns 200 — clients treat
+    `visible: false` as "no announcement". Public (no API key) so first-launch
+    devices can read it before they have credentials."""
+    return AnnouncementResponse(
+        visible=bool(ANNOUNCEMENT_CONFIG.get("visible", False)),
+        message=ANNOUNCEMENT_CONFIG.get("message") or None,
+    )
+
+
+@api.post("/admin/set-target-emails")
+async def admin_set_target_emails(request: Request):
+    """Admin-only: set the TestFlight-style allowlist for the current
+    APP_UPDATE_CONFIG version. Same admin-guard pattern as
+    set-announcement / broadcast-update.
+
+    Body: { "emails": ["tushar.code05@gmail.com", "..."] }
+    Pass an empty list `{"emails": []}` to roll out to everyone.
+    """
+    admin_header = request.headers.get("X-Admin-Secret", "")
+    if not ADMIN_SECRET or admin_header != ADMIN_SECRET:
+        return JSONResponse({"error": "forbidden"}, status_code=403)
+    try:
+        body = await request.json()
+    except Exception:
+        return JSONResponse({"error": "bad json"}, status_code=400)
+    raw = body.get("emails")
+    if not isinstance(raw, list):
+        return JSONResponse(
+            {"error": "expected `emails` to be a list of strings"},
+            status_code=400,
+        )
+    cleaned = [
+        e.strip().lower()
+        for e in raw
+        if isinstance(e, str) and e.strip()
+    ]
+    # De-dup while preserving order.
+    seen: set[str] = set()
+    deduped: List[str] = []
+    for e in cleaned:
+        if e not in seen:
+            seen.add(e)
+            deduped.append(e)
+    APP_UPDATE_CONFIG["targetEmails"] = deduped
+    return {
+        "ok": True,
+        "targetEmails": deduped,
+        "count": len(deduped),
+        "version": APP_UPDATE_CONFIG["latestVersion"],
+    }
+
+
+@api.post("/admin/set-announcement")
+async def admin_set_announcement(request: Request):
+    """Admin-only: flip the announcement on/off and set its text. Mirrors the
+    `broadcast_update` admin guard pattern — requires both X-API-Key (handled
+    by middleware) and X-Admin-Secret here.
+
+    Body: { "visible": bool, "message": "..." }
+    """
+    admin_header = request.headers.get("X-Admin-Secret", "")
+    if not ADMIN_SECRET or admin_header != ADMIN_SECRET:
+        return JSONResponse({"error": "forbidden"}, status_code=403)
+    try:
+        body = await request.json()
+    except Exception:
+        return JSONResponse({"error": "bad json"}, status_code=400)
+    visible = bool(body.get("visible", False))
+    message = (body.get("message") or "").strip()
+    ANNOUNCEMENT_CONFIG["visible"] = visible
+    ANNOUNCEMENT_CONFIG["message"] = message
+    return {"ok": True, "visible": visible, "message": message}
 
 
 @api.post("/admin/broadcast-update")
