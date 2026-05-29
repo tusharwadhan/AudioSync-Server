@@ -201,10 +201,10 @@ class RoomListResponse(BaseModel):
 
 # App update configuration - modify these values to control updates
 APP_UPDATE_CONFIG = {
-    "latestVersion": "5.15.3",
-    "latestVersionCode": 44,
-    "apkUrl": "https://raw.githubusercontent.com/tusharwadhan/AudioSync-Server/tushar/releases/syncaura-5.15.3.apk",
-    "releaseNotes": "Silent install smoke-test: flipped the \"Favourites\" chip back to \"Favourite\" so a successful background install is visible on home without opening Settings.",
+    "latestVersion": "5.15.4",
+    "latestVersionCode": 45,
+    "apkUrl": "https://raw.githubusercontent.com/tusharwadhan/AudioSync-Server/tushar/releases/syncaura-5.15.4.apk",
+    "releaseNotes": "Fixes a stale Edge Player handle that lingered after opening the social hub from it (and re-spawned itself if the app was killed). Plus the \"Favourite\" label experiment is reverted to \"Favourites\".",
     # 5.15.0 → 5.15.1 is a patch-level bump → the client classifier
     # routes this to the Minor tier (quiet card in Settings, red dot
     # on the home gear). `mandatoryBelow` is effectively ignored for
@@ -213,14 +213,11 @@ APP_UPDATE_CONFIG = {
     # too if they somehow reached this far without 5.15.0.
     "mandatoryBelow": 41,
     "isEmergency": False,
-    # First real TestFlight-style rollout. ONLY these two emails see
-    # the update; everyone else sees `updateAvailable: false`. Once
-    # we want to widen it, push an empty list (or run the
-    # /admin/set-target-emails endpoint).
-    "targetEmails": [
-        "tushar.code05@gmail.com",
-        "sushil3994kumar@gmail.com",
-    ],
+    # Empty list = no targeting = release goes out to every install
+    # (the normal case). Set to a non-empty list for a TestFlight-
+    # style rollout — only the listed emails are eligible while the
+    # list is populated.
+    "targetEmails": [],
 }
 
 
