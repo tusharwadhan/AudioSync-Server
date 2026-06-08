@@ -201,10 +201,10 @@ class RoomListResponse(BaseModel):
 
 # App update configuration - modify these values to control updates
 APP_UPDATE_CONFIG = {
-    "latestVersion": "5.15.7",
-    "latestVersionCode": 48,
-    "apkUrl": "https://raw.githubusercontent.com/tusharwadhan/AudioSync-Server/tushar/releases/syncaura-5.15.7.apk",
-    "releaseNotes": "Fixed the settings-gear \"Update available\" tooltip — the text was being clipped because the tooltip was a child of the 36dp gear wrapper. Now it lives at the root layout so it can render its full width.",
+    "latestVersion": "5.15.8",
+    "latestVersionCode": 49,
+    "apkUrl": "https://raw.githubusercontent.com/tusharwadhan/AudioSync-Server/tushar/releases/syncaura-5.15.8.apk",
+    "releaseNotes": "DM typing indicator now slides in/out smoothly (WhatsApp-style) and the chat glides up to make room instead of jumping. Also stops yanking you back to the bottom when you've scrolled up to read older messages.",
     # 5.15.0 → 5.15.1 is a patch-level bump → the client classifier
     # routes this to the Minor tier (quiet card in Settings, red dot
     # on the home gear). `mandatoryBelow` is effectively ignored for
