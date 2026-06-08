@@ -201,10 +201,10 @@ class RoomListResponse(BaseModel):
 
 # App update configuration - modify these values to control updates
 APP_UPDATE_CONFIG = {
-    "latestVersion": "5.15.4",
-    "latestVersionCode": 45,
-    "apkUrl": "https://raw.githubusercontent.com/tusharwadhan/AudioSync-Server/tushar/releases/syncaura-5.15.4.apk",
-    "releaseNotes": "Fixes a stale Edge Player handle that lingered after opening the social hub from it (and re-spawned itself if the app was killed). Plus the \"Favourite\" label experiment is reverted to \"Favourites\".",
+    "latestVersion": "5.15.5",
+    "latestVersionCode": 46,
+    "apkUrl": "https://raw.githubusercontent.com/tusharwadhan/AudioSync-Server/tushar/releases/syncaura-5.15.5.apk",
+    "releaseNotes": "Notification fixes: every DM now vibrates on Realme/ColorOS, no more duplicate \"Hi\", and the Edge Player banner no longer gets bundled into the Conversations section. Plus a small \"Update available\" tooltip on the settings gear when a minor update is waiting.",
     # 5.15.0 → 5.15.1 is a patch-level bump → the client classifier
     # routes this to the Minor tier (quiet card in Settings, red dot
     # on the home gear). `mandatoryBelow` is effectively ignored for
@@ -213,11 +213,15 @@ APP_UPDATE_CONFIG = {
     # too if they somehow reached this far without 5.15.0.
     "mandatoryBelow": 41,
     "isEmergency": False,
-    # Empty list = no targeting = release goes out to every install
-    # (the normal case). Set to a non-empty list for a TestFlight-
-    # style rollout — only the listed emails are eligible while the
-    # list is populated.
-    "targetEmails": [],
+    # 5.15.5 ships TestFlight-style to just two cohort accounts for
+    # smoke-test of the notification fixes + tooltip animation
+    # before widening. Push an empty list (or hit
+    # /admin/set-target-emails) to roll out to everyone once
+    # verified.
+    "targetEmails": [
+        "tushar.code05@gmail.com",
+        "sushil3994kumar@gmail.com",
+    ],
 }
 
 
