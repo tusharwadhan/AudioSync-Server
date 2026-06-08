@@ -201,10 +201,10 @@ class RoomListResponse(BaseModel):
 
 # App update configuration - modify these values to control updates
 APP_UPDATE_CONFIG = {
-    "latestVersion": "5.15.6",
-    "latestVersionCode": 47,
-    "apkUrl": "https://raw.githubusercontent.com/tusharwadhan/AudioSync-Server/tushar/releases/syncaura-5.15.6.apk",
-    "releaseNotes": "DM notifications now always show the sender's avatar — even on the very first message after the app was killed. We mirror friends' avatars to local disk on sign-in so the FCM handler can render them synchronously instead of waiting on the network.",
+    "latestVersion": "5.15.7",
+    "latestVersionCode": 48,
+    "apkUrl": "https://raw.githubusercontent.com/tusharwadhan/AudioSync-Server/tushar/releases/syncaura-5.15.7.apk",
+    "releaseNotes": "Fixed the settings-gear \"Update available\" tooltip — the text was being clipped because the tooltip was a child of the 36dp gear wrapper. Now it lives at the root layout so it can render its full width.",
     # 5.15.0 → 5.15.1 is a patch-level bump → the client classifier
     # routes this to the Minor tier (quiet card in Settings, red dot
     # on the home gear). `mandatoryBelow` is effectively ignored for
