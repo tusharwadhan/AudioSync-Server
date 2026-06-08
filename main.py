@@ -201,10 +201,10 @@ class RoomListResponse(BaseModel):
 
 # App update configuration - modify these values to control updates
 APP_UPDATE_CONFIG = {
-    "latestVersion": "5.15.5",
-    "latestVersionCode": 46,
-    "apkUrl": "https://raw.githubusercontent.com/tusharwadhan/AudioSync-Server/tushar/releases/syncaura-5.15.5.apk",
-    "releaseNotes": "Notification fixes: every DM now vibrates on Realme/ColorOS, no more duplicate \"Hi\", and the Edge Player banner no longer gets bundled into the Conversations section. Plus a small \"Update available\" tooltip on the settings gear when a minor update is waiting.",
+    "latestVersion": "5.15.6",
+    "latestVersionCode": 47,
+    "apkUrl": "https://raw.githubusercontent.com/tusharwadhan/AudioSync-Server/tushar/releases/syncaura-5.15.6.apk",
+    "releaseNotes": "DM notifications now always show the sender's avatar — even on the very first message after the app was killed. We mirror friends' avatars to local disk on sign-in so the FCM handler can render them synchronously instead of waiting on the network.",
     # 5.15.0 → 5.15.1 is a patch-level bump → the client classifier
     # routes this to the Minor tier (quiet card in Settings, red dot
     # on the home gear). `mandatoryBelow` is effectively ignored for
