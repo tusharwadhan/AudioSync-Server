@@ -219,6 +219,16 @@ class PresenceManager:
     def all_entries(self) -> list[_Online]:
         return list(self._by_uid.values())
 
+    def set_avatar(self, uid: str, avatar_url: str | None) -> None:
+        """Update the cached avatar_url for an online user. Called by
+        broadcast_user_avatar_changed so the in-memory presence entry
+        (which downstream sites read for lounge bake / dm_message
+        from_avatar_url / online list) stays in sync with the DB
+        without forcing a reconnect."""
+        entry = self._by_uid.get(uid)
+        if entry is not None:
+            entry.avatar_url = avatar_url
+
 
 presence = PresenceManager()
 
@@ -355,6 +365,101 @@ async def _broadcast(msg: dict, exclude_uid: str | None = None) -> None:
         await asyncio.gather(*tasks, return_exceptions=True)
 
 
+async def _broadcast_to_audience(uids: list[str], msg: dict) -> None:
+    """Send `msg` to every online uid in the list. Offline uids are
+    silently skipped — they pick up the change via their next
+    snapshot fetch. Used for fan-outs that should NOT reach the
+    full presence list (e.g. avatar/status updates which are
+    friends-only)."""
+    if not uids:
+        return
+    payload = json.dumps(msg)
+    tasks = []
+    for uid in uids:
+        entry = presence.get(uid)
+        if entry is not None:
+            tasks.append(_safe_send_text(entry.websocket, payload))
+    if tasks:
+        await asyncio.gather(*tasks, return_exceptions=True)
+
+
+def photo_url_with_version(url: str | None, photo_updated_at: int | None) -> str | None:
+    """Append `?v={photo_updated_at}` (or `?v=0` if unset) so Coil's
+    URL-keyed memory cache + DmAvatarCache's disk cache treat any
+    avatar change as a cache miss. Firebase Storage doesn't rotate
+    its download-URL tokens on blob overwrite, so this is the only
+    reliable invalidation signal we have.
+
+    Returns None if url is None. Idempotent: if the URL already
+    contains a `v=` param we leave it alone — caller has already
+    versioned it."""
+    if not url:
+        return None
+    if "v=" in url:
+        return url
+    sep = "&" if "?" in url else "?"
+    v = photo_updated_at or 0
+    return f"{url}{sep}v={v}"
+
+
+async def broadcast_user_avatar_changed(
+    uid: str,
+    photo_url: str | None,
+    photo_updated_at: int | None,
+) -> None:
+    """Fan out a `user_avatar_changed` event to the user's friends
+    ONLY. Audience scoping is privacy-sensitive: broadcasting to
+    pending-DM requesters would leak online presence to strangers
+    (they'd see WS traffic whenever the user edits their avatar,
+    confirming the user is currently online). Pending requesters
+    catch up on their next snapshot fetch.
+
+    Self-broadcast is included so the user's other devices stay in
+    sync.
+    """
+    versioned = photo_url_with_version(photo_url, photo_updated_at)
+    msg = {
+        "type": "user_avatar_changed",
+        "uid": uid,
+        "photo_url": versioned,
+    }
+    # Keep the in-memory presence entry consistent with the DB so
+    # that future lounge messages, dm_message bake-ins, and
+    # online_summaries all emit the new URL without requiring a
+    # reconnect from the user.
+    presence.set_avatar(uid, versioned)
+    async with _session_scope() as session:
+        friend_uids = await _friend_uids(session, uid)
+    audience = list(set(friend_uids) | {uid})  # include self for cross-device sync
+    print(f"[user_avatar_changed] uid={uid} audience={len(audience)}")
+    await _broadcast_to_audience(audience, msg)
+
+
+async def _friend_uids(session: AsyncSession, uid: str) -> list[str]:
+    """Return uids of all accepted friends of `uid`. Used by
+    broadcast helpers that need a friends-only audience.
+
+    The result MAY contain duplicates if a rogue migration ever
+    inserts both-direction rows (the schema's `uid_a < uid_b`
+    CHECK + the `_ordered_pair` insertion convention should prevent
+    this in practice). Callers MUST wrap in `set()` before using
+    as a fan-out audience — the dedup is load-bearing for not
+    double-sending the same WS event.
+    """
+    pair_rows = (
+        await session.execute(
+            select(models.Friendship.uid_a, models.Friendship.uid_b)
+            .where(
+                (models.Friendship.uid_a == uid) | (models.Friendship.uid_b == uid)
+            )
+        )
+    ).all()
+    out = []
+    for (a, b) in pair_rows:
+        out.append(b if a == uid else a)
+    return out
+
+
 async def _safe_send_text(ws: WebSocket, payload: str) -> None:
     try:
         await ws.send_text(payload)
@@ -452,6 +557,7 @@ async def _friend_summaries(session: AsyncSession, uid: str) -> list[dict]:
             other_col,
             models.User.display_name,
             models.User.photo_url,
+            models.User.photo_updated_at,
             models.User.last_seen,
         )
         .select_from(models.Friendship)
@@ -468,11 +574,13 @@ async def _friend_summaries(session: AsyncSession, uid: str) -> list[dict]:
         {
             "uid": friend_uid,
             "name": display_name or "",
-            "avatar_url": photo_url,
+            # Cache-busted so Coil + DmAvatarCache treat URL changes
+            # as misses. See photo_url_with_version() docstring.
+            "avatar_url": photo_url_with_version(photo_url, photo_updated_at),
             "is_online": presence.is_online(friend_uid),
             "last_seen_ms": _to_ms(last_seen),
         }
-        for (friend_uid, display_name, photo_url, last_seen) in rows
+        for (friend_uid, display_name, photo_url, photo_updated_at, last_seen) in rows
     ]
 
 
@@ -480,7 +588,7 @@ def _dm_to_dict(
     m: models.DmMessage,
     *,
     with_gate_state: str | None = None,
-    user_lookup: dict[str, tuple[str | None, str | None]] | None = None,
+    user_lookup: dict[str, tuple[str | None, str | None, int | None]] | None = None,
 ) -> dict:
     d = {
         "id": m.id,
@@ -506,10 +614,12 @@ def _dm_to_dict(
     # Sender identity for the snapshot's pending_requests etc., so
     # the client doesn't have to fall back to "Message request" when
     # rendering rows for senders it can't otherwise identify.
+    # Cache-buster appended via photo_url_with_version so any avatar
+    # change forces Coil + DmAvatarCache to refetch.
     if user_lookup is not None:
-        name, avatar = user_lookup.get(m.from_uid, (None, None))
+        name, avatar, updated_at = user_lookup.get(m.from_uid, (None, None, None))
         d["from_name"] = name
-        d["from_avatar_url"] = avatar
+        d["from_avatar_url"] = photo_url_with_version(avatar, updated_at)
     return d
 
 
@@ -583,16 +693,21 @@ async def _build_snapshot(session: AsyncSession, uid: str) -> dict:
     # JOIN. Especially important for pending stranger requests
     # where the recipient has never seen the sender otherwise.
     sender_uids = {m.from_uid for m in incoming} | {m.from_uid for m in sent_pending}
-    user_lookup: dict[str, tuple[str | None, str | None]] = {}
+    user_lookup: dict[str, tuple[str | None, str | None, int | None]] = {}
     if sender_uids:
         user_rows = (
             await session.execute(
-                select(models.User.id, models.User.display_name, models.User.photo_url)
+                select(
+                    models.User.id,
+                    models.User.display_name,
+                    models.User.photo_url,
+                    models.User.photo_updated_at,
+                )
                 .where(models.User.id.in_(sender_uids))
             )
         ).all()
-        for u_id, dname, photo in user_rows:
-            user_lookup[u_id] = (dname, photo)
+        for u_id, dname, photo, updated_at in user_rows:
+            user_lookup[u_id] = (dname, photo, updated_at)
 
     # Pull all thread states involving me — used to bucket incoming
     # messages into pending vs accepted.
@@ -689,11 +804,12 @@ async def _build_snapshot(session: AsyncSession, uid: str) -> dict:
                         models.User.id,
                         models.User.display_name,
                         models.User.photo_url,
+                        models.User.photo_updated_at,
                     ).where(models.User.id.in_(missing))
                 )
             ).all()
-            for u_id, dname, photo in extra:
-                user_lookup[u_id] = (dname, photo)
+            for u_id, dname, photo, updated_at in extra:
+                user_lookup[u_id] = (dname, photo, updated_at)
         history = [
             _dm_to_dict(m, with_gate_state="accepted", user_lookup=user_lookup)
             for m in reversed(hist_rows)
@@ -751,7 +867,14 @@ async def handle_social_subscribe(client_id: str, websocket: WebSocket, msg: dic
         ).scalar_one_or_none()
         if user_row:
             name = user_row.display_name or name
-            avatar_url = user_row.photo_url or avatar_url
+            # Cache-busted at presence-entry time so every downstream
+            # read (presence_join broadcast, online list, lounge bake,
+            # dm_message from_avatar_url at send time) gets a URL Coil
+            # will treat as fresh on the next avatar update.
+            avatar_url = photo_url_with_version(
+                user_row.photo_url or avatar_url,
+                user_row.photo_updated_at,
+            )
             # Bump last_seen so we have a coarse "active recently" record.
             user_row.last_seen = _now()
             await session.commit()

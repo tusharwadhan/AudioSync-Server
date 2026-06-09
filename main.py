@@ -4058,6 +4058,32 @@ async def websocket_endpoint(websocket: WebSocket):
             elif msg_type == "dm_unfriend":
                 await social.handle_dm_unfriend(client_id, websocket, msg)
 
+            else:
+                # Unknown message type — reply with social_error so a
+                # newer client talking to an older server can detect
+                # the missing feature and roll back its optimistic UI
+                # state instead of letting it persist forever locally.
+                # Existing behaviour was silent drop; this is an
+                # additive change (new reply type, harmless to older
+                # clients which just don't handle it).
+                # `lounge_` included so any future lounge-namespaced
+                # message added on the client (R3+) gets a real error
+                # reply on an older server instead of silent drop.
+                if (
+                    msg_type.startswith("dm_")
+                    or msg_type.startswith("user_")
+                    or msg_type.startswith("social_")
+                    or msg_type.startswith("lounge_")
+                ):
+                    try:
+                        await websocket.send_json({
+                            "type": "social_error",
+                            "code": "unknown_type",
+                            "received": msg_type,
+                        })
+                    except Exception:
+                        pass
+
     except WebSocketDisconnect:
         print(f"[WS] Client disconnected: {client_id[:8]}")
         analytics.log_event("ws_disconnect", client_id=client_id)
@@ -4416,6 +4442,10 @@ async def auth_sync(
             id=user["uid"],
             email=user.get("email"),
             display_name=user.get("name"),
+            # First-ever sign-in: take Google's photo as the starting
+            # avatar. custom_photo stays false, so a future Google
+            # photo change will still flow through; PATCH /users/me
+            # flips custom_photo=true once the user uploads their own.
             photo_url=user.get("picture"),
             created_at=now,
             last_seen=now,
@@ -4424,10 +4454,16 @@ async def auth_sync(
         created = True
     else:
         # Keep our cached profile in sync with what Firebase reports —
-        # the user may have updated their Google name / photo since last sync.
+        # the user may have updated their Google name / photo since
+        # last sign-in.
         row.email = user.get("email")
         row.display_name = user.get("name")
-        row.photo_url = user.get("picture")
+        # COALESCE-style update: only refresh photo_url from Google
+        # if the user hasn't uploaded their own. Without this guard
+        # every cold start would clobber the custom avatar with the
+        # Google profile photo, undoing the entire R1 feature.
+        if not row.custom_photo:
+            row.photo_url = user.get("picture")
         row.last_seen = now
 
     await session.commit()
@@ -4438,6 +4474,123 @@ async def auth_sync(
         display_name=row.display_name,
         photo_url=row.photo_url,
         created=created,
+    )
+
+
+# ── User profile edits (avatar + status text) ──────────────────────
+#
+# Single PATCH endpoint that the R1 (avatar) and R2 (text status)
+# features both hit. Either field omitted → no-op for that field;
+# both omitted → 400. Each accepted change is broadcast to friends
+# via the social WebSocket so all peers see the update in real time.
+
+class PatchSelfBody(BaseModel):
+    photo_url: str | None = None
+    status_text: str | None = None
+
+
+class PatchSelfResponse(BaseModel):
+    uid: str
+    photo_url: str | None
+    status_text: str | None
+    photo_updated_at: int | None
+
+
+@api.patch("/users/me", response_model=PatchSelfResponse)
+async def patch_self(
+    body: PatchSelfBody,
+    user: AuthedUser = Depends(get_current_user),
+    session: AsyncSession = Depends(get_session),
+):
+    """Update the signed-in user's avatar URL and/or status text.
+
+    Avatar contract: client uploads to Firebase Storage at
+    `avatars/{firebase_uid}.jpg`, then PATCHes this endpoint with the
+    download URL. We validate the URL points at the user's own path
+    (anti-spoofing), flip `custom_photo=true` so /auth/sync stops
+    overwriting it, stamp `photo_updated_at` so the social layer can
+    cache-bust, and broadcast `user_avatar_changed` to friends.
+
+    Status text contract: max 100 chars. Empty string clears the
+    status. R2 broadcasts a `user_status_changed` event; this R1
+    endpoint accepts the field for forward-compat but the broadcast
+    is gated until the column exists.
+    """
+    if body.photo_url is None and body.status_text is None:
+        raise HTTPException(status_code=400, detail="no fields to update")
+
+    result = await session.execute(
+        select(models.User).where(models.User.id == user["uid"])
+    )
+    row = result.scalar_one_or_none()
+    if row is None:
+        raise HTTPException(status_code=404, detail="user not found")
+
+    avatar_changed = False
+    if body.photo_url is not None:
+        # Anti-spoofing — defense in depth on top of the Storage
+        # security rules:
+        #   1. Host must belong to Firebase Storage. We accept both
+        #      the classic `firebasestorage.googleapis.com` and the
+        #      newer regional `*.firebasestorage.app` domains —
+        #      buckets created after the 2026 rebrand return URLs on
+        #      the new host and the old hardcoded prefix rejected
+        #      legitimate uploads.
+        #   2. Path must reference the caller's own avatar slot
+        #      (`avatars%2F{uid}.jpg` URL-encoded). Without this a
+        #      malicious client could PATCH with a URL pointing at
+        #      another user's avatar blob.
+        expected_path = f"avatars%2F{user['uid']}.jpg"
+        accepted_hosts = (
+            "https://firebasestorage.googleapis.com/",
+            "https://firebasestorage.app/",
+        )
+        allowed_host = (
+            body.photo_url.startswith(accepted_hosts)
+            or body.photo_url.startswith("https://")
+            and ".firebasestorage.app/" in body.photo_url.split("/", 3)[2]
+        )
+        if not allowed_host:
+            raise HTTPException(status_code=400, detail="photo_url must be a Firebase Storage URL")
+        if expected_path not in body.photo_url:
+            raise HTTPException(status_code=400, detail="photo_url must point at your own avatar path")
+        row.photo_url = body.photo_url
+        row.custom_photo = True
+        row.photo_updated_at = int(time.time() * 1000)
+        avatar_changed = True
+
+    if body.status_text is not None:
+        # R2 wires storage; for R1 we just no-op without erroring so
+        # forward-compat clients don't blow up if they include the
+        # field. Once 0010 lands and the column exists this becomes
+        # a real write.
+        if len(body.status_text) > 100:
+            raise HTTPException(status_code=400, detail="status_text too long (max 100 chars)")
+        if hasattr(row, "status_text"):
+            row.status_text = body.status_text or None
+
+    await session.commit()
+
+    if avatar_changed:
+        # Broadcast outside the DB session so a slow WS send doesn't
+        # hold the transaction open.
+        try:
+            from social import broadcast_user_avatar_changed
+            await broadcast_user_avatar_changed(
+                uid=row.id,
+                photo_url=row.photo_url,
+                photo_updated_at=row.photo_updated_at,
+            )
+        except Exception as e:
+            # Broadcast failure is recoverable — peers refetch on
+            # next snapshot. Log and continue.
+            print(f"[user_avatar_changed] broadcast failed: {e}")
+
+    return PatchSelfResponse(
+        uid=row.id,
+        photo_url=row.photo_url,
+        status_text=getattr(row, "status_text", None),
+        photo_updated_at=row.photo_updated_at,
     )
 
 

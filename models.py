@@ -86,6 +86,22 @@ class User(Base):
     fcm_token_updated_at: Mapped[datetime | None] = mapped_column(
         DateTime(timezone=True), nullable=True
     )
+    # True once the user has uploaded their own avatar via
+    # PATCH /users/me. /auth/sync's photo_url write is gated on
+    # `not custom_photo` so Google sign-in never reverts a custom
+    # avatar. See alembic 0009_user_avatar.
+    custom_photo: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, server_default=sql_text("false"), default=False
+    )
+    # Epoch milliseconds of the last avatar change. Server appends
+    # `?v={this}` to every emitted photo_url so Coil (URL-keyed
+    # memory cache) + DmAvatarCache (sender-uid-keyed disk cache)
+    # treat URL changes as cache misses. Firebase Storage doesn't
+    # rotate its download-URL tokens on blob overwrite, so this is
+    # the only reliable invalidation signal.
+    photo_updated_at: Mapped[int | None] = mapped_column(
+        BigInteger, nullable=True
+    )
 
     def __repr__(self) -> str:
         return f"<User id={self.id} email={self.email}>"
