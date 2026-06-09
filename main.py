@@ -201,10 +201,10 @@ class RoomListResponse(BaseModel):
 
 # App update configuration - modify these values to control updates
 APP_UPDATE_CONFIG = {
-    "latestVersion": "5.15.8",
-    "latestVersionCode": 49,
-    "apkUrl": "https://raw.githubusercontent.com/tusharwadhan/AudioSync-Server/tushar/releases/syncaura-5.15.8.apk",
-    "releaseNotes": "DM typing indicator now slides in/out smoothly (WhatsApp-style) and the chat glides up to make room instead of jumping. Also stops yanking you back to the bottom when you've scrolled up to read older messages.",
+    "latestVersion": "5.15.9",
+    "latestVersionCode": 50,
+    "apkUrl": "https://raw.githubusercontent.com/tusharwadhan/AudioSync-Server/tushar/releases/syncaura-5.15.9.apk",
+    "releaseNotes": "Bundles the last few weeks of polish: DMs always show the sender's avatar (even on cold start), the typing indicator slides in smoothly without flicker, the Edge Player banner no longer hijacks the Conversations notification group, and a small \"Update available\" tooltip on the settings gear.",
     # 5.15.0 → 5.15.1 is a patch-level bump → the client classifier
     # routes this to the Minor tier (quiet card in Settings, red dot
     # on the home gear). `mandatoryBelow` is effectively ignored for
@@ -213,15 +213,11 @@ APP_UPDATE_CONFIG = {
     # too if they somehow reached this far without 5.15.0.
     "mandatoryBelow": 41,
     "isEmergency": False,
-    # 5.15.5 ships TestFlight-style to just two cohort accounts for
-    # smoke-test of the notification fixes + tooltip animation
-    # before widening. Push an empty list (or hit
-    # /admin/set-target-emails) to roll out to everyone once
-    # verified.
-    "targetEmails": [
-        "tushar.code05@gmail.com",
-        "sushil3994kumar@gmail.com",
-    ],
+    # Empty list = no targeting = release goes out to every install
+    # (the normal case). Set to a non-empty list for a TestFlight-
+    # style rollout — only the listed emails are eligible while the
+    # list is populated.
+    "targetEmails": [],
 }
 
 
