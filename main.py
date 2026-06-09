@@ -4484,6 +4484,62 @@ async def auth_sync(
 # both omitted → 400. Each accepted change is broadcast to friends
 # via the social WebSocket so all peers see the update in real time.
 
+class AvatarSignResponse(BaseModel):
+    cloud_name: str
+    api_key: str
+    timestamp: int
+    public_id: str
+    signature: str
+    overwrite: bool = True
+
+
+@api.post("/avatars/sign", response_model=AvatarSignResponse)
+async def avatars_sign(
+    user: AuthedUser = Depends(get_current_user),
+):
+    """Return signed Cloudinary upload params for the caller's avatar.
+
+    Server pins `public_id = avatars/{caller_uid}` so the signature
+    is keyed to this uid — a malicious client cannot reuse the
+    signature to overwrite another user's avatar slot because
+    Cloudinary verifies that the params at upload time match the
+    signature.
+
+    Client takes the returned params + the image bytes and POSTs
+    multipart to `https://api.cloudinary.com/v1_1/{cloud_name}/image/upload`.
+    On success Cloudinary returns a `secure_url` of the form
+    `https://res.cloudinary.com/{cloud_name}/image/upload/v{N}/avatars/{uid}.jpg`
+    which the client then PATCHes to /users/me.
+    """
+    cloud_name = os.environ.get("CLOUDINARY_CLOUD_NAME", "")
+    api_key = os.environ.get("CLOUDINARY_API_KEY", "")
+    api_secret = os.environ.get("CLOUDINARY_API_SECRET", "")
+    if not cloud_name or not api_key or not api_secret:
+        raise HTTPException(
+            status_code=503,
+            detail="Cloudinary not configured on this server",
+        )
+
+    import cloudinary.utils
+    public_id = f"avatars/{user['uid']}"
+    timestamp = int(time.time())
+    params_to_sign = {
+        "public_id": public_id,
+        "timestamp": timestamp,
+        "overwrite": True,
+    }
+    signature = cloudinary.utils.api_sign_request(params_to_sign, api_secret)
+
+    return AvatarSignResponse(
+        cloud_name=cloud_name,
+        api_key=api_key,
+        timestamp=timestamp,
+        public_id=public_id,
+        signature=signature,
+        overwrite=True,
+    )
+
+
 class PatchSelfBody(BaseModel):
     photo_url: str | None = None
     status_text: str | None = None
@@ -4528,32 +4584,32 @@ async def patch_self(
 
     avatar_changed = False
     if body.photo_url is not None:
-        # Anti-spoofing — defense in depth on top of the Storage
-        # security rules:
-        #   1. Host must belong to Firebase Storage. We accept both
-        #      the classic `firebasestorage.googleapis.com` and the
-        #      newer regional `*.firebasestorage.app` domains —
-        #      buckets created after the 2026 rebrand return URLs on
-        #      the new host and the old hardcoded prefix rejected
-        #      legitimate uploads.
+        # Anti-spoofing — defense in depth on top of Cloudinary's
+        # signature verification (the signed-upload params pin
+        # public_id server-side, so a malicious client can't write
+        # to another user's slot in the first place). Belt-and-braces:
+        #   1. Host must be res.cloudinary.com under OUR cloud
+        #      (configured via CLOUDINARY_CLOUD_NAME env var).
         #   2. Path must reference the caller's own avatar slot
-        #      (`avatars%2F{uid}.jpg` URL-encoded). Without this a
-        #      malicious client could PATCH with a URL pointing at
-        #      another user's avatar blob.
-        expected_path = f"avatars%2F{user['uid']}.jpg"
-        accepted_hosts = (
-            "https://firebasestorage.googleapis.com/",
-            "https://firebasestorage.app/",
-        )
-        allowed_host = (
-            body.photo_url.startswith(accepted_hosts)
-            or body.photo_url.startswith("https://")
-            and ".firebasestorage.app/" in body.photo_url.split("/", 3)[2]
-        )
-        if not allowed_host:
-            raise HTTPException(status_code=400, detail="photo_url must be a Firebase Storage URL")
-        if expected_path not in body.photo_url:
-            raise HTTPException(status_code=400, detail="photo_url must point at your own avatar path")
+        #      (`/avatars/{uid}.<ext>`).
+        cloud_name = os.environ.get("CLOUDINARY_CLOUD_NAME", "")
+        if not cloud_name:
+            raise HTTPException(status_code=503, detail="Cloudinary not configured")
+        expected_prefix = f"https://res.cloudinary.com/{cloud_name}/"
+        # Public ID is `avatars/{uid}`; URL path segment is
+        # `/avatars/{uid}.<ext>` (Cloudinary appends the format
+        # extension to the delivery URL).
+        expected_path_segment = f"/avatars/{user['uid']}."
+        if not body.photo_url.startswith(expected_prefix):
+            raise HTTPException(
+                status_code=400,
+                detail="photo_url must be a Cloudinary URL on our project",
+            )
+        if expected_path_segment not in body.photo_url:
+            raise HTTPException(
+                status_code=400,
+                detail="photo_url must point at your own avatar path",
+            )
         row.photo_url = body.photo_url
         row.custom_photo = True
         row.photo_updated_at = int(time.time() * 1000)

@@ -9,6 +9,13 @@ aiosqlite>=0.19.0
 firebase-admin>=6.2.0
 python-multipart>=0.0.6
 PySocks>=1.7.1
+# Cloudinary — image storage backend for profile avatars (Social v2
+# R1) and one-time DM photos (R4). Firebase Storage requires the
+# Blaze paid plan; Cloudinary's free tier (25 GB storage + 25 GB
+# monthly bandwidth) covers our scale + needs no credit card.
+# Server uses `cloudinary.utils.api_sign_request` to sign per-upload
+# params so clients never see the API secret.
+cloudinary>=1.39.0
 
 # ── Postgres data layer (Phase 1: auth + users) ──
 sqlalchemy[asyncio]>=2.0.30
