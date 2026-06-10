@@ -201,10 +201,10 @@ class RoomListResponse(BaseModel):
 
 # App update configuration - modify these values to control updates
 APP_UPDATE_CONFIG = {
-    "latestVersion": "5.15.9",
-    "latestVersionCode": 50,
-    "apkUrl": "https://raw.githubusercontent.com/tusharwadhan/AudioSync-Server/tushar/releases/syncaura-5.15.9.apk",
-    "releaseNotes": "Bundles the last few weeks of polish: DMs always show the sender's avatar (even on cold start), the typing indicator slides in smoothly without flicker, the Edge Player banner no longer hijacks the Conversations notification group, and a small \"Update available\" tooltip on the settings gear.",
+    "latestVersion": "5.16.0-r2b",
+    "latestVersionCode": 54,
+    "apkUrl": "https://raw.githubusercontent.com/tusharwadhan/AudioSync-Server/tushar/releases/syncaura-5.16.0-r2b.apk",
+    "releaseNotes": "Social v2 R1 + R2 cohort build. Custom profile photos (Cloudinary-backed, survive cold start, show on settings + home + DM avatars). New peer profile sheet (tap a name/avatar in DM to open). Three-dot DM menu now has view profile, mute notifications, clear chat. Text status field on the server (UI ships later).",
     # 5.15.0 → 5.15.1 is a patch-level bump → the client classifier
     # routes this to the Minor tier (quiet card in Settings, red dot
     # on the home gear). `mandatoryBelow` is effectively ignored for
@@ -213,11 +213,11 @@ APP_UPDATE_CONFIG = {
     # too if they somehow reached this far without 5.15.0.
     "mandatoryBelow": 41,
     "isEmergency": False,
-    # Empty list = no targeting = release goes out to every install
-    # (the normal case). Set to a non-empty list for a TestFlight-
-    # style rollout — only the listed emails are eligible while the
-    # list is populated.
-    "targetEmails": [],
+    # 5.16.0-r2b ships TestFlight-style to a single cohort account
+    # for smoke-test of the Social v2 R1+R2 bundle before widening.
+    # Push an empty list (or call /admin/set-target-emails) once
+    # cohort verifies + we rename to a clean 5.16.0.
+    "targetEmails": ["tushar.code05@gmail.com"],
 }
 
 
@@ -4058,6 +4058,12 @@ async def websocket_endpoint(websocket: WebSocket):
             elif msg_type == "dm_unfriend":
                 await social.handle_dm_unfriend(client_id, websocket, msg)
 
+            elif msg_type == "dm_set_mute":
+                await social.handle_dm_set_mute(client_id, websocket, msg)
+
+            elif msg_type == "dm_clear_chat":
+                await social.handle_dm_clear_chat(client_id, websocket, msg)
+
             else:
                 # Unknown message type — reply with social_error so a
                 # newer client talking to an older server can detect
@@ -4615,21 +4621,18 @@ async def patch_self(
         row.photo_updated_at = int(time.time() * 1000)
         avatar_changed = True
 
+    status_changed = False
     if body.status_text is not None:
-        # R2 wires storage; for R1 we just no-op without erroring so
-        # forward-compat clients don't blow up if they include the
-        # field. Once 0010 lands and the column exists this becomes
-        # a real write.
         if len(body.status_text) > 100:
             raise HTTPException(status_code=400, detail="status_text too long (max 100 chars)")
-        if hasattr(row, "status_text"):
-            row.status_text = body.status_text or None
+        new_status = body.status_text or None
+        if row.status_text != new_status:
+            row.status_text = new_status
+            status_changed = True
 
     await session.commit()
 
     if avatar_changed:
-        # Broadcast outside the DB session so a slow WS send doesn't
-        # hold the transaction open.
         try:
             from social import broadcast_user_avatar_changed
             await broadcast_user_avatar_changed(
@@ -4638,9 +4641,17 @@ async def patch_self(
                 photo_updated_at=row.photo_updated_at,
             )
         except Exception as e:
-            # Broadcast failure is recoverable — peers refetch on
-            # next snapshot. Log and continue.
             print(f"[user_avatar_changed] broadcast failed: {e}")
+
+    if status_changed:
+        try:
+            from social import broadcast_user_status_changed
+            await broadcast_user_status_changed(
+                uid=row.id,
+                status_text=row.status_text,
+            )
+        except Exception as e:
+            print(f"[user_status_changed] broadcast failed: {e}")
 
     return PatchSelfResponse(
         uid=row.id,

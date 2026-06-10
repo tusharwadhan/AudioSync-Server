@@ -262,6 +262,19 @@ async def _push_dm_fcm(
         f"[social] FCM attempt -> recipient={recipient_uid[:8]} "
         f"sender={sender_uid[:8]} (tokens_map_size={len(_fcm_tokens_by_uid)})"
     )
+    # R2 mute gate: skip the push entirely if the recipient has
+    # muted the sender. In-app delivery / unread badge are
+    # unaffected — only the lock-screen notification is suppressed.
+    try:
+        async with _session_scope() as session:
+            if await _is_muted(session, recipient_uid, sender_uid):
+                print(
+                    f"[social] FCM skipped (muted) -> recipient={recipient_uid[:8]} "
+                    f"sender={sender_uid[:8]}"
+                )
+                return
+    except Exception as e:
+        print(f"[social] FCM mute-check failed for {recipient_uid[:8]} (proceeding): {e}")
     token = _fcm_tokens_by_uid.get(recipient_uid)
     if not token:
         # Cold in-memory cache (e.g. right after a deploy). Fall back to
@@ -336,22 +349,27 @@ async def _push_dm_fcm(
 # ─────────────────────────────────────────────────────────────────────
 
 
-async def _send(ws: WebSocket, msg: dict) -> None:
+async def _send(ws: WebSocket, msg: dict) -> bool:
+    """Returns True iff the WS send actually completed. False on any
+    exception (audit finding #11: callers relying on the return
+    value were previously fooled into thinking a stale socket
+    successfully delivered, suppressing FCM fallback)."""
     try:
         await ws.send_text(json.dumps(msg))
+        return True
     except Exception:
         # Connection probably dropped; cleanup happens in the receive
         # loop's WebSocketDisconnect path.
-        pass
+        return False
 
 
 async def _send_to_uid(uid: str, msg: dict) -> bool:
-    """Returns True if the message was delivered over an open WS."""
+    """Returns True only if the message ACTUALLY went over an open
+    WS. A False return means the FCM fallback path should run."""
     entry = presence.get(uid)
     if entry is None:
         return False
-    await _send(entry.websocket, msg)
-    return True
+    return await _send(entry.websocket, msg)
 
 
 async def _broadcast(msg: dict, exclude_uid: str | None = None) -> None:
@@ -430,21 +448,84 @@ async def broadcast_user_avatar_changed(
     presence.set_avatar(uid, versioned)
     async with _session_scope() as session:
         friend_uids = await _friend_uids(session, uid)
-    audience = list(set(friend_uids) | {uid})  # include self for cross-device sync
+    audience = list(friend_uids | {uid})
     print(f"[user_avatar_changed] uid={uid} audience={len(audience)}")
     await _broadcast_to_audience(audience, msg)
 
 
-async def _friend_uids(session: AsyncSession, uid: str) -> list[str]:
+async def broadcast_user_status_changed(
+    uid: str,
+    status_text: str | None,
+) -> None:
+    """R2 sibling of broadcast_user_avatar_changed. Fans `user_status_changed`
+    out to the user's friends ONLY (plus self for cross-device sync).
+    """
+    msg = {
+        "type": "user_status_changed",
+        "uid": uid,
+        "status_text": status_text,
+    }
+    async with _session_scope() as session:
+        friend_uids = await _friend_uids(session, uid)
+    audience = list(friend_uids | {uid})
+    print(f"[user_status_changed] uid={uid} audience={len(audience)}")
+    await _broadcast_to_audience(audience, msg)
+
+
+async def _muted_uids_for(session: AsyncSession, user_uid: str) -> set[str]:
+    """Return the set of peer uids that `user_uid` has muted. Used by
+    snapshot (returned as `muted_peers`) and by `_push_dm_fcm` to skip
+    pushes from muted senders."""
+    rows = (
+        await session.execute(
+            select(models.MutedPeer.peer_uid)
+            .where(models.MutedPeer.user_uid == user_uid)
+        )
+    ).scalars().all()
+    return set(rows)
+
+
+async def _is_muted(
+    session: AsyncSession,
+    user_uid: str,
+    peer_uid: str,
+) -> bool:
+    """True iff `user_uid` has muted `peer_uid` for DM notifications."""
+    row = (
+        await session.execute(
+            select(models.MutedPeer.user_uid).where(
+                (models.MutedPeer.user_uid == user_uid) &
+                (models.MutedPeer.peer_uid == peer_uid)
+            )
+        )
+    ).scalar_one_or_none()
+    return row is not None
+
+
+async def _chat_clear_cutoffs(
+    session: AsyncSession,
+    user_uid: str,
+) -> dict[str, int]:
+    """Return `{peer_uid: cleared_before_ts (epoch ms)}` for every
+    thread the caller has issued a clear-chat on. Snapshot uses this
+    to filter all three DM arrays."""
+    rows = (
+        await session.execute(
+            select(models.ChatClear.peer_uid, models.ChatClear.cleared_before_ts)
+            .where(models.ChatClear.user_uid == user_uid)
+        )
+    ).all()
+    return {peer: ts for (peer, ts) in rows}
+
+
+async def _friend_uids(session: AsyncSession, uid: str) -> set[str]:
     """Return uids of all accepted friends of `uid`. Used by
     broadcast helpers that need a friends-only audience.
 
-    The result MAY contain duplicates if a rogue migration ever
-    inserts both-direction rows (the schema's `uid_a < uid_b`
-    CHECK + the `_ordered_pair` insertion convention should prevent
-    this in practice). Callers MUST wrap in `set()` before using
-    as a fan-out audience — the dedup is load-bearing for not
-    double-sending the same WS event.
+    Returns a set so callers don't accidentally double-send a WS
+    event if the friendships table ever has duplicate rows (audit
+    finding #14). Callers can still take the | union with {uid} for
+    self-broadcast without an extra wrap.
     """
     pair_rows = (
         await session.execute(
@@ -454,9 +535,9 @@ async def _friend_uids(session: AsyncSession, uid: str) -> list[str]:
             )
         )
     ).all()
-    out = []
+    out: set[str] = set()
     for (a, b) in pair_rows:
-        out.append(b if a == uid else a)
+        out.add(b if a == uid else a)
     return out
 
 
@@ -558,6 +639,7 @@ async def _friend_summaries(session: AsyncSession, uid: str) -> list[dict]:
             models.User.display_name,
             models.User.photo_url,
             models.User.photo_updated_at,
+            models.User.status_text,
             models.User.last_seen,
         )
         .select_from(models.Friendship)
@@ -577,10 +659,11 @@ async def _friend_summaries(session: AsyncSession, uid: str) -> list[dict]:
             # Cache-busted so Coil + DmAvatarCache treat URL changes
             # as misses. See photo_url_with_version() docstring.
             "avatar_url": photo_url_with_version(photo_url, photo_updated_at),
+            "status_text": status_text,
             "is_online": presence.is_online(friend_uid),
             "last_seen_ms": _to_ms(last_seen),
         }
-        for (friend_uid, display_name, photo_url, photo_updated_at, last_seen) in rows
+        for (friend_uid, display_name, photo_url, photo_updated_at, status_text, last_seen) in rows
     ]
 
 
@@ -588,7 +671,7 @@ def _dm_to_dict(
     m: models.DmMessage,
     *,
     with_gate_state: str | None = None,
-    user_lookup: dict[str, tuple[str | None, str | None, int | None]] | None = None,
+    user_lookup: dict[str, tuple[str | None, str | None, int | None, str | None]] | None = None,
 ) -> dict:
     d = {
         "id": m.id,
@@ -617,9 +700,21 @@ def _dm_to_dict(
     # Cache-buster appended via photo_url_with_version so any avatar
     # change forces Coil + DmAvatarCache to refetch.
     if user_lookup is not None:
-        name, avatar, updated_at = user_lookup.get(m.from_uid, (None, None, None))
+        name, avatar, updated_at, status_text = user_lookup.get(
+            m.from_uid, (None, None, None, None)
+        )
         d["from_name"] = name
         d["from_avatar_url"] = photo_url_with_version(avatar, updated_at)
+        # Status broadcasts are friends-only (broadcast_user_status_changed
+        # restricts the audience to actual friends). The snapshot must
+        # honour the same scope — a stranger sending you their first DM
+        # should NOT leak their status_text in the pending-request row
+        # (audit finding #3). Once the gate flips to accepted, status
+        # rides along with the dm_message payload.
+        if with_gate_state in (None, "accepted"):
+            d["from_status_text"] = status_text
+        else:
+            d["from_status_text"] = None
     return d
 
 
@@ -693,7 +788,7 @@ async def _build_snapshot(session: AsyncSession, uid: str) -> dict:
     # JOIN. Especially important for pending stranger requests
     # where the recipient has never seen the sender otherwise.
     sender_uids = {m.from_uid for m in incoming} | {m.from_uid for m in sent_pending}
-    user_lookup: dict[str, tuple[str | None, str | None, int | None]] = {}
+    user_lookup: dict[str, tuple[str | None, str | None, int | None, str | None]] = {}
     if sender_uids:
         user_rows = (
             await session.execute(
@@ -702,12 +797,13 @@ async def _build_snapshot(session: AsyncSession, uid: str) -> dict:
                     models.User.display_name,
                     models.User.photo_url,
                     models.User.photo_updated_at,
+                    models.User.status_text,
                 )
                 .where(models.User.id.in_(sender_uids))
             )
         ).all()
-        for u_id, dname, photo, updated_at in user_rows:
-            user_lookup[u_id] = (dname, photo, updated_at)
+        for u_id, dname, photo, updated_at, status_text in user_rows:
+            user_lookup[u_id] = (dname, photo, updated_at, status_text)
 
     # Pull all thread states involving me — used to bucket incoming
     # messages into pending vs accepted.
@@ -805,15 +901,38 @@ async def _build_snapshot(session: AsyncSession, uid: str) -> dict:
                         models.User.display_name,
                         models.User.photo_url,
                         models.User.photo_updated_at,
+                        models.User.status_text,
                     ).where(models.User.id.in_(missing))
                 )
             ).all()
-            for u_id, dname, photo, updated_at in extra:
-                user_lookup[u_id] = (dname, photo, updated_at)
+            for u_id, dname, photo, updated_at, status_text in extra:
+                user_lookup[u_id] = (dname, photo, updated_at, status_text)
         history = [
             _dm_to_dict(m, with_gate_state="accepted", user_lookup=user_lookup)
             for m in reversed(hist_rows)
         ]
+
+    # Per-peer one-sided "clear chat" cutoffs (R2). Applied to ALL
+    # three DM arrays so a reconnect / re-snapshot doesn't bring back
+    # messages the user has cleared from their own side. Peer's
+    # snapshot is unaffected (asymmetric clear, WhatsApp-style).
+    clear_cutoffs = await _chat_clear_cutoffs(session, uid)
+    def _after_clear(m: dict) -> bool:
+        cutoff = clear_cutoffs.get(_peer_of(m, uid))
+        return cutoff is None or (m.get("sent_at") or 0) > cutoff
+    unread_dms = [m for m in unread_dms if _after_clear(m)]
+    sent_unread = [m for m in sent_unread if _after_clear(m)]
+    history = [m for m in history if _after_clear(m)]
+    # Pending requests need the same treatment (audit finding #5b) —
+    # otherwise a stranger DM cleared before acceptance reappears
+    # on every reconnect.
+    pending_requests = [m for m in pending_requests if _after_clear(m)]
+
+    # Set of peer uids the caller has muted for DM push notifications
+    # (R2). In-app delivery + unread counts are unaffected by mute —
+    # this is purely a notification suppression list. Client uses it
+    # to drive the three-dot menu's Mute / Unmute toggle state.
+    muted_peers = sorted(await _muted_uids_for(session, uid))
 
     return {
         "online": online,
@@ -826,8 +945,20 @@ async def _build_snapshot(session: AsyncSession, uid: str) -> dict:
         "history_dms": history,
         # Per-peer retention mode so the client header reflects it.
         "dm_modes": mode_by_peer,
+        # R2: muted peers (DM notification suppression list).
+        "muted_peers": muted_peers,
+        # R2: per-peer clear-chat cutoffs so the client can hide local
+        # echo of older messages it doesn't have in the snapshot
+        # (e.g. messages that haven't been GC'd yet on the server).
+        "chat_clears": clear_cutoffs,
         "server_time": _to_ms(_now()),
     }
+
+
+def _peer_of(dm_dict: dict, self_uid: str) -> str:
+    """Return the other party in a DM dict from `self_uid`'s POV.
+    Used by the clear-chat filter — we key cutoffs by peer."""
+    return dm_dict["to_uid"] if dm_dict.get("from_uid") == self_uid else dm_dict.get("from_uid", "")
 
 
 # ─────────────────────────────────────────────────────────────────────
@@ -925,6 +1056,99 @@ async def handle_social_disconnect(client_id: str) -> None:
     except Exception as e:
         print(f"[social] last_seen update failed for {kicked.uid[:8]}: {e}")
     await _broadcast({"type": "presence_leave", "uid": kicked.uid})
+
+
+async def handle_dm_set_mute(client_id: str, websocket: WebSocket, msg: dict) -> None:
+    """R2: toggle the caller's notification-mute on a specific peer.
+
+    Mute is one-way + asymmetric — only the CALLER's lock-screen
+    push from that peer is suppressed. In-app delivery + unread
+    counts are unaffected. Peer never learns they were muted (no
+    broadcast to them).
+
+    Reply is sent ONLY to the caller (`dm_mute_changed`) so their
+    other devices learn about the toggle and the local UI can flip
+    the menu item without waiting for a fresh snapshot.
+
+    Idempotent via `ON CONFLICT DO NOTHING` — safe to call twice
+    from two devices without the second hitting a PK violation
+    (audit finding #4).
+    """
+    me = presence.uid_for_client(client_id)
+    if me is None:
+        await _send(websocket, _err("not_subscribed", "Call social_subscribe first"))
+        return
+    peer_uid = msg.get("peer_uid")
+    if not isinstance(peer_uid, str) or not peer_uid or peer_uid == me:
+        await _send(websocket, _err("bad_request", "peer_uid required"))
+        return
+    muted = bool(msg.get("muted", False))
+    from sqlalchemy.dialects.postgresql import insert as pg_insert
+    async with _session_scope() as session:
+        if muted:
+            stmt = pg_insert(models.MutedPeer.__table__).values(
+                user_uid=me, peer_uid=peer_uid, muted_at=_now(),
+            ).on_conflict_do_nothing(
+                index_elements=["user_uid", "peer_uid"],
+            )
+            await session.execute(stmt)
+        else:
+            await session.execute(
+                models.MutedPeer.__table__.delete().where(
+                    (models.MutedPeer.user_uid == me) &
+                    (models.MutedPeer.peer_uid == peer_uid)
+                )
+            )
+        await session.commit()
+    print(f"[dm_set_mute] user={me[:8]} peer={peer_uid[:8]} muted={muted}")
+    # Echo to all of caller's connected devices (currently we only
+    # track one WS per uid, but the helper handles both cases).
+    await _send_to_uid(me, {
+        "type": "dm_mute_changed",
+        "peer_uid": peer_uid,
+        "muted": muted,
+    })
+
+
+async def handle_dm_clear_chat(client_id: str, websocket: WebSocket, msg: dict) -> None:
+    """R2: one-sided clear-chat. Upserts a cutoff for the (caller,
+    peer) pair so the caller's snapshot filters out messages with
+    `sent_at <= cleared_before_ts` from ALL THREE DM arrays
+    (unread_dms, sent_unread_dms, history_dms). Peer's snapshot is
+    unaffected — WhatsApp-style.
+
+    A subsequent message in the thread appears normally; the cutoff
+    is a one-shot, not a kill-switch on the conversation.
+    """
+    me = presence.uid_for_client(client_id)
+    if me is None:
+        await _send(websocket, _err("not_subscribed", "Call social_subscribe first"))
+        return
+    peer_uid = msg.get("peer_uid")
+    if not isinstance(peer_uid, str) or not peer_uid or peer_uid == me:
+        await _send(websocket, _err("bad_request", "peer_uid required"))
+        return
+    cleared_before_ts = int(time.time() * 1000)
+    # Upsert via ON CONFLICT DO UPDATE so concurrent calls from two
+    # devices don't hit a PK violation (audit finding #4). The
+    # cutoff is monotonically non-decreasing per (user, peer), so
+    # last-write-wins is correct semantics.
+    from sqlalchemy.dialects.postgresql import insert as pg_insert
+    async with _session_scope() as session:
+        stmt = pg_insert(models.ChatClear.__table__).values(
+            user_uid=me, peer_uid=peer_uid, cleared_before_ts=cleared_before_ts,
+        ).on_conflict_do_update(
+            index_elements=["user_uid", "peer_uid"],
+            set_=dict(cleared_before_ts=cleared_before_ts),
+        )
+        await session.execute(stmt)
+        await session.commit()
+    print(f"[dm_clear_chat] user={me[:8]} peer={peer_uid[:8]} cutoff={cleared_before_ts}")
+    await _send_to_uid(me, {
+        "type": "dm_chat_cleared",
+        "peer_uid": peer_uid,
+        "cleared_before_ts": cleared_before_ts,
+    })
 
 
 async def handle_dm_unfriend(client_id: str, websocket: WebSocket, msg: dict) -> None:

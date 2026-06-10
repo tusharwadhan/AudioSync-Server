@@ -102,9 +102,61 @@ class User(Base):
     photo_updated_at: Mapped[int | None] = mapped_column(
         BigInteger, nullable=True
     )
+    # Short user-set status string ("Studying", "Listening to X").
+    # Renders next to display_name in PeerProfileSheet + friends
+    # list + online users list. 100-char cap enforced by the
+    # PATCH /users/me handler; empty string clears (converted to
+    # NULL). See alembic 0010_user_status.
+    status_text: Mapped[str | None] = mapped_column(
+        String(100), nullable=True
+    )
 
     def __repr__(self) -> str:
         return f"<User id={self.id} email={self.email}>"
+
+
+class MutedPeer(Base):
+    """One-way DM-notification mute: `user_uid` has silenced FCM
+    pushes from `peer_uid`. In-app delivery + unread counts are
+    unaffected. See alembic 0011_chat_ops."""
+    __tablename__ = "muted_peers"
+
+    user_uid: Mapped[str] = mapped_column(
+        String(128), primary_key=True
+    )
+    peer_uid: Mapped[str] = mapped_column(
+        String(128), primary_key=True
+    )
+    muted_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utc_now, nullable=False
+    )
+
+    def __repr__(self) -> str:
+        return f"<MutedPeer user={self.user_uid} peer={self.peer_uid}>"
+
+
+class ChatClear(Base):
+    """Per-thread one-sided "clear chat" cutoff. The snapshot for
+    `user_uid` filters out messages with sent_at <= cleared_before_ts
+    in the thread with `peer_uid`. Peer's view is unaffected. See
+    alembic 0011_chat_ops."""
+    __tablename__ = "chat_clears"
+
+    user_uid: Mapped[str] = mapped_column(
+        String(128), primary_key=True
+    )
+    peer_uid: Mapped[str] = mapped_column(
+        String(128), primary_key=True
+    )
+    cleared_before_ts: Mapped[int] = mapped_column(
+        BigInteger, nullable=False
+    )
+
+    def __repr__(self) -> str:
+        return (
+            f"<ChatClear user={self.user_uid} peer={self.peer_uid} "
+            f"ts={self.cleared_before_ts}>"
+        )
 
 
 class UserFavorite(Base):
