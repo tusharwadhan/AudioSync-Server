@@ -201,10 +201,10 @@ class RoomListResponse(BaseModel):
 
 # App update configuration - modify these values to control updates
 APP_UPDATE_CONFIG = {
-    "latestVersion": "5.16.0-r2b",
-    "latestVersionCode": 54,
-    "apkUrl": "https://raw.githubusercontent.com/tusharwadhan/AudioSync-Server/tushar/releases/syncaura-5.16.0-r2b.apk",
-    "releaseNotes": "Social v2 R1 + R2 cohort build. Custom profile photos (Cloudinary-backed, survive cold start, show on settings + home + DM avatars). New peer profile sheet (tap a name/avatar in DM to open). Three-dot DM menu now has view profile, mute notifications, clear chat. Text status field on the server (UI ships later).",
+    "latestVersion": "5.17.0",
+    "latestVersionCode": 55,
+    "apkUrl": "https://raw.githubusercontent.com/tusharwadhan/AudioSync-Server/tushar/releases/syncaura-5.17.0.apk",
+    "releaseNotes": "Social v2 R3 + R4 cohort build. Emoji picker button next to the message input (smooth slide-up panel, skin-tone variants). One-time photos: tap the camera icon to send a view-once photo to a friend — they tap once to see it, then it's gone for everyone. Bundles all the R1 + R2 polish from 5.16.0-r2b.",
     # 5.15.0 → 5.15.1 is a patch-level bump → the client classifier
     # routes this to the Minor tier (quiet card in Settings, red dot
     # on the home gear). `mandatoryBelow` is effectively ignored for
@@ -213,11 +213,14 @@ APP_UPDATE_CONFIG = {
     # too if they somehow reached this far without 5.15.0.
     "mandatoryBelow": 41,
     "isEmergency": False,
-    # 5.16.0-r2b ships TestFlight-style to a single cohort account
-    # for smoke-test of the Social v2 R1+R2 bundle before widening.
-    # Push an empty list (or call /admin/set-target-emails) once
-    # cohort verifies + we rename to a clean 5.16.0.
-    "targetEmails": ["tushar.code05@gmail.com"],
+    # 5.17.0 ships TestFlight-style to two cohort accounts for
+    # smoke-test of Social v2 R3 (emoji picker) + R4 (one-time
+    # photo). Push an empty list (or call
+    # /admin/set-target-emails) once cohort verifies to widen.
+    "targetEmails": [
+        "tushar.code05@gmail.com",
+        "sushil3994kumar@gmail.com",
+    ],
 }
 
 
@@ -4064,6 +4067,9 @@ async def websocket_endpoint(websocket: WebSocket):
             elif msg_type == "dm_clear_chat":
                 await social.handle_dm_clear_chat(client_id, websocket, msg)
 
+            elif msg_type == "dm_chat_view_once_open":
+                await social.handle_dm_chat_view_once_open(client_id, websocket, msg)
+
             else:
                 # Unknown message type — reply with social_error so a
                 # newer client talking to an older server can detect
@@ -4544,6 +4550,95 @@ async def avatars_sign(
         signature=signature,
         overwrite=True,
     )
+
+
+class DmPhotoSignBody(BaseModel):
+    peer_uid: str
+
+
+class DmPhotoSignResponse(BaseModel):
+    cloud_name: str
+    api_key: str
+    timestamp: int
+    public_id: str
+    signature: str
+    context: str
+
+
+@api.post("/dm-photos/sign", response_model=DmPhotoSignResponse)
+async def dm_photos_sign(
+    body: DmPhotoSignBody,
+    user: AuthedUser = Depends(get_current_user),
+):
+    """R4: signed Cloudinary upload params for a one-time DM photo.
+
+    Server pins `public_id = dm_photos/{uuid}` (fresh per upload, no
+    reuse possible) AND binds the asset's Cloudinary `context` to
+    `from_uid={caller}|to_uid={peer}`. Server-side at `dm_send` we
+    re-fetch the asset and verify the context matches the sender +
+    recipient — without this, a stolen signature could be replayed
+    to push attacker-controlled content into the DM bubble (audit
+    fix #10).
+    """
+    cloud_name = os.environ.get("CLOUDINARY_CLOUD_NAME", "")
+    api_key = os.environ.get("CLOUDINARY_API_KEY", "")
+    api_secret = os.environ.get("CLOUDINARY_API_SECRET", "")
+    if not cloud_name or not api_key or not api_secret:
+        raise HTTPException(
+            status_code=503,
+            detail="Cloudinary not configured on this server",
+        )
+    peer_uid = (body.peer_uid or "").strip()
+    if not peer_uid or peer_uid == user["uid"]:
+        raise HTTPException(
+            status_code=400,
+            detail="peer_uid required and must differ from caller",
+        )
+
+    import cloudinary.utils, uuid as _uuid
+    public_id = f"dm_photos/{_uuid.uuid4().hex}"
+    timestamp = int(time.time())
+    # Pipe-separated key=value pairs is Cloudinary's standard
+    # serialization for the `context` upload param.
+    context = f"from_uid={user['uid']}|to_uid={peer_uid}"
+    params_to_sign = {
+        "public_id": public_id,
+        "timestamp": timestamp,
+        "context": context,
+    }
+    signature = cloudinary.utils.api_sign_request(params_to_sign, api_secret)
+
+    return DmPhotoSignResponse(
+        cloud_name=cloud_name,
+        api_key=api_key,
+        timestamp=timestamp,
+        public_id=public_id,
+        signature=signature,
+        context=context,
+    )
+
+
+@api.post("/dms/{message_id}/view-once-open")
+async def dms_view_once_open(
+    message_id: int,
+    user: AuthedUser = Depends(get_current_user),
+):
+    """R4 REST fallback for `dm_chat_view_once_open`. Used when the
+    recipient's WS is briefly disconnected mid-view. Returns
+    `{client_nonce}` on success so the caller can match optimistic
+    state; 404 not_found, 403 not_recipient, 409 already_opened.
+    """
+    result = await social.rest_dm_view_once_open(message_id, user["uid"])
+    status = result.get("status")
+    if status == "ok":
+        return {"client_nonce": result.get("client_nonce", "")}
+    if status == "not_found":
+        raise HTTPException(status_code=404, detail="Message not found")
+    if status == "not_recipient":
+        raise HTTPException(status_code=403, detail="Only the recipient can open")
+    if status == "already_opened":
+        raise HTTPException(status_code=409, detail="Already opened")
+    raise HTTPException(status_code=500, detail="Internal error")
 
 
 class PatchSelfBody(BaseModel):

@@ -491,10 +491,28 @@ class DmMessage(Base):
     # string in `text` (to satisfy the content CHECK) but the client
     # renders them from event_type, and the disappear sweep skips them.
     event_type: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    # R4 one-time photo (alembic 0012). NULL for non-photo messages.
+    # photo_url is the Cloudinary secure_url; NULLed when the
+    # recipient opens the message. view_once_status is 'sent' or
+    # 'opened'.
+    photo_url: Mapped[str | None] = mapped_column(Text, nullable=True)
+    view_once_status: Mapped[str | None] = mapped_column(
+        String(16), nullable=True
+    )
+    # Persisted client-generated correlation id (audit fix #1).
+    # Set by handle_dm_send when client supplies it; used in the
+    # dm_view_once_opened broadcast so the sender's client can
+    # match the row by nonce when its optimistic id hasn't been
+    # swapped yet.
+    client_nonce: Mapped[str | None] = mapped_column(
+        String(64), nullable=True
+    )
 
     __table_args__ = (
         CheckConstraint(
-            "text IS NOT NULL OR np_video_id IS NOT NULL OR share_moment IS NOT NULL",
+            "text IS NOT NULL OR np_video_id IS NOT NULL "
+            "OR share_moment IS NOT NULL OR photo_url IS NOT NULL "
+            "OR view_once_status IS NOT NULL",
             name="ck_dm_messages_has_content",
         ),
         # Partial indexes on unread rows — hot path for snapshot / WS

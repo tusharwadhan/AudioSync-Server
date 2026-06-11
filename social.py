@@ -691,6 +691,16 @@ def _dm_to_dict(
         "deleted": bool(m.deleted),
         "share_moment": m.share_moment,
         "event_type": m.event_type,
+        # R4 view-once fields (migration 0012). Both NULL for
+        # plain text DMs. photo_url goes NULL atomically with
+        # view_once_status='opened' (server-side delete handler).
+        # Suppress for non-accepted gate (final-deep-audit fix #5):
+        # if a friendship is dissolved + a new pending thread forms,
+        # a historical 'sent' photo row could re-surface in the
+        # stranger's snapshot. Belt-and-braces — handle_dm_send
+        # already blocks new view-once across pending gates.
+        "photo_url": m.photo_url if with_gate_state in (None, "accepted") else None,
+        "view_once_status": m.view_once_status if with_gate_state in (None, "accepted") else None,
     }
     if with_gate_state is not None:
         d["gate_state"] = with_gate_state
@@ -1363,10 +1373,65 @@ async def handle_dm_send(client_id: str, websocket: WebSocket, msg: dict) -> Non
     share_moment = msg.get("share_moment")
     if not isinstance(share_moment, dict):
         share_moment = None
-    if text is None and np_video_id is None and share_moment is None:
+
+    # R4 view-once photo. Empty text + view_once=True + photo_url
+    # is a valid content kind. Validation runs BEFORE the
+    # empty-message check below so the existing path is not
+    # accidentally relaxed.
+    view_once = bool(msg.get("view_once", False))
+    photo_url = msg.get("photo_url")
+    if photo_url is not None and not isinstance(photo_url, str):
+        photo_url = None
+    if view_once or photo_url:
+        if not view_once or not photo_url:
+            # Both must be set together — plain photos don't exist yet.
+            await _send(websocket, _err("bad_request", "view_once requires photo_url and vice versa"))
+            return
+        # Reject view-once across a non-accepted gate so a stranger
+        # can't push a one-time photo behind their first DM
+        # (audit fix #12 — closes the snapshot URL leak attack).
+        async with _session_scope() as gate_session:
+            state_row = await _get_thread_state(gate_session, sender_uid, recipient_uid)
+            current_state = state_row.state if state_row else None
+        if current_state != "accepted":
+            await _send(websocket, {
+                "type": "social_error",
+                "code": "view_once_requires_accepted_thread",
+            })
+            return
+        # Verify the URL is on our Cloudinary cloud + under dm_photos/.
+        cloud = os.environ.get("CLOUDINARY_CLOUD_NAME", "")
+        expected_prefix = f"https://res.cloudinary.com/{cloud}/"
+        if not cloud or not photo_url.startswith(expected_prefix) or "/dm_photos/" not in photo_url:
+            await _send(websocket, _err("bad_photo_url", "Invalid photo URL"))
+            return
+        # Verify the Cloudinary asset's context binds it to
+        # (sender, recipient). Without this, a stolen signature can
+        # be replayed — attacker uploads to a public_id we signed
+        # for someone else, then convinces user to send that URL
+        # (audit fix #10).
+        import cloudinary.api
+        public_id = _public_id_from_dm_photo_url(photo_url)
+        if public_id is None:
+            await _send(websocket, _err("bad_photo_url", "Cannot parse public_id"))
+            return
+        try:
+            resource = await asyncio.to_thread(
+                cloudinary.api.resource, public_id, context=True
+            )
+        except Exception as e:
+            print(f"[dm_send view_once] context fetch failed for {public_id}: {e}")
+            await _send(websocket, _err("verify_failed", "Photo verification failed"))
+            return
+        ctx = (resource.get("context") or {}).get("custom", {})
+        if ctx.get("from_uid") != sender_uid or ctx.get("to_uid") != recipient_uid:
+            await _send(websocket, _err("context_mismatch", "Photo not bound to this conversation"))
+            return
+
+    if text is None and np_video_id is None and share_moment is None and not view_once:
         await _send(
             websocket,
-            _err("empty_message", "Provide text, np_video_id, or share_moment"),
+            _err("empty_message", "Provide text, np_video_id, share_moment, or view-once photo"),
         )
         return
 
@@ -1428,6 +1493,13 @@ async def handle_dm_send(client_id: str, websocket: WebSocket, msg: dict) -> Non
             reactions={},
             deleted=False,
             sent_at=_now(),
+            # R4: one-time photo fields. NULL for plain text DMs.
+            photo_url=photo_url if view_once else None,
+            view_once_status="sent" if view_once else None,
+            # Audit fix #1 — persist client_nonce so the
+            # dm_view_once_opened broadcast can carry it back to
+            # the sender's optimistic message.
+            client_nonce=client_nonce if view_once else None,
         )
         session.add(message)
         await session.commit()
@@ -1453,12 +1525,16 @@ async def handle_dm_send(client_id: str, websocket: WebSocket, msg: dict) -> Non
         recipient_payload["type"] = "dm_message"
         delivered_over_ws = await _send_to_uid(recipient_uid, recipient_payload)
         if not delivered_over_ws:
+            # R4 view-once: lock-screen preview is plain "Photo"
+            # (no emoji round-trip risk per audit fix #11, no
+            # photo_url leak in FCM payload).
+            fcm_preview = "Photo" if view_once else (text or "Shared a song")
             await _push_dm_fcm(
                 recipient_uid=recipient_uid,
                 sender_uid=sender_uid,
                 sender_name=sender.name,
                 sender_avatar_url=sender.avatar_url,
-                preview=text or "Shared a song",
+                preview=fcm_preview,
             )
 
 
@@ -1882,6 +1958,167 @@ async def handle_dm_chat_typing(
             "is_typing": is_typing,
         },
     )
+
+
+# ─────────────────────────────────────────────────────────────────────
+# R4 — one-time photo helpers + handlers
+# ─────────────────────────────────────────────────────────────────────
+
+
+def _public_id_from_dm_photo_url(url: str | None) -> str | None:
+    """Parse `dm_photos/{uuid}` out of a Cloudinary delivery URL.
+
+    Cloudinary delivery URLs look like
+    `https://res.cloudinary.com/{cloud}/image/upload/v{N}/dm_photos/{uuid}.{ext}`.
+    The destroy API needs the public_id WITHOUT extension —
+    `dm_photos/{uuid}`. Returns None on any parse failure (caller
+    decides whether to fail loudly).
+    """
+    if not url:
+        return None
+    idx = url.find("/dm_photos/")
+    if idx < 0:
+        return None
+    tail = url[idx + 1:]  # "dm_photos/{uuid}.{ext}"
+    # Strip extension (last segment after the last dot, only if
+    # that segment doesn't contain a slash).
+    dot = tail.rfind(".")
+    if dot > 0 and "/" not in tail[dot:]:
+        return tail[:dot]
+    return tail
+
+
+async def handle_dm_chat_view_once_open(
+    client_id: str, websocket: WebSocket, msg: dict
+) -> None:
+    """R4: recipient marks a view-once photo as opened.
+
+    Atomic state flip + Cloudinary blob destruction + broadcast to
+    BOTH peers. The Cloudinary destroy is fire-and-forget on a
+    background thread (audit fix #2) so the WS event loop isn't
+    blocked on the ~800ms CDN purge.
+
+    Server-side guards:
+      * caller must be the recipient (audit-defense — client
+        already skips firing on the sender side, but we don't
+        trust that)
+      * status must be 'sent' (already opened → no-op + error)
+    """
+    me = presence.uid_for_client(client_id)
+    if me is None:
+        await _send(websocket, _err("not_subscribed", "Call social_subscribe first"))
+        return
+    raw_id = msg.get("message_id")
+    if not isinstance(raw_id, int) or raw_id <= 0:
+        await _send(websocket, _err("bad_request", "message_id required"))
+        return
+    message_id = raw_id
+
+    async with _session_scope() as session:
+        row = (
+            await session.execute(
+                select(models.DmMessage).where(models.DmMessage.id == message_id)
+            )
+        ).scalar_one_or_none()
+        if row is None:
+            await _send(websocket, {
+                "type": "social_error",
+                "code": "not_found",
+                "message_id": message_id,
+            })
+            return
+        if row.to_uid != me:
+            await _send(websocket, {
+                "type": "social_error",
+                "code": "not_recipient",
+                "message_id": message_id,
+            })
+            return
+        if row.view_once_status != "sent":
+            await _send(websocket, {
+                "type": "social_error",
+                "code": "already_opened",
+                "message_id": message_id,
+            })
+            return
+        public_id = _public_id_from_dm_photo_url(row.photo_url)
+        client_nonce = row.client_nonce or ""
+        from_uid_for_broadcast = row.from_uid
+        to_uid_for_broadcast = row.to_uid
+        # Atomic state flip — the cross-column CHECK constraint
+        # would block any partial state.
+        row.view_once_status = "opened"
+        row.photo_url = None
+        await session.commit()
+
+    # Fire-and-forget Cloudinary destroy on a worker thread so a
+    # slow CDN purge doesn't stall this WS worker (audit fix #2).
+    if public_id is not None:
+        import cloudinary.uploader
+        async def _destroy_async():
+            try:
+                await asyncio.to_thread(
+                    cloudinary.uploader.destroy, public_id, invalidate=True,
+                )
+                print(f"[view_once_open] cloudinary destroy ok public_id={public_id}")
+            except Exception as e:
+                print(f"[view_once_open] cloudinary destroy FAILED public_id={public_id}: {e}")
+        asyncio.create_task(_destroy_async())
+
+    broadcast = {
+        "type": "dm_view_once_opened",
+        "message_id": message_id,
+        "client_nonce": client_nonce,
+    }
+    await _send_to_uid(to_uid_for_broadcast, broadcast)
+    await _send_to_uid(from_uid_for_broadcast, broadcast)
+
+
+async def rest_dm_view_once_open(message_id: int, caller_uid: str) -> dict:
+    """REST fallback for `handle_dm_chat_view_once_open` — used when
+    the recipient's WS is briefly disconnected mid-view. Same
+    semantics; returns a dict the REST endpoint serialises.
+    Raises HTTPException-equivalent dicts the caller can adapt."""
+    async with _session_scope() as session:
+        row = (
+            await session.execute(
+                select(models.DmMessage).where(models.DmMessage.id == message_id)
+            )
+        ).scalar_one_or_none()
+        if row is None:
+            return {"status": "not_found"}
+        if row.to_uid != caller_uid:
+            return {"status": "not_recipient"}
+        if row.view_once_status != "sent":
+            return {"status": "already_opened"}
+        public_id = _public_id_from_dm_photo_url(row.photo_url)
+        client_nonce = row.client_nonce or ""
+        from_uid_for_broadcast = row.from_uid
+        to_uid_for_broadcast = row.to_uid
+        row.view_once_status = "opened"
+        row.photo_url = None
+        await session.commit()
+
+    if public_id is not None:
+        import cloudinary.uploader
+        async def _destroy_async():
+            try:
+                await asyncio.to_thread(
+                    cloudinary.uploader.destroy, public_id, invalidate=True,
+                )
+                print(f"[view_once_open REST] cloudinary destroy ok public_id={public_id}")
+            except Exception as e:
+                print(f"[view_once_open REST] cloudinary destroy FAILED public_id={public_id}: {e}")
+        asyncio.create_task(_destroy_async())
+
+    broadcast = {
+        "type": "dm_view_once_opened",
+        "message_id": message_id,
+        "client_nonce": client_nonce,
+    }
+    await _send_to_uid(to_uid_for_broadcast, broadcast)
+    await _send_to_uid(from_uid_for_broadcast, broadcast)
+    return {"status": "ok", "client_nonce": client_nonce}
 
 
 # ─────────────────────────────────────────────────────────────────────
