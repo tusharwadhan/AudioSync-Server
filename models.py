@@ -159,6 +159,28 @@ class ChatClear(Base):
         )
 
 
+class DmDisappeared(Base):
+    """Per-viewer disappearing-message dismissal (Snapchat-style).
+    `user_uid` has dismissed `message_id` from THEIR OWN view (recorded
+    when they leave a disappear-mode chat after reading). The snapshot
+    filters these out of that user's history; the peer is untouched.
+    A message is hard-deleted only when BOTH participants have a row
+    here. See alembic 0013_dm_disappeared."""
+    __tablename__ = "dm_disappeared"
+
+    user_uid: Mapped[str] = mapped_column(
+        String(128), primary_key=True
+    )
+    message_id: Mapped[int] = mapped_column(
+        BigInteger, primary_key=True
+    )
+
+    def __repr__(self) -> str:
+        return (
+            f"<DmDisappeared user={self.user_uid} msg={self.message_id}>"
+        )
+
+
 class UserFavorite(Base):
     """A song the user has marked favorite, replicated from any device.
 

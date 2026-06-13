@@ -519,6 +519,23 @@ async def _chat_clear_cutoffs(
     return {peer: ts for (peer, ts) in rows}
 
 
+async def _disappeared_ids_for(
+    session: AsyncSession,
+    user_uid: str,
+) -> set[int]:
+    """Return the set of message ids `user_uid` has dismissed via the
+    Snapchat-style per-viewer disappearing-message flow. Snapshot uses
+    this to drop them from the user's history without touching the
+    peer's view."""
+    rows = (
+        await session.execute(
+            select(models.DmDisappeared.message_id)
+            .where(models.DmDisappeared.user_uid == user_uid)
+        )
+    ).scalars().all()
+    return {int(r) for r in rows}
+
+
 async def _friend_uids(session: AsyncSession, uid: str) -> set[str]:
     """Return uids of all accepted friends of `uid`. Used by
     broadcast helpers that need a friends-only audience.
@@ -878,12 +895,16 @@ async def _build_snapshot(session: AsyncSession, uid: str) -> dict:
         for m in sent_pending
     ]
 
-    # Keep-mode threads: include recent READ history (both directions) so
-    # the client can rebuild the full conversation on launch, not just the
-    # unread tail. Disappear threads intentionally return unread only.
-    keep_peers = {p for p, mode in mode_by_peer.items() if mode == "keep"}
+    # Read history (both directions) so the client can rebuild the full
+    # conversation on launch, not just the unread tail. Includes BOTH
+    # keep- and disappear-mode threads now — disappear threads are made
+    # per-viewer via dm_disappeared (filtered below), so a read message
+    # persists for each user until THAT user has left + reopened the
+    # chat (Snapchat-style). Keep threads never populate dm_disappeared,
+    # so they're unaffected.
+    history_peers = set(mode_by_peer.keys())
     history: list[dict] = []
-    if keep_peers:
+    if history_peers:
         hist_rows = (
             await session.execute(
                 select(models.DmMessage)
@@ -894,8 +915,8 @@ async def _build_snapshot(session: AsyncSession, uid: str) -> dict:
                     ),
                     models.DmMessage.read_at.is_not(None),
                     or_(
-                        models.DmMessage.from_uid.in_(keep_peers),
-                        models.DmMessage.to_uid.in_(keep_peers),
+                        models.DmMessage.from_uid.in_(history_peers),
+                        models.DmMessage.to_uid.in_(history_peers),
                     ),
                 )
                 .order_by(models.DmMessage.sent_at.desc())
@@ -922,6 +943,16 @@ async def _build_snapshot(session: AsyncSession, uid: str) -> dict:
             _dm_to_dict(m, with_gate_state="accepted", user_lookup=user_lookup)
             for m in reversed(hist_rows)
         ]
+
+    # Per-viewer disappearing-message filter (Snapchat-style). Drop any
+    # history message THIS user has already dismissed (recorded when
+    # they left a disappear-mode chat after reading). The peer's
+    # snapshot is unaffected — they keep the message until they leave +
+    # reopen their own chat. dm_disappeared is only ever populated for
+    # disappear threads, so keep threads are untouched.
+    disappeared_ids = await _disappeared_ids_for(session, uid)
+    if disappeared_ids:
+        history = [m for m in history if m.get("id") not in disappeared_ids]
 
     # Per-peer one-sided "clear chat" cutoffs (R2). Applied to ALL
     # three DM arrays so a reconnect / re-snapshot doesn't bring back
@@ -1718,9 +1749,21 @@ async def handle_dm_set_retention(
 async def handle_dm_clear_on_leave(
     client_id: str, websocket: WebSocket, msg: dict
 ) -> None:
-    """`dm_clear_on_leave {peer_uid}` — the recipient just left a
-    disappear-mode chat after viewing it. Delete the content messages
-    they read (from this peer) and tell both ends to drop them."""
+    """`dm_clear_on_leave {peer_uid}` — the caller just left a
+    disappear-mode chat after reading it. Snapchat-style PER-VIEWER:
+    the read messages disappear from THE CALLER'S view only; the peer
+    keeps them until the peer themselves leaves + reopens.
+
+    Mechanism: record each read message in `dm_disappeared` for the
+    caller, tell ONLY the caller to drop them, and hard-delete a
+    message only once BOTH participants have dismissed it (GC).
+
+    A message is "read" when `read_at` is stamped — for an incoming
+    message that's when the caller read it; for the caller's own
+    outgoing message that's when the peer read it. Unread messages
+    (read_at NULL) stay for the caller. System notices (event_type
+    set) are always kept.
+    """
     me = presence.uid_for_client(client_id)
     if me is None:
         return
@@ -1728,16 +1771,12 @@ async def handle_dm_clear_on_leave(
     if not peer:
         return
 
+    from sqlalchemy.dialects.postgresql import insert as pg_insert
     async with _session_scope() as session:
         state = await _get_thread_state(session, me, peer)
         if state is None or (state.retention_mode or "keep") != "disappear":
             return  # only disappear threads vanish on leave
 
-        # All already-VIEWED content messages between me and this peer,
-        # both directions: the peer's messages I read, AND my messages the
-        # peer has read (read_at stamped). Unviewed messages (read_at NULL)
-        # stay — they haven't been seen yet. System notices (event_type
-        # set) are always kept.
         rows = (
             await session.execute(
                 select(models.DmMessage.id).where(
@@ -1759,14 +1798,35 @@ async def handle_dm_clear_on_leave(
         if not rows:
             return
         ids = [int(r) for r in rows]
+
+        # Record the per-viewer dismissal for the caller (idempotent).
         await session.execute(
-            delete(models.DmMessage).where(models.DmMessage.id.in_(ids))
+            pg_insert(models.DmDisappeared.__table__)
+            .values([{"user_uid": me, "message_id": mid} for mid in ids])
+            .on_conflict_do_nothing(index_elements=["user_uid", "message_id"])
         )
+
+        # GC: of the messages the caller just dismissed, hard-delete the
+        # ones the PEER has ALSO already dismissed (both sides gone).
+        both_gone = (
+            await session.execute(
+                select(models.DmDisappeared.message_id).where(
+                    models.DmDisappeared.user_uid == peer,
+                    models.DmDisappeared.message_id.in_(ids),
+                )
+            )
+        ).scalars().all()
+        if both_gone:
+            await session.execute(
+                delete(models.DmMessage).where(
+                    models.DmMessage.id.in_([int(x) for x in both_gone])
+                )
+            )
         await session.commit()
 
-    # Both ends drop the same ids (sender sees their sent bubbles vanish).
+    # Only the CALLER drops them — the peer is untouched until they
+    # leave + reopen their own chat.
     await _send_to_uid(me, {"type": "dm_messages_cleared", "peer_uid": peer, "ids": ids})
-    await _send_to_uid(peer, {"type": "dm_messages_cleared", "peer_uid": me, "ids": ids})
 
 
 # ─────────────────────────────────────────────────────────────────────
@@ -2156,31 +2216,31 @@ async def prune_loop(interval_seconds: int = 300) -> None:
                     )
                 )
 
-                # DMs — disappear-mode safety net: delete read content
-                # messages older than 1h ONLY in threads currently set to
-                # 'disappear'. The primary delete is on-leave (dm_clear_on_leave);
-                # this catches the case where the app was killed before the
-                # leave signal fired. Keep-mode threads are never swept here.
-                # System notices (event_type set) are always preserved.
-                cutoff = _now() - timedelta(hours=1)
+                # DMs — disappearing-message GC: hard-delete a message
+                # only once BOTH participants have dismissed it from
+                # their own view (a row in dm_disappeared for each
+                # side). The primary GC is inline in
+                # handle_dm_clear_on_leave; this is the safety net for
+                # the case where one side's leave signal raced or the
+                # app was killed. We do NOT time-delete read messages
+                # any more — a read message must persist until EACH
+                # viewer has left + reopened their own chat (Snapchat
+                # per-viewer semantics). System notices are unaffected
+                # (they're never inserted into dm_disappeared).
                 dm = models.DmMessage
-                ts = models.DmThreadState
-                disappear_exists = (
-                    select(ts.uid_a)
-                    .where(
-                        ts.uid_a == func.least(dm.from_uid, dm.to_uid),
-                        ts.uid_b == func.greatest(dm.from_uid, dm.to_uid),
-                        ts.retention_mode == "disappear",
-                    )
+                dd = models.DmDisappeared
+                from_gone = (
+                    select(dd.message_id)
+                    .where(dd.user_uid == dm.from_uid, dd.message_id == dm.id)
+                    .exists()
+                )
+                to_gone = (
+                    select(dd.message_id)
+                    .where(dd.user_uid == dm.to_uid, dd.message_id == dm.id)
                     .exists()
                 )
                 await session.execute(
-                    delete(dm).where(
-                        dm.read_at.is_not(None),
-                        dm.read_at < cutoff,
-                        dm.event_type.is_(None),
-                        disappear_exists,
-                    )
+                    delete(dm).where(from_gone, to_gone)
                 )
 
                 # Bound every thread to its most recent 500 messages so
