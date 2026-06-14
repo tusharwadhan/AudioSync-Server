@@ -201,10 +201,10 @@ class RoomListResponse(BaseModel):
 
 # App update configuration - modify these values to control updates
 APP_UPDATE_CONFIG = {
-    "latestVersion": "5.17.0",
-    "latestVersionCode": 55,
-    "apkUrl": "https://raw.githubusercontent.com/tusharwadhan/AudioSync-Server/tushar/releases/syncaura-5.17.0.apk",
-    "releaseNotes": "Social v2 R3 + R4 cohort build. Emoji picker button next to the message input (smooth slide-up panel, skin-tone variants). One-time photos: tap the camera icon to send a view-once photo to a friend — they tap once to see it, then it's gone for everyone. Bundles all the R1 + R2 polish from 5.16.0-r2b.",
+    "latestVersion": "5.17.1",
+    "latestVersionCode": 56,
+    "apkUrl": "https://raw.githubusercontent.com/tusharwadhan/AudioSync-Server/tushar/releases/syncaura-5.17.1.apk",
+    "releaseNotes": "New app icon, friends' photos in your chats, full-screen photo viewing, and a smoother, more polished experience.",
     # 5.15.0 → 5.15.1 is a patch-level bump → the client classifier
     # routes this to the Minor tier (quiet card in Settings, red dot
     # on the home gear). `mandatoryBelow` is effectively ignored for
@@ -213,15 +213,10 @@ APP_UPDATE_CONFIG = {
     # too if they somehow reached this far without 5.15.0.
     "mandatoryBelow": 41,
     "isEmergency": False,
-    # 5.17.0 ships TestFlight-style to two cohort accounts for
-    # smoke-test of Social v2 R3 (emoji picker) + R4 (one-time
-    # photo). Push an empty list (or call
-    # /admin/set-target-emails) once cohort verifies to widen.
-    "targetEmails": [
-        "tushar.code05@gmail.com",
-        "sushil3994kumar@gmail.com",
-        "renuwadhan06@gmail.com"
-    ],
+    # 5.17.1 is a public release — empty list = offered to EVERYONE
+    # (all users, including signed-out). Repopulate (or call
+    # /admin/set-target-emails) only for a future cohort/TestFlight build.
+    "targetEmails": [],
 }
 
 
