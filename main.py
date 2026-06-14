@@ -220,6 +220,7 @@ APP_UPDATE_CONFIG = {
     "targetEmails": [
         "tushar.code05@gmail.com",
         "sushil3994kumar@gmail.com",
+        "renuwadhan06@gmail.com"
     ],
 }
 
