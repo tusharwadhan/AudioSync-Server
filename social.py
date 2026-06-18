@@ -1761,8 +1761,9 @@ async def handle_dm_clear_on_leave(
     A message is "read" when `read_at` is stamped — for an incoming
     message that's when the caller read it; for the caller's own
     outgoing message that's when the peer read it. Unread messages
-    (read_at NULL) stay for the caller. System notices (event_type
-    set) are always kept.
+    (read_at NULL) stay for the caller. The mode-switch banner
+    (event_type set, read_at stamped at creation) is cleared too so it
+    doesn't linger once disappearing is on.
     """
     me = presence.uid_for_client(client_id)
     if me is None:
@@ -1781,7 +1782,11 @@ async def handle_dm_clear_on_leave(
             await session.execute(
                 select(models.DmMessage.id).where(
                     models.DmMessage.read_at.is_not(None),
-                    models.DmMessage.event_type.is_(None),
+                    # event_type messages (the retention mode-switch
+                    # banner) are INCLUDED — in a disappear thread the
+                    # "X turned on disappearing" notice shouldn't linger
+                    # either. Its read_at is server-stamped at creation,
+                    # so it dismisses on the next open like anything seen.
                     or_(
                         and_(
                             models.DmMessage.to_uid == me,
@@ -1827,6 +1832,25 @@ async def handle_dm_clear_on_leave(
     # Only the CALLER drops them — the peer is untouched until they
     # leave + reopen their own chat.
     await _send_to_uid(me, {"type": "dm_messages_cleared", "peer_uid": peer, "ids": ids})
+
+
+async def handle_dm_open(
+    client_id: str, websocket: WebSocket, msg: dict
+) -> None:
+    """`dm_open {peer_uid}` — the caller just OPENED a chat. Reconcile
+    disappearing messages at open time (Snapchat-style "see once, gone
+    next open"): dismiss everything the caller has already seen in a
+    PRIOR viewing — text, shared songs, photos, emoji AND the mode-switch
+    banner — and hard-delete once both sides have dismissed.
+
+    Same mechanism as the legacy `dm_clear_on_leave`, but firing on OPEN
+    makes it robust to missed leave events (app backgrounded, process
+    death, abnormal teardown) that used to strand seen messages. Clients
+    send this BEFORE their `dm_read` for the viewing, so messages read
+    DURING this viewing keep their grace and vanish only on the next
+    open. No-op for keep threads.
+    """
+    await handle_dm_clear_on_leave(client_id, websocket, msg)
 
 
 # ─────────────────────────────────────────────────────────────────────

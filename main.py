@@ -201,10 +201,10 @@ class RoomListResponse(BaseModel):
 
 # App update configuration - modify these values to control updates
 APP_UPDATE_CONFIG = {
-    "latestVersion": "5.17.1",
-    "latestVersionCode": 56,
-    "apkUrl": "https://raw.githubusercontent.com/tusharwadhan/AudioSync-Server/tushar/releases/syncaura-5.17.1.apk",
-    "releaseNotes": "New app icon, friends' photos in your chats, full-screen photo viewing, and a smoother, more polished experience.",
+    "latestVersion": "5.17.2",
+    "latestVersionCode": 57,
+    "apkUrl": "https://raw.githubusercontent.com/tusharwadhan/AudioSync-Server/tushar/releases/syncaura-5.17.2.apk",
+    "releaseNotes": "Disappearing messages now clear reliably — once you've seen a disappearing chat and come back to it, it's gone for good. Plus chat polish and stability improvements.",
     # 5.15.0 → 5.15.1 is a patch-level bump → the client classifier
     # routes this to the Minor tier (quiet card in Settings, red dot
     # on the home gear). `mandatoryBelow` is effectively ignored for
@@ -4030,6 +4030,9 @@ async def websocket_endpoint(websocket: WebSocket):
 
             elif msg_type == "dm_clear_on_leave":
                 await social.handle_dm_clear_on_leave(client_id, websocket, msg)
+
+            elif msg_type == "dm_open":
+                await social.handle_dm_open(client_id, websocket, msg)
 
             # ── DM chat-parity messages ──
             elif msg_type == "dm_chat_react":
