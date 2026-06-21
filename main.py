@@ -224,8 +224,8 @@ APP_UPDATE_CONFIG = {
 # When `visible` is true, the client shows a modal on every cold start
 # with `message` as the body. Flip to false to suppress immediately.
 ANNOUNCEMENT_CONFIG = {
-    "visible": False,
-    "message": "",
+    "visible": True,
+    "message": "Our chat servers are taking a little nap 😴 — friends & messages will be back July 1. Don't worry, the music never stops 🎧 stream and download away!",
 }
 
 
