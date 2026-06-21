@@ -41,7 +41,18 @@ sleep 2
 # with a clear error from db.py until the env var is configured.
 if [ -n "${DATABASE_URL:-}" ]; then
   echo "[Migrate] Running alembic upgrade head..."
-  alembic upgrade head
+  # NON-FATAL: the DB can be unreachable (e.g. Neon free-tier compute
+  # paused after hitting the monthly quota). If so, alembic errors/hangs —
+  # we must NOT let that crash the boot, or the whole service goes down and
+  # even non-DB endpoints (announcement, update/check) become undeployable.
+  # Wrap in `if` (exempt from set -e) + a timeout so a paused/slow DB just
+  # logs a warning and the API still launches; DB-backed features stay
+  # unavailable until the DB is back.
+  if timeout 120 alembic upgrade head; then
+    echo "[Migrate] Schema up to date."
+  else
+    echo "[Migrate] WARNING: alembic failed/timed out (DB unreachable or paused?) — booting anyway. DB-backed features (social, sync) will be unavailable until the database is restored."
+  fi
 else
   echo "[Migrate] DATABASE_URL not set — skipping migrations (DB endpoints will fail)."
 fi
