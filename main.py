@@ -201,10 +201,10 @@ class RoomListResponse(BaseModel):
 
 # App update configuration - modify these values to control updates
 APP_UPDATE_CONFIG = {
-    "latestVersion": "5.17.2",
-    "latestVersionCode": 57,
-    "apkUrl": "https://raw.githubusercontent.com/tusharwadhan/AudioSync-Server/tushar/releases/syncaura-5.17.2.apk",
-    "releaseNotes": "Disappearing messages now clear reliably — once you've seen a disappearing chat and come back to it, it's gone for good. Plus chat polish and stability improvements.",
+    "latestVersion": "5.17.3",
+    "latestVersionCode": 58,
+    "apkUrl": "https://raw.githubusercontent.com/tusharwadhan/AudioSync-Server/tushar/releases/syncaura-5.17.3.apk",
+    "releaseNotes": "Download badge moved to thumbnail corner, long-press anywhere on a song to open options, social chat back online on faster servers.",
     # 5.15.0 → 5.15.1 is a patch-level bump → the client classifier
     # routes this to the Minor tier (quiet card in Settings, red dot
     # on the home gear). `mandatoryBelow` is effectively ignored for
