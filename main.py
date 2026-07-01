@@ -224,8 +224,8 @@ APP_UPDATE_CONFIG = {
 # When `visible` is true, the client shows a modal on every cold start
 # with `message` as the body. Flip to false to suppress immediately.
 ANNOUNCEMENT_CONFIG = {
-    "visible": True,
-    "message": "Our chat servers are taking a little nap 😴 — friends & messages will be back July 1. Don't worry, the music never stops 🎧 stream and download away!",
+    "visible": False,
+    "message": "",
 }
 
 
@@ -2435,13 +2435,18 @@ async def prefetch_batch(video_ids: str):
 
 
 @api.get("/search", response_model=SearchResponse)
-async def search(q: str, limit: int = 10):
+async def search(q: str, limit: int = 30):
     """Search YouTube videos using yt-dlp (no Piped equivalent)"""
     start = time.time()
     print(f"[/search] Request: '{q}'")
 
     if not q or len(q.strip()) == 0:
         return SearchResponse(success=False, query=q, error="Query cannot be empty")
+
+    # Cap the page size — 30 is the product max. extract_flat keeps this
+    # cheap, but beyond ~30 latency rises for low-relevance tail results,
+    # so clamp regardless of what the client requests.
+    limit = max(1, min(limit, 30))
 
     def _search_ytdlp():
         ydl_opts = {
