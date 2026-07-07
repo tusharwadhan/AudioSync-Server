@@ -201,10 +201,10 @@ class RoomListResponse(BaseModel):
 
 # App update configuration - modify these values to control updates
 APP_UPDATE_CONFIG = {
-    "latestVersion": "5.17.4",
-    "latestVersionCode": 59,
-    "apkUrl": "https://raw.githubusercontent.com/tusharwadhan/AudioSync-Server/tushar/releases/syncaura-5.17.4.apk",
-    "releaseNotes": "Fixed recent songs tap, favourites shortcut from home, download badges in edge player suggestions.",
+    "latestVersion": "5.17.5",
+    "latestVersionCode": 60,
+    "apkUrl": "https://raw.githubusercontent.com/tusharwadhan/AudioSync-Server/tushar/releases/syncaura-5.17.5.apk",
+    "releaseNotes": "New liquid edge player: pull the bar to open with a fluid droplet animation. Redesigned search results, smoother headers, and fixed song playback errors.",
     # 5.15.0 → 5.15.1 is a patch-level bump → the client classifier
     # routes this to the Minor tier (quiet card in Settings, red dot
     # on the home gear). `mandatoryBelow` is effectively ignored for
