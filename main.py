@@ -1816,6 +1816,89 @@ async def get_playback_errors(
     return {"count": len(out), "errors": out}
 
 
+# TEMPORARY diagnostic for the listen_events push 500s (2026-07-14).
+# Read-only apart from an optional, idempotent sequence repair. Remove
+# once the sync failure is resolved.
+@api.get("/debug/listen-events-write-check")
+async def listen_events_write_check(
+    repair: bool = False,
+    session=Depends(get_session),
+):
+    from sqlalchemy import text as _text
+
+    out: dict = {}
+    try:
+        seq_name = (
+            await session.execute(
+                _text("SELECT pg_get_serial_sequence('user_listen_events','id')")
+            )
+        ).scalar()
+        out["sequenceName"] = seq_name
+        if seq_name:
+            row = (
+                await session.execute(
+                    _text(f"SELECT last_value, is_called FROM {seq_name}")
+                )
+            ).first()
+            out["sequenceLastValue"] = row[0]
+            out["sequenceIsCalled"] = row[1]
+    except Exception as e:
+        out["sequenceError"] = repr(e)[:300]
+
+    try:
+        row = (
+            await session.execute(
+                _text("SELECT COALESCE(MAX(id),0), COUNT(*) FROM user_listen_events")
+            )
+        ).first()
+        out["maxId"] = row[0]
+        out["rowCount"] = row[1]
+    except Exception as e:
+        out["tableError"] = repr(e)[:300]
+
+    # Canary insert, always rolled back — captures the real write error.
+    try:
+        uid = (
+            await session.execute(_text("SELECT id FROM users LIMIT 1"))
+        ).scalar()
+        nested = await session.begin_nested()
+        await session.execute(
+            _text(
+                "INSERT INTO user_listen_events "
+                "(user_id, video_id, played_at, received_at) "
+                "VALUES (:u, 'canary-check', now(), now())"
+            ),
+            {"u": uid},
+        )
+        await nested.rollback()
+        out["insertCheck"] = "ok"
+    except Exception as e:
+        out["insertCheck"] = repr(e)[:600]
+    finally:
+        try:
+            await session.rollback()
+        except Exception:
+            pass
+
+    if repair and out.get("sequenceName") and isinstance(out.get("maxId"), int):
+        try:
+            newval = (
+                await session.execute(
+                    _text(
+                        "SELECT setval(:s, (SELECT COALESCE(MAX(id),0)+1 "
+                        "FROM user_listen_events), false)"
+                    ),
+                    {"s": out["sequenceName"]},
+                )
+            ).scalar()
+            await session.commit()
+            out["repairedSequenceTo"] = newval
+        except Exception as e:
+            out["repairError"] = repr(e)[:300]
+
+    return out
+
+
 @api.get("/rooms", response_model=RoomListResponse)
 async def list_rooms():
     """List all active rooms for discovery"""
