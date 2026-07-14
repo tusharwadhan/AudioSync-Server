@@ -524,6 +524,31 @@ async def get_listen_events(
     )
 
 
+def _clamp(value: str | None, limit: int) -> str | None:
+    """Column-length guard: one over-long string from a client must never
+    500 the whole batch (a poison event would then re-fail every sync
+    forever, since the client only marks events synced on success)."""
+    if isinstance(value, str) and len(value) > limit:
+        return value[:limit]
+    return value
+
+
+def _listen_event_row(user_id: str, item: "ListenEventItem", now: datetime):
+    return models.UserListenEvent(
+        user_id=user_id,
+        video_id=_clamp(item.videoId, 32) or "",
+        title=_clamp(item.title, 512),
+        uploader=_clamp(item.uploader, 255),
+        duration=item.duration,
+        thumbnail=_clamp(item.thumbnail, 1024),
+        played_at=_from_ms(item.playedAt) or now,
+        duration_listened=item.durationListened,
+        completion_pct=item.completionPct,
+        source=_clamp(item.source, 32),
+        received_at=now,
+    )
+
+
 @router.post("/listen_events", response_model=ListenEventsResponse)
 async def push_listen_events(
     body: ListenEventsPushRequest,
@@ -535,26 +560,47 @@ async def push_listen_events(
     out: list[ListenEventItem] = []
 
     for item in body.items:
-        row = models.UserListenEvent(
-            user_id=user["uid"],
-            video_id=item.videoId,
-            title=item.title,
-            uploader=item.uploader,
-            duration=item.duration,
-            thumbnail=item.thumbnail,
-            played_at=_from_ms(item.playedAt) or now,
-            duration_listened=item.durationListened,
-            completion_pct=item.completionPct,
-            source=item.source,
-            received_at=now,
-        )
-        session.add(row)
+        session.add(_listen_event_row(user["uid"], item, now))
         # Defer ID assignment until commit; we'll backfill in `out`
         # below using flush() so the autoincrement value is realized.
 
     # One flush gives us autoincrement IDs without committing yet — lets
     # us return the server-assigned IDs in the same response.
-    await session.flush()
+    try:
+        await session.flush()
+    except Exception as batch_err:
+        # Batch insert failed — isolate the poison row(s) instead of
+        # failing the entire sync. Re-insert one by one inside nested
+        # savepoints; rows that still fail are skipped and logged.
+        await session.rollback()
+        import traceback
+        print(
+            f"[sync] listen_events batch flush failed for uid={user['uid']} "
+            f"({len(body.items)} items): {batch_err!r} — retrying row-by-row"
+        )
+        traceback.print_exc()
+        skipped = 0
+        for item in body.items:
+            try:
+                async with session.begin_nested():
+                    session.add(_listen_event_row(user["uid"], item, now))
+                    await session.flush()
+            except Exception as row_err:
+                skipped += 1
+                print(
+                    f"[sync] skipping poison listen_event videoId={item.videoId!r} "
+                    f"title={str(item.title)[:80]!r}: {row_err!r}"
+                )
+        if skipped:
+            print(f"[sync] listen_events: skipped {skipped}/{len(body.items)} poison row(s)")
+        if body.items and skipped == len(body.items):
+            # Nothing inserted at all — this isn't a poison row, it's a
+            # systemic failure (schema drift, permissions, dead table).
+            # Fail loudly so the client does NOT mark its queue synced.
+            raise HTTPException(
+                status_code=500,
+                detail="listen_events insert failed for every row",
+            )
     # Re-pull the just-inserted rows in arrival order.
     just_added = (
         await session.execute(
