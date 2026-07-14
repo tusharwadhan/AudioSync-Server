@@ -1880,21 +1880,45 @@ async def listen_events_write_check(
         except Exception:
             pass
 
-    if repair and out.get("sequenceName") and isinstance(out.get("maxId"), int):
+    # Sweep every autoincrement table the migration copied: a sequence
+    # sitting below MAX(id) makes every INSERT collide (duplicate pkey).
+    out["sequences"] = {}
+    for tbl in ("user_listen_events", "dm_messages", "lounge_messages"):
+        info: dict = {}
         try:
-            newval = (
+            seq = (
                 await session.execute(
-                    _text(
-                        "SELECT setval(:s, (SELECT COALESCE(MAX(id),0)+1 "
-                        "FROM user_listen_events), false)"
-                    ),
-                    {"s": out["sequenceName"]},
+                    _text(f"SELECT pg_get_serial_sequence('{tbl}','id')")
                 )
             ).scalar()
-            await session.commit()
-            out["repairedSequenceTo"] = newval
+            info["sequence"] = seq
+            if seq:
+                info["lastValue"] = (
+                    await session.execute(_text(f"SELECT last_value FROM {seq}"))
+                ).scalar()
+            info["maxId"] = (
+                await session.execute(
+                    _text(f"SELECT COALESCE(MAX(id),0) FROM {tbl}")
+                )
+            ).scalar()
+            info["behind"] = bool(seq) and info["lastValue"] < info["maxId"]
+            if repair and info.get("behind"):
+                info["repairedTo"] = (
+                    await session.execute(
+                        _text(
+                            f"SELECT setval('{seq}', "
+                            f"(SELECT COALESCE(MAX(id),0)+1 FROM {tbl}), false)"
+                        )
+                    )
+                ).scalar()
+                await session.commit()
         except Exception as e:
-            out["repairError"] = repr(e)[:300]
+            info["error"] = repr(e)[:300]
+            try:
+                await session.rollback()
+            except Exception:
+                pass
+        out["sequences"][tbl] = info
 
     return out
 
