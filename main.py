@@ -24,6 +24,7 @@ import threading
 import json
 import uuid
 import re
+from datetime import datetime, timezone
 from room_manager import RoomManager
 from ytmusicapi import YTMusic
 from analytics_db import AnalyticsDB
@@ -201,10 +202,10 @@ class RoomListResponse(BaseModel):
 
 # App update configuration - modify these values to control updates
 APP_UPDATE_CONFIG = {
-    "latestVersion": "5.17.5",
-    "latestVersionCode": 60,
-    "apkUrl": "https://raw.githubusercontent.com/tusharwadhan/AudioSync-Server/tushar/releases/syncaura-5.17.5.apk",
-    "releaseNotes": "New liquid edge player: pull the bar to open with a fluid droplet animation. Redesigned search results, smoother headers, and fixed song playback errors.",
+    "latestVersion": "5.17.6",
+    "latestVersionCode": 61,
+    "apkUrl": "https://raw.githubusercontent.com/tusharwadhan/AudioSync-Server/tushar/releases/syncaura-5.17.6.apk",
+    "releaseNotes": "Improved playback reliability: the app now detects playback issues automatically so they can be fixed faster.",
     # 5.15.0 → 5.15.1 is a patch-level bump → the client classifier
     # routes this to the Minor tier (quiet card in Settings, red dot
     # on the home gear). `mandatoryBelow` is effectively ignored for
@@ -1729,6 +1730,90 @@ async def broadcast_update(request: Request):
         "latestVersion": cfg["latestVersion"],
         "latestVersionCode": cfg["latestVersionCode"],
     }
+
+
+# ==================== REMOTE PLAYBACK-ERROR REPORTS ====================
+# Devices POST a report whenever playback/download of a song fails, with a
+# snapshot of the app's recent in-memory DebugLogger buffer attached — the
+# same lines we'd otherwise have to pull off the device over adb. Kept in
+# memory (ring buffer) and appended to a JSONL file. The file lives on the
+# instance disk, so it survives restarts but not redeploys — good enough
+# for diagnostics; don't treat it as durable storage.
+
+PLAYBACK_ERRORS: list = []          # newest last
+PLAYBACK_ERRORS_MAX = 300
+PLAYBACK_ERRORS_FILE = os.path.join(os.path.dirname(__file__), "playback_errors.jsonl")
+
+
+class PlaybackErrorReport(BaseModel):
+    deviceId: str = ""
+    deviceModel: str = ""
+    androidVersion: str = ""
+    appVersion: str = ""
+    appVersionCode: int = 0
+    network: str = ""               # wifi / cellular / offline / unknown
+    errorType: str = ""             # player_error / download_error / fetch_error
+    songId: str = ""
+    songTitle: str = ""
+    message: str = ""
+    recentLogs: str = ""            # tail of the app's DebugLogger buffer
+
+
+@api.post("/log/playback-error")
+async def log_playback_error(report: PlaybackErrorReport, request: Request):
+    entry = report.dict()
+    # Cap the log payload so a misbehaving client can't balloon the file.
+    entry["recentLogs"] = entry["recentLogs"][-32000:]
+    entry["serverTime"] = datetime.now(timezone.utc).isoformat()
+    entry["clientIp"] = request.client.host if request.client else "unknown"
+
+    PLAYBACK_ERRORS.append(entry)
+    del PLAYBACK_ERRORS[:-PLAYBACK_ERRORS_MAX]
+    try:
+        with open(PLAYBACK_ERRORS_FILE, "a", encoding="utf-8") as f:
+            f.write(json.dumps(entry, ensure_ascii=False) + "\n")
+    except Exception as e:
+        print(f"[errlog] failed to persist playback error: {e}")
+
+    print(
+        f"[errlog] {entry['errorType']} on {entry['deviceModel']} "
+        f"(app {entry['appVersion']}) song={entry['songId']} : {entry['message'][:120]}"
+    )
+    return {"status": "logged"}
+
+
+@api.get("/log/playback-errors")
+async def get_playback_errors(
+    request: Request,
+    limit: int = 50,
+    include_logs: bool = False,
+    device: str = "",
+):
+    """
+    Admin-only viewer (same guard as the other admin endpoints):
+
+        curl "https://<host>/api/v1/log/playback-errors?limit=20&include_logs=true" \\
+             -H "X-API-Key: <api key>" -H "X-Admin-Secret: <admin secret>"
+    """
+    if not ADMIN_SECRET or request.headers.get("X-Admin-Secret") != ADMIN_SECRET:
+        raise HTTPException(status_code=403, detail="Forbidden")
+
+    items = PLAYBACK_ERRORS
+    # Fall back to the file so restarts don't lose everything in memory.
+    if not items and os.path.exists(PLAYBACK_ERRORS_FILE):
+        try:
+            with open(PLAYBACK_ERRORS_FILE, encoding="utf-8") as f:
+                items = [json.loads(line) for line in f if line.strip()]
+            items = items[-PLAYBACK_ERRORS_MAX:]
+        except Exception as e:
+            print(f"[errlog] failed to read persisted errors: {e}")
+
+    if device:
+        items = [e for e in items if e.get("deviceId") == device]
+    out = list(reversed(items[-max(1, min(limit, PLAYBACK_ERRORS_MAX)):]))
+    if not include_logs:
+        out = [{k: v for k, v in e.items() if k != "recentLogs"} for e in out]
+    return {"count": len(out), "errors": out}
 
 
 @api.get("/rooms", response_model=RoomListResponse)
