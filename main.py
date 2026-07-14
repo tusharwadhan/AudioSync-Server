@@ -1326,7 +1326,7 @@ async def _fetch_lrclib(
     lrclib_down = [False]  # mutable flag for early exit
 
     try:
-        async with httpx.AsyncClient(timeout=15) as client:
+        async with httpx.AsyncClient(timeout=8) as client:
             # Try exact match first if we have duration
             if duration_secs > 0:
                 for t in titles:
@@ -1380,126 +1380,144 @@ async def _fetch_lrclib(
 
 
 @api.get("/lyrics/{video_id}", response_model=LyricsResponse)
-async def get_lyrics_endpoint(video_id: str):
-    """Get time-synced lyrics for a song via ytmusicapi with LRCLIB fallback"""
+async def get_lyrics_endpoint(
+    video_id: str,
+    title: str = "",
+    artist: str = "",
+    duration: int = 0,
+):
+    """Time-synced lyrics: YouTube Music + LRCLIB raced concurrently.
+
+    Newer clients pass title/artist/duration so the LRCLIB probe can start
+    immediately instead of waiting on get_watch_playlist (which costs
+    2-4s by itself). Preference order is unchanged: YTM timed > LRCLIB
+    synced > YTM plain > LRCLIB plain.
+    """
     start = time.time()
     cache_key = f"lyrics_{video_id}"
-    print(f"[/lyrics] Request: {video_id}")
+    print(f"[/lyrics] Request: {video_id} (client meta: {bool(title)})")
 
     cached = get_browse_cached(cache_key)
     if cached is not None:
         print(f"[/lyrics] CACHE HIT ({time.time() - start:.2f}s)")
         return cached
 
-    try:
-        # Step 1: Get watch playlist for lyrics browseId + track info
-        watch = await asyncio.to_thread(_ytmusic.get_watch_playlist, video_id)
-        lyrics_browse_id = watch.get("lyrics") if watch else None
+    watch_task = asyncio.create_task(
+        asyncio.to_thread(_ytmusic.get_watch_playlist, video_id)
+    )
 
-        # Extract track info for LRCLIB fallback
-        track_title = ""
-        track_artist = ""
-        track_duration_secs = 0
-        if watch and watch.get("tracks"):
+    async def ytm_chain():
+        """watch playlist -> lyrics browseId -> timed/plain lyrics."""
+        watch = await watch_task
+        browse_id = watch.get("lyrics") if watch else None
+        if not browse_id:
+            return None
+        raw = await asyncio.to_thread(_ytmusic.get_lyrics, browse_id, True)
+        if not (raw and raw.get("lyrics")):
+            return None
+        out_lines: List[LyricsLine] = []
+        out_plain = None
+        if raw.get("hasTimestamps") and isinstance(raw["lyrics"], list):
+            for entry in raw["lyrics"]:
+                out_lines.append(
+                    LyricsLine(
+                        text=getattr(entry, "text", ""),
+                        startMs=int(getattr(entry, "start_time", 0)),
+                        endMs=int(getattr(entry, "end_time", 0)),
+                    )
+                )
+        elif isinstance(raw["lyrics"], str):
+            out_plain = raw["lyrics"]
+        return {"lines": out_lines, "plain": out_plain, "source": raw.get("source", "")}
+
+    async def lrclib_chain():
+        """LRCLIB probe — starts instantly when the client sent metadata."""
+        t, a, d = title, artist, duration
+        if not t:
+            try:
+                watch = await watch_task
+            except Exception:
+                return None
+            if not (watch and watch.get("tracks")):
+                return None
             track = watch["tracks"][0]
-            track_title = track.get("title", "")
+            t = track.get("title", "")
             artists = track.get("artists", [])
-            if artists:
-                track_artist = artists[0].get("name", "")
-            # Parse "m:ss" length to seconds
+            a = artists[0].get("name", "") if artists else ""
             length_str = track.get("length", "")
             if ":" in length_str:
                 parts = length_str.split(":")
                 try:
-                    track_duration_secs = int(parts[0]) * 60 + int(parts[1])
+                    d = int(parts[0]) * 60 + int(parts[1])
                 except ValueError:
-                    pass
+                    d = 0
+        if not t:
+            return None
+        return await _fetch_lrclib(t, a, d)
 
-        # Step 2: Try YouTube Music lyrics
-        lines = []
-        plain_lyrics = None
-        source = ""
+    yt_task = asyncio.create_task(ytm_chain())
+    lr_task = asyncio.create_task(lrclib_chain())
 
-        if lyrics_browse_id:
-            try:
-                raw_lyrics = await asyncio.to_thread(
-                    _ytmusic.get_lyrics, lyrics_browse_id, True
-                )
-                if raw_lyrics and raw_lyrics.get("lyrics"):
-                    source = raw_lyrics.get("source", "")
-                    has_timestamps = raw_lyrics.get("hasTimestamps", False)
-                    lyrics_data = raw_lyrics.get("lyrics")
+    yt = None
+    try:
+        yt = await yt_task
+    except Exception as yt_err:
+        print(f"[/lyrics] YTMusic chain error: {yt_err}")
 
-                    if has_timestamps and isinstance(lyrics_data, list):
-                        for entry in lyrics_data:
-                            lines.append(
-                                LyricsLine(
-                                    text=getattr(entry, "text", ""),
-                                    startMs=int(getattr(entry, "start_time", 0)),
-                                    endMs=int(getattr(entry, "end_time", 0)),
-                                )
-                            )
-                    elif isinstance(lyrics_data, str):
-                        plain_lyrics = lyrics_data
-            except Exception as yt_err:
-                print(
-                    f"[/lyrics] YTMusic get_lyrics error: {yt_err}, falling back to LRCLIB"
-                )
+    lines: List[LyricsLine] = []
+    plain_lyrics = None
+    source = ""
 
-        # Step 3: Fallback to LRCLIB if no timed lyrics from YouTube Music
-        if not lines and track_title:
-            print(
-                f"[/lyrics] YTMusic no timed lyrics, trying LRCLIB for '{track_title}' - '{track_artist}'"
-            )
-            lrclib_data = await _fetch_lrclib(
-                track_title, track_artist, track_duration_secs
-            )
-            if lrclib_data:
-                synced = lrclib_data.get("syncedLyrics")
-                if synced:
-                    lines = _parse_lrc(synced)
-                    source = "LRCLIB"
-                    plain_lyrics = None
-                    print(f"[/lyrics] LRCLIB: {len(lines)} synced lines")
-                elif not plain_lyrics:
-                    plain_text = lrclib_data.get("plainLyrics")
-                    if plain_text:
-                        plain_lyrics = plain_text
-                        source = "LRCLIB"
-                        print(
-                            f"[/lyrics] LRCLIB: plain lyrics ({len(plain_text)} chars)"
-                        )
+    if yt and yt["lines"]:
+        # YTM gave timed lyrics — best case, drop the LRCLIB probe.
+        lines, source = yt["lines"], yt["source"]
+        lr_task.cancel()
+    else:
+        lr = None
+        try:
+            lr = await lr_task
+        except asyncio.CancelledError:
+            pass
+        except Exception as lr_err:
+            print(f"[/lyrics] LRCLIB chain error: {lr_err}")
+        if lr and lr.get("syncedLyrics"):
+            lines = _parse_lrc(lr["syncedLyrics"])
+            source = "LRCLIB"
+            print(f"[/lyrics] LRCLIB: {len(lines)} synced lines")
+        elif yt and yt["plain"]:
+            plain_lyrics = yt["plain"]
+            source = yt["source"]
+        elif lr and lr.get("plainLyrics"):
+            plain_lyrics = lr["plainLyrics"]
+            source = "LRCLIB"
+            print(f"[/lyrics] LRCLIB: plain lyrics ({len(plain_lyrics)} chars)")
 
-        if not lines and not plain_lyrics:
-            print(f"[/lyrics] No lyrics found ({time.time() - start:.2f}s)")
-            return LyricsResponse(
-                success=False,
-                videoId=video_id,
-                error="No lyrics available for this song",
-            )
-
-        response = LyricsResponse(
-            success=True,
+    if not lines and not plain_lyrics:
+        print(f"[/lyrics] No lyrics found ({time.time() - start:.2f}s)")
+        return LyricsResponse(
+            success=False,
             videoId=video_id,
-            hasTimestamps=len(lines) > 0,
-            lines=lines,
-            plainLyrics=plain_lyrics,
-            source=source,
+            error="No lyrics available for this song",
         )
-        set_browse_cache(cache_key, response, ttl=86400)  # Cache for 24 hours
-        print(
-            f"[/lyrics] {len(lines)} timed lines, source={source} ({time.time() - start:.2f}s)"
-        )
-        analytics.log_event(
-            "lyrics_fetch",
-            video_id=video_id,
-            detail=json.dumps({"source": source, "lines": len(lines)}),
-        )
-        return response
 
-    except Exception as e:
-        print(f"[/lyrics] ERROR: {e}")
-        return LyricsResponse(success=False, videoId=video_id, error=str(e))
+    response = LyricsResponse(
+        success=True,
+        videoId=video_id,
+        hasTimestamps=len(lines) > 0,
+        lines=lines,
+        plainLyrics=plain_lyrics,
+        source=source,
+    )
+    set_browse_cache(cache_key, response, ttl=86400)  # Cache for 24 hours
+    print(
+        f"[/lyrics] {len(lines)} timed lines, source={source} ({time.time() - start:.2f}s)"
+    )
+    analytics.log_event(
+        "lyrics_fetch",
+        video_id=video_id,
+        detail=json.dumps({"source": source, "lines": len(lines)}),
+    )
+    return response
 
 
 @api.get("/cache/stats")
@@ -4400,7 +4418,7 @@ async def search_lyrics(query: str) -> list:
         return []
     try:
         search_query = f"{query} song lyrics"
-        async with httpx.AsyncClient(timeout=15) as client:
+        async with httpx.AsyncClient(timeout=8) as client:
             resp = await client.post(
                 "https://google.serper.dev/search",
                 headers={
