@@ -1470,7 +1470,13 @@ async def get_lyrics_endpoint(
     if title:
         lr = None
         try:
-            lr = await _fetch_lrclib_precise(title, artist, duration)
+            # Hard budget: LRCLIB's latency is wildly variable (0.3s when
+            # healthy, 7-30s degraded) — never let it stall the chain.
+            lr = await asyncio.wait_for(
+                _fetch_lrclib_precise(title, artist, duration), timeout=4.0
+            )
+        except asyncio.TimeoutError:
+            print("[/lyrics] LRCLIB precise probe timed out (4s budget)")
         except Exception as e:
             print(f"[/lyrics] LRCLIB precise error: {e}")
         if lr and lr.get("syncedLyrics"):
