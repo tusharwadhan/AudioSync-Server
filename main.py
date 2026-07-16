@@ -1465,6 +1465,221 @@ async def _fetch_lrclib_precise(
     return None
 
 
+# ── YTM lyrics fast path ────────────────────────────────────────────────
+# Two raw anonymous innertube calls instead of ytmusicapi's heavyweight
+# chain. Sizes with the (unofficial) `fields` mask: /next 1.8MB -> ~1.5KB,
+# /browse 653KB -> ~18KB — which matters enormously on a 0.1 vCPU box.
+# Client versions + field masks are env-overridable so schema churn can be
+# handled without a redeploy (set on Render, restart).
+
+_YTM_HEADERS = {
+    "content-type": "application/json",
+    "origin": "https://music.youtube.com",
+    "user-agent": "Mozilla/5.0",
+}
+_YTM_WEB_VERSION = os.getenv("YTM_WEB_REMIX_VERSION", "1.20260708.03.00")
+_YTM_MOBILE_VERSION = os.getenv("YTM_LYRICS_CLIENT_VERSION", "7.21.50")
+_YTM_NEXT_FIELDS = os.getenv(
+    "YTM_NEXT_FIELDS",
+    "contents.singleColumnMusicWatchNextResultsRenderer.tabbedRenderer."
+    "watchNextTabbedResultsRenderer.tabs.tabRenderer(title,unselectable,endpoint)",
+)
+_YTM_BROWSE_FIELDS = os.getenv(
+    "YTM_BROWSE_FIELDS",
+    "contents.elementRenderer.newElement.type.componentType.model."
+    "timedLyricsModel.lyricsData",
+)
+_YTM_BLOAT_BYTES = 100_000  # fields mask stopped being honored
+_LYR_BID_TTL = 7 * 86400    # browseId cache
+_LYR_BID_NONE = "__none__"  # negative cache marker (fresh discovery only)
+
+_ytm_http: Optional[httpx.AsyncClient] = None
+
+
+def _ytm_client() -> httpx.AsyncClient:
+    global _ytm_http
+    if _ytm_http is None or _ytm_http.is_closed:
+        _ytm_http = httpx.AsyncClient(timeout=httpx.Timeout(5.0, connect=3.0))
+    return _ytm_http
+
+
+async def _ytm_discover_lyrics_browse_id(video_id: str) -> Optional[str]:
+    """Slim /next call: only exists to learn the MPLYt… lyrics browseId
+    (proven NOT derivable from the videoId). Regex extraction — works even
+    if Google stops honoring the fields mask and the response re-bloats."""
+    resp = await _ytm_client().post(
+        f"https://music.youtube.com/youtubei/v1/next?alt=json&fields={_YTM_NEXT_FIELDS}",
+        json={
+            "videoId": video_id,
+            "context": {
+                "client": {
+                    "clientName": "WEB_REMIX",
+                    "clientVersion": _YTM_WEB_VERSION,
+                    "hl": "en",
+                },
+                "user": {},
+            },
+        },
+        headers=_YTM_HEADERS,
+    )
+    resp.raise_for_status()
+    if len(resp.content) > _YTM_BLOAT_BYTES:
+        print(f"[/lyrics] WARNING: slim next response {len(resp.content)}B — fields mask ignored?")
+    m = re.search(r'"(MPLYt[\w-]+)"', resp.text)
+    if m:
+        return m.group(1)
+    # No browseId: only trust that as "song has no lyrics" if the response
+    # is a genuine watch-next payload. Consent pages / challenge bodies /
+    # A-B shape changes must NOT get negative-cached.
+    if "watchNextTabbedResultsRenderer" not in resp.text:
+        raise ValueError(f"unrecognized /next payload ({len(resp.content)}B)")
+    return None
+
+
+async def _ytm_fetch_timed_lyrics(browse_id: str) -> tuple[list, str]:
+    """ANDROID_MUSIC /browse with a per-request context (no shared-state
+    as_mobile() mutation, no thread race). Returns ([], "") on no lyrics."""
+    resp = await _ytm_client().post(
+        f"https://music.youtube.com/youtubei/v1/browse?alt=json&fields={_YTM_BROWSE_FIELDS}",
+        json={
+            "browseId": browse_id,
+            "context": {
+                "client": {
+                    "clientName": "ANDROID_MUSIC",
+                    "clientVersion": _YTM_MOBILE_VERSION,
+                    "hl": "en",
+                },
+                "user": {},
+            },
+        },
+        headers=_YTM_HEADERS,
+    )
+    resp.raise_for_status()
+    if len(resp.content) > _YTM_BLOAT_BYTES:
+        print(f"[/lyrics] WARNING: browse response {len(resp.content)}B — fields mask ignored?")
+    try:
+        data = resp.json()
+    except ValueError:
+        raise ValueError(f"non-JSON browse payload ({len(resp.content)}B)")
+    if "contents" not in data:
+        # {} is the legit "no timed lyrics" shape (fields-masked empty
+        # model); anything else non-empty without contents is drift.
+        if data:
+            raise ValueError(f"browse envelope drift? ({len(resp.content)}B)")
+        return [], ""
+    try:
+        lyr = (
+            data["contents"]["elementRenderer"]["newElement"]["type"]
+            ["componentType"]["model"]["timedLyricsModel"]["lyricsData"]
+        )
+    except (KeyError, TypeError):
+        # contents present but no timed model — plain-only song
+        return [], ""
+
+    def _ms(v) -> int:
+        try:
+            return int(v)
+        except (TypeError, ValueError):
+            return 0
+
+    lines = []
+    for entry in lyr.get("timedLyricsData", []):
+        cue = entry.get("cueRange", {})
+        lines.append(
+            LyricsLine(
+                text=entry.get("lyricLine", ""),
+                startMs=_ms(cue.get("startTimeMilliseconds")),
+                endMs=_ms(cue.get("endTimeMilliseconds")),
+            )
+        )
+    source = (lyr.get("sourceMessage") or "").replace("Source: ", "")
+    return lines, source
+
+
+async def _fetch_ytm_lyrics_fast(video_id: str) -> tuple[list, str, bool]:
+    """Full fast path with a 7-day browseId cache.
+
+    Returns (lines, source, confirmed_none). confirmed_none is True only
+    when a FRESH, envelope-validated exchange affirmatively showed YTM has
+    no timed lyrics — the caller may then skip the legacy chain. Errors and
+    inconclusive states leave it False so fallbacks stay eligible. A cached
+    browseId that errors or returns empty falls through to one fresh
+    re-discovery (stale ids are indistinguishable from "no lyrics")."""
+    bid_key = f"lyrbid_{video_id}"
+    cached_bid = get_browse_cached(bid_key)
+    if cached_bid == _LYR_BID_NONE:
+        return [], "", True
+
+    if cached_bid:
+        try:
+            lines, source = await _ytm_fetch_timed_lyrics(cached_bid)
+            if lines:
+                return lines, source, False
+        except (httpx.HTTPError, ValueError) as e:
+            print(f"[/lyrics] cached browseId failed ({e!r}) — re-discovering")
+        # stale/erroring — fall through to fresh discovery
+
+    browse_id = await _ytm_discover_lyrics_browse_id(video_id)
+    if not browse_id:
+        # envelope-validated "no lyrics tab" — safe to negative-cache
+        set_browse_cache(bid_key, _LYR_BID_NONE, ttl=86400)
+        return [], "", True
+    if browse_id != cached_bid:
+        set_browse_cache(bid_key, browse_id, ttl=_LYR_BID_TTL)
+        lines, source = await _ytm_fetch_timed_lyrics(browse_id)
+        if lines:
+            return lines, source, False
+        # fresh id + valid-but-empty model = genuinely no timed lyrics
+        return [], "", True
+    # re-discovery returned the id that just failed — inconclusive
+    return [], "", False
+
+
+# TEMPORARY Phase-0 gate: verifies from Render's egress IP that anonymous
+# innertube accepts us, the fields mask is honored, and lyrics exist for
+# region-mixed tracks. Remove with the other debug endpoint once trusted.
+@api.get("/debug/ytm-lyrics-probe")
+async def ytm_lyrics_probe(videoId: str):
+    out: dict = {"videoId": videoId}
+    t0 = time.time()
+    try:
+        resp = await _ytm_client().post(
+            f"https://music.youtube.com/youtubei/v1/next?alt=json&fields={_YTM_NEXT_FIELDS}",
+            json={
+                "videoId": videoId,
+                "context": {
+                    "client": {
+                        "clientName": "WEB_REMIX",
+                        "clientVersion": _YTM_WEB_VERSION,
+                        "hl": "en",
+                    },
+                    "user": {},
+                },
+            },
+            headers=_YTM_HEADERS,
+        )
+        out["nextStatus"] = resp.status_code
+        out["nextBytes"] = len(resp.content)
+        out["nextMs"] = round((time.time() - t0) * 1000)
+        m = re.search(r'"(MPLYt[\w-]+)"', resp.text)
+        out["browseId"] = m.group(1) if m else None
+    except Exception as e:
+        out["nextError"] = repr(e)[:300]
+        return out
+    if not out.get("browseId"):
+        return out
+    t1 = time.time()
+    try:
+        lines, source = await _ytm_fetch_timed_lyrics(out["browseId"])
+        out["browseMs"] = round((time.time() - t1) * 1000)
+        out["timedLines"] = len(lines)
+        out["source"] = source
+        out["firstLine"] = lines[0].text if lines else None
+    except Exception as e:
+        out["browseError"] = repr(e)[:300]
+    return out
+
+
 @api.get("/lyrics/{video_id}", response_model=LyricsResponse)
 async def get_lyrics_endpoint(
     video_id: str,
@@ -1519,9 +1734,26 @@ async def get_lyrics_endpoint(
         elif lr and lr.get("plainLyrics"):
             lr_plain_backup = lr["plainLyrics"]
 
-    # ── 2. YTM chain only if LRCLIB didn't give synced lines ──
+    # ── 2. YTM fast path: two slim anonymous innertube calls ──
     track_title, track_artist, track_duration_secs = title, artist, duration
+    fast_confirmed_none = False
     if not lines:
+        try:
+            lines, source, fast_confirmed_none = await asyncio.wait_for(
+                _fetch_ytm_lyrics_fast(video_id), timeout=6.0
+            )
+            if lines:
+                print(f"[/lyrics] YTM fast: {len(lines)} timed lines ({time.time() - start:.2f}s)")
+        except Exception as fast_err:
+            print(f"[/lyrics] YTM fast path error: {fast_err!r}")
+            lines = []
+
+    # ── 2b. legacy ytmusicapi chain — runs when the fast path failed or
+    # was inconclusive (NOT when a fresh discovery confirmed no lyrics),
+    # for plain lyrics + metadata backfill for old clients.
+    # Known upstream bug: get_watch_playlist KeyErrors when YouTube
+    # injects a Comments tab, hence the broad try.
+    if not lines and (not fast_confirmed_none or not title or not lr_plain_backup):
         try:
             watch = await asyncio.to_thread(_ytmusic.get_watch_playlist, video_id)
             lyrics_browse_id = watch.get("lyrics") if watch else None
