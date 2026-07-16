@@ -1286,25 +1286,50 @@ def _parse_lrc(lrc_text: str) -> List[LyricsLine]:
     return result
 
 
+# LRCLIB availability circuit breaker: when the service is down, every
+# lyrics request would otherwise burn the full timeout ladder before the
+# YTM fallback even starts. Two consecutive hard failures open the
+# circuit for 5 minutes; any successful response closes it.
+_LRCLIB_BREAKER = {"failures": 0, "open_until": 0.0}
+
+
+def _lrclib_available() -> bool:
+    return time.time() >= _LRCLIB_BREAKER["open_until"]
+
+
+def _lrclib_record(ok: bool) -> None:
+    if ok:
+        _LRCLIB_BREAKER["failures"] = 0
+    else:
+        _LRCLIB_BREAKER["failures"] += 1
+        if _LRCLIB_BREAKER["failures"] >= 2:
+            _LRCLIB_BREAKER["open_until"] = time.time() + 300
+            _LRCLIB_BREAKER["failures"] = 0
+            print("[/lyrics] LRCLIB circuit OPEN — skipping for 5 min")
+
+
 async def _lrclib_request(
-    client: httpx.AsyncClient, url: str, params: dict, lrclib_down: list
+    client: httpx.AsyncClient, url: str, params: dict, lrclib_down: list,
+    attempts: int = 2,
 ) -> Optional[httpx.Response]:
-    """Make an LRCLIB request with 1 retry, early exit if LRCLIB is down"""
-    if lrclib_down[0]:
+    """Make an LRCLIB request, early exit if LRCLIB is down"""
+    if lrclib_down[0] or not _lrclib_available():
         return None
-    for attempt in range(2):
+    for attempt in range(attempts):
         try:
             resp = await client.get(
                 url, params=params, headers={"User-Agent": "AudioSync/1.0"}
             )
+            _lrclib_record(True)  # any HTTP response means the service is up
             if resp.status_code == 200:
                 return resp
             return None  # 404 or other status — don't retry, LRCLIB is reachable
         except (httpx.TimeoutException, httpx.ConnectError):
-            if attempt == 0:
+            if attempt < attempts - 1:
                 await asyncio.sleep(0.5)
             else:
                 lrclib_down[0] = True
+                _lrclib_record(False)
                 return None
         except Exception:
             return None
@@ -1324,6 +1349,8 @@ async def _fetch_lrclib(
         clean_title = clean_title.split("|")[0].strip()
     titles = [title, clean_title] if clean_title != title else [title]
     lrclib_down = [False]  # mutable flag for early exit
+    if not _lrclib_available():
+        return None
 
     try:
         async with httpx.AsyncClient(timeout=8) as client:
@@ -1392,12 +1419,16 @@ async def _fetch_lrclib_precise(
     if "|" in clean_title:
         clean_title = clean_title.split("|")[0].strip()
     lrclib_down = [False]
+    if not _lrclib_available():
+        return None
 
     def _norm(x: str) -> str:
         return re.sub(r"[^a-z0-9]+", "", (x or "").lower())
 
     try:
-        async with httpx.AsyncClient(timeout=6) as client:
+        # UI-blocking path: tight timeout, no retry — a healthy LRCLIB
+        # answers in well under a second; the breaker handles a dead one.
+        async with httpx.AsyncClient(timeout=3) as client:
             if duration_secs > 0:
                 resp = await _lrclib_request(
                     client,
@@ -1408,6 +1439,7 @@ async def _fetch_lrclib_precise(
                         "duration": duration_secs,
                     },
                     lrclib_down,
+                    attempts=1,
                 )
                 if resp:
                     data = resp.json()
@@ -1419,6 +1451,7 @@ async def _fetch_lrclib_precise(
                 "https://lrclib.net/api/search",
                 {"track_name": clean_title, "artist_name": artist},
                 lrclib_down,
+                attempts=1,
             )
             if resp:
                 want = _norm(clean_title)
