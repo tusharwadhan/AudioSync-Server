@@ -1749,12 +1749,15 @@ async def get_lyrics_endpoint(
         elif lr and lr.get("plainLyrics"):
             lr_plain_backup = lr["plainLyrics"]
 
-    # ── 2b. legacy ytmusicapi chain — runs when the fast path failed or
-    # was inconclusive (NOT when a fresh discovery confirmed no lyrics),
-    # for plain lyrics + metadata backfill for old clients.
+    # ── 2b. legacy ytmusicapi chain — only when the fast path failed/was
+    # inconclusive, or for old clients that sent no metadata (it backfills
+    # title/artist for the LRCLIB ladder). When the fast path CONFIRMED
+    # "no timed lyrics" and we have metadata, this 1.8MB chain would cost
+    # 5-10s on this box just to maybe find plain lyrics — the LRCLIB
+    # ladder below covers that for a fraction of the price.
     # Known upstream bug: get_watch_playlist KeyErrors when YouTube
     # injects a Comments tab, hence the broad try.
-    if not lines and (not fast_confirmed_none or not title or not lr_plain_backup):
+    if not lines and (not fast_confirmed_none or not title):
         try:
             watch = await asyncio.to_thread(_ytmusic.get_watch_playlist, video_id)
             lyrics_browse_id = watch.get("lyrics") if watch else None
@@ -1802,9 +1805,18 @@ async def get_lyrics_endpoint(
         print(
             f"[/lyrics] falling back to LRCLIB search for '{track_title}' - '{track_artist}'"
         )
-        lrclib_data = await _fetch_lrclib(
-            track_title, track_artist, track_duration_secs
-        )
+        lrclib_data = None
+        try:
+            # Hard budget — the ladder is up to 6 requests and LRCLIB
+            # degrades to 7-30s per request some nights.
+            lrclib_data = await asyncio.wait_for(
+                _fetch_lrclib(track_title, track_artist, track_duration_secs),
+                timeout=8.0,
+            )
+        except asyncio.TimeoutError:
+            print("[/lyrics] LRCLIB fuzzy ladder timed out (8s budget)")
+        except Exception as e:
+            print(f"[/lyrics] LRCLIB fuzzy ladder error: {e}")
         if lrclib_data:
             synced = lrclib_data.get("syncedLyrics")
             if synced:
