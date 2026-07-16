@@ -1714,8 +1714,23 @@ async def get_lyrics_endpoint(
     source = ""
     lr_plain_backup = None  # plain lyrics found early, used only as last resort
 
-    # ── 1. LRCLIB first when the client told us exactly what's playing ──
-    if title:
+    # ── 1. YTM fast path first: two slim anonymous innertube calls,
+    # measured ~0.2-0.5s total from Render's egress (Phase-0 gate) ──
+    track_title, track_artist, track_duration_secs = title, artist, duration
+    fast_confirmed_none = False
+    try:
+        lines, source, fast_confirmed_none = await asyncio.wait_for(
+            _fetch_ytm_lyrics_fast(video_id), timeout=6.0
+        )
+        if lines:
+            print(f"[/lyrics] YTM fast: {len(lines)} timed lines ({time.time() - start:.2f}s)")
+    except Exception as fast_err:
+        print(f"[/lyrics] YTM fast path error: {fast_err!r}")
+        lines = []
+
+    # ── 2. LRCLIB precise probe when YTM had no timed lyrics and the
+    # client told us exactly what's playing ──
+    if not lines and title:
         lr = None
         try:
             # Hard budget: LRCLIB's latency is wildly variable (0.3s when
@@ -1730,23 +1745,9 @@ async def get_lyrics_endpoint(
         if lr and lr.get("syncedLyrics"):
             lines = _parse_lrc(lr["syncedLyrics"])
             source = "LRCLIB"
-            print(f"[/lyrics] LRCLIB-first: {len(lines)} synced lines ({time.time() - start:.2f}s)")
+            print(f"[/lyrics] LRCLIB: {len(lines)} synced lines ({time.time() - start:.2f}s)")
         elif lr and lr.get("plainLyrics"):
             lr_plain_backup = lr["plainLyrics"]
-
-    # ── 2. YTM fast path: two slim anonymous innertube calls ──
-    track_title, track_artist, track_duration_secs = title, artist, duration
-    fast_confirmed_none = False
-    if not lines:
-        try:
-            lines, source, fast_confirmed_none = await asyncio.wait_for(
-                _fetch_ytm_lyrics_fast(video_id), timeout=6.0
-            )
-            if lines:
-                print(f"[/lyrics] YTM fast: {len(lines)} timed lines ({time.time() - start:.2f}s)")
-        except Exception as fast_err:
-            print(f"[/lyrics] YTM fast path error: {fast_err!r}")
-            lines = []
 
     # ── 2b. legacy ytmusicapi chain — runs when the fast path failed or
     # was inconclusive (NOT when a fresh discovery confirmed no lyrics),
