@@ -3429,6 +3429,9 @@ async def handle_pause(client_id: str, msg: dict):
             "type": "sync_pause",
             "position": position,
         },
+        # The host initiated this action — echoing it back made the host
+        # seek/pause against itself, wobbling the room's reference clock.
+        exclude_id=client_id,
     )
     await send_fcm_to_disconnected_members(room.code)
 
@@ -3455,6 +3458,9 @@ async def handle_resume(client_id: str, msg: dict):
             "position": position,
             "resumeTime": resume_time,
         },
+        # The host initiated this action — echoing it back made the host
+        # seek/pause against itself, wobbling the room's reference clock.
+        exclude_id=client_id,
     )
     await send_fcm_to_disconnected_members(room.code)
 
@@ -3478,6 +3484,9 @@ async def handle_seek(client_id: str, msg: dict):
             "type": "sync_seek",
             "position": position,
         },
+        # The host initiated this action — echoing it back made the host
+        # seek/pause against itself, wobbling the room's reference clock.
+        exclude_id=client_id,
     )
     await send_fcm_to_disconnected_members(room.code)
 
@@ -3724,6 +3733,14 @@ async def handle_position_report(client_id: str, msg: dict):
     if room.is_playing:
         room.play_start_time = time.time()
 
+    # Host beacon extras (new clients): hostServerTime is the host's clock
+    # mapped to the server clock at capture — guests use it to compute the
+    # report's true age. isPlaying/videoId let guests self-heal lost
+    # pause/resume/play messages. Old clients simply omit them.
+    host_server_time = msg.get("hostServerTime")
+    host_is_playing = msg.get("isPlaying", True)
+    host_video_id = msg.get("videoId", "")
+
     # Broadcast as `position_correction` (NOT `sync_seek`) so the client's
     # smart-drift handler runs — it has a 3s threshold and uses the
     # rolling-median ping-derived `serverTimeOffset` to compensate for
@@ -3737,6 +3754,9 @@ async def handle_position_report(client_id: str, msg: dict):
             "type": "position_correction",
             "position": position,
             "serverTime": int(time.time() * 1000),
+            "hostServerTime": host_server_time or int(time.time() * 1000),
+            "isPlaying": host_is_playing,
+            "videoId": host_video_id,
         },
         exclude_id=client_id,
     )
