@@ -202,10 +202,10 @@ class RoomListResponse(BaseModel):
 
 # App update configuration - modify these values to control updates
 APP_UPDATE_CONFIG = {
-    "latestVersion": "5.17.8",
-    "latestVersionCode": 63,
-    "apkUrl": "https://raw.githubusercontent.com/tusharwadhan/AudioSync-Server/tushar/releases/syncaura-5.17.8.apk",
-    "releaseNotes": "Listen Together pause and play is much tighter now: when the host pauses and resumes, everyone snaps back together almost instantly instead of drifting, and it stays perfectly smooth with no skips.",
+    "latestVersion": "5.17.9",
+    "latestVersionCode": 64,
+    "apkUrl": "https://raw.githubusercontent.com/tusharwadhan/AudioSync-Server/tushar/releases/syncaura-5.17.9.apk",
+    "releaseNotes": "You can now see your live sync in a room: the 'in Room' pill shows how closely your music is lined up with the host, in milliseconds, so you can watch it lock right back in after a pause or skip.",
     # 5.15.0 → 5.15.1 is a patch-level bump → the client classifier
     # routes this to the Minor tier (quiet card in Settings, red dot
     # on the home gear). `mandatoryBelow` is effectively ignored for
