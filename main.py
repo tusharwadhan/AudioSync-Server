@@ -651,7 +651,6 @@ def get_ytdlp_opts():
         "no_warnings": True,
         "skip_download": True,
         "cachedir": YTDLP_CACHE_DIR,
-        "proxy": "socks5://100.82.133.108:1080",
         "extractor_args": {
             "youtube": {
                 "player_client": ["default", "-android_sdkless"],
@@ -659,6 +658,14 @@ def get_ytdlp_opts():
             }
         },
     }
+    # Home-proxy (Tailscale) for server-side extraction is now OPTIONAL — the
+    # app extracts on-device (residential IP) as the primary path. Only route
+    # through the proxy if YTDLP_PROXY is explicitly set (paired with a live
+    # TS_AUTHKEY in start.sh). Default = direct, so an expired Tailscale key no
+    # longer wedges server-side audio extraction against an unreachable proxy.
+    _ytdlp_proxy = os.environ.get("YTDLP_PROXY", "").strip()
+    if _ytdlp_proxy:
+        opts["proxy"] = _ytdlp_proxy
     opts.update(_get_cookie_opts())
     return opts
 
