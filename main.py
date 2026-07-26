@@ -205,7 +205,7 @@ APP_UPDATE_CONFIG = {
     "latestVersion": "5.17.16",
     "latestVersionCode": 71,
     "apkUrl": "https://raw.githubusercontent.com/tusharwadhan/AudioSync-Server/tushar/releases/syncaura-5.17.16.apk",
-    "releaseNotes": "Listen Together: if you drift out of sync, a 'Catch up' button now appears on the room pill — tap it to instantly slip back into sync with the host.",
+    "releaseNotes": "Listen Together: if you drift out of sync, a 'Catch up' button now appears on the room pill. Tap it to instantly slip back into sync with the host.",
     # 5.15.0 → 5.15.1 is a patch-level bump → the client classifier
     # routes this to the Minor tier (quiet card in Settings, red dot
     # on the home gear). `mandatoryBelow` is effectively ignored for
