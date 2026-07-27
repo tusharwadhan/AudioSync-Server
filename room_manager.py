@@ -18,6 +18,12 @@ class RoomMember:
     websocket: object
     name: str = "Unknown"
     time_offset: float = 0.0
+    # Reconnect grace (Phase 1): on an unexpected WS drop we KEEP the member in
+    # the roster with reconnecting=True (so a brief blip doesn't change the
+    # roster for anyone) and skip their dead socket in broadcasts. Only if they
+    # don't rejoin within the grace window do we actually remove + announce.
+    reconnecting: bool = False
+    disconnect_time: float = 0.0
 
 
 @dataclass
@@ -205,37 +211,62 @@ class RoomManager:
             del self.rooms[code]
         return code, was_host, remaining_ws
 
-    def disconnect_member(self, client_id: str) -> tuple[Optional[str], bool, list]:
-        """Handle unexpected disconnect (not explicit leave). Gives host a grace period."""
+    def disconnect_member(self, client_id: str) -> tuple[Optional[str], bool, bool]:
+        """Handle an UNEXPECTED disconnect (not an explicit leave). Marks the
+        member `reconnecting` and KEEPS them in the roster for a grace window —
+        the roster count stays unchanged for everyone. The caller schedules the
+        actual removal (finalize_disconnect) if they never come back.
+        Returns (code, was_host, member_kept)."""
         code = self._client_to_room.get(client_id)
         if code is None:
-            return None, False, []
+            return None, False, False
         room = self.rooms.get(code)
         if room is None:
             self._client_to_room.pop(client_id, None)
-            return code, False, []
+            return code, False, False
 
         was_host = room.host_id == client_id
         member = room.members.get(client_id)
         name = member.name if member else "Unknown"
 
-        # Store for potential rejoin
+        # Store for potential rejoin (host-restore + FCM targeting).
         self._pending_disconnects[client_id] = {
             "code": code, "was_host": was_host,
             "name": name, "time": time.time()
         }
 
-        # Remove from active members but DON'T destroy room yet
+        if member is not None:
+            member.reconnecting = True
+            member.disconnect_time = time.time()
+            return code, was_host, True
+
+        # No member object (shouldn't happen) — nothing to keep alive.
+        self._client_to_room.pop(client_id, None)
+        return code, was_host, False
+
+    def finalize_disconnect(self, client_id: str) -> tuple[Optional[str], list]:
+        """Grace expired. If the member is STILL reconnecting (never rejoined),
+        remove them for real and return (code, remaining_ws) so the caller can
+        broadcast member_left. If they already rejoined (or the room is gone),
+        returns (None, [])."""
+        self._pending_disconnects.pop(client_id, None)
+        code = self._client_to_room.get(client_id)
+        if code is None:
+            return None, []
+        room = self.rooms.get(code)
+        if room is None:
+            self._client_to_room.pop(client_id, None)
+            return None, []
+        member = room.members.get(client_id)
+        if member is None or not member.reconnecting:
+            return None, []   # already rejoined / replaced — nothing to do
         room.members.pop(client_id, None)
         self._client_to_room.pop(client_id, None)
-        remaining_ws = [m.websocket for m in room.members.values()]
-
-        # If no members left at all, destroy room
         if len(room.members) == 0:
             del self.rooms[code]
-            self._pending_disconnects.pop(client_id, None)
-
-        return code, was_host, remaining_ws
+            return None, []
+        remaining_ws = [m.websocket for m in room.members.values()]
+        return code, remaining_ws
 
     def rejoin_room(self, client_id: str, websocket, code: str, name: str = "Unknown",
                     previous_client_id: str = None) -> tuple[Optional[RoomState], bool]:
@@ -309,7 +340,8 @@ class RoomManager:
     def get_member_list(self, room: RoomState) -> list:
         """Return list of member info dicts for broadcasting"""
         return [
-            {"clientId": mid, "name": member.name, "isHost": mid == room.host_id}
+            {"clientId": mid, "name": member.name, "isHost": mid == room.host_id,
+             "reconnecting": member.reconnecting}
             for mid, member in room.members.items()
         ]
 
@@ -343,6 +375,8 @@ class RoomManager:
         for mid, member in list(room.members.items()):
             if mid == exclude_id:
                 continue
+            if member.reconnecting:
+                continue  # in grace: dead socket, but keep them in the roster
             try:
                 await member.websocket.send_text(data)
             except Exception:
@@ -356,6 +390,8 @@ class RoomManager:
         """Send personalized sync_queue to each member (votedByMe differs per client)."""
         dead_members = []
         for mid, member in list(room.members.items()):
+            if member.reconnecting:
+                continue  # in grace: dead socket, but keep them in the roster
             msg = {"type": "sync_queue", "queue": room.serialize_queue_for_client(mid)}
             try:
                 await member.websocket.send_text(json.dumps(msg))

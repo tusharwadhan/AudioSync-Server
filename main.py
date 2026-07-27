@@ -4342,18 +4342,29 @@ async def handle_leave(client_id: str):
             )
 
 
+# Deferred-leave grace window (Phase 1 of the room-survival work). A brief
+# WebSocket blip + fast reconnect should be INVISIBLE to the room — no "X left"
+# then "X joined" flap. On an unexpected disconnect we HOLD the member_left
+# broadcast this long; handle_rejoin_room cancels it on a within-grace rejoin
+# and stays silent. Only if the member is still gone at expiry do we announce
+# the leave. Kills the flapping that a 2-second network hiccup used to cause.
+MEMBER_GRACE_SECONDS = 45
+_disconnect_grace_tasks: dict[str, "asyncio.Task"] = {}   # disconnected client_id -> pending leave task
+
+
 async def handle_disconnect(client_id: str):
-    """Unexpected disconnect (WebSocket dropped). Gives host a grace period to reconnect."""
+    """Unexpected disconnect (WebSocket dropped). Defers the 'left' broadcast a
+    grace period so a fast reconnect doesn't flap the room for everyone else."""
     # Clean up queue (remove their requests/votes)
     room = room_manager.get_room_for_client(client_id)
     if room:
         room.remove_member_from_queue(client_id)
 
-    code, was_host, remaining_ws = room_manager.disconnect_member(client_id)
+    code, was_host, member_kept = room_manager.disconnect_member(client_id)
     if not code:
         return
 
-    print(f"[WS] {client_id[:8]} disconnected from room {code} (was_host={was_host})")
+    print(f"[WS] {client_id[:8]} disconnected from room {code} (was_host={was_host}) — grace {MEMBER_GRACE_SECONDS}s")
     analytics.log_event(
         "room_leave",
         client_id=client_id,
@@ -4362,21 +4373,50 @@ async def handle_disconnect(client_id: str):
     )
 
     room = room_manager.rooms.get(code)
-    if room:
-        # Rebroadcast queue since member's votes/requests were removed
+    if room and not was_host:
+        # Their votes/requests were removed, so the queue genuinely changed —
+        # rebroadcast it. But do NOT announce the member leaving yet: the member
+        # is kept in the roster marked `reconnecting`, and the member_left
+        # broadcast is deferred (cancelled if they rejoin within grace).
         await room_manager.broadcast_queue(room)
-        await room_manager.broadcast(
-            room,
-            {
-                "type": "member_left",
-                "count": len(room.members),
-                "members": room_manager.get_member_list(room),
-            },
+        prev = _disconnect_grace_tasks.pop(client_id, None)
+        if prev:
+            prev.cancel()
+        _disconnect_grace_tasks[client_id] = asyncio.create_task(
+            member_left_after_grace(client_id, code, MEMBER_GRACE_SECONDS)
         )
 
     if was_host and room:
-        # Schedule room destruction after grace period
+        # Host gone: existing behavior destroys the room after its own grace and
+        # sends room_closed, which supersedes the deferred member_left (which
+        # then no-ops because the room is gone).
         asyncio.create_task(destroy_room_after_grace(client_id, code, 30))
+
+
+async def member_left_after_grace(client_id: str, code: str, delay: int):
+    """Announce a member's departure ONLY if they haven't rejoined within the
+    grace window. Cancelled by handle_rejoin_room on a fast reconnect."""
+    try:
+        await asyncio.sleep(delay)
+    except asyncio.CancelledError:
+        return  # rejoined in time — stay silent, no flap
+    _disconnect_grace_tasks.pop(client_id, None)
+    # Actually remove them now (no-op if they already rejoined / room is gone).
+    fcode, _remaining_ws = room_manager.finalize_disconnect(client_id)
+    if fcode is None:
+        return  # rejoined during grace, or room already destroyed — nothing to announce
+    room = room_manager.rooms.get(fcode)
+    if room is None:
+        return  # they were the last one — room was cleaned up by finalize
+    print(f"[WS] {client_id[:8]} left room {fcode} (grace expired)")
+    await room_manager.broadcast(
+        room,
+        {
+            "type": "member_left",
+            "count": len(room.members),
+            "members": room_manager.get_member_list(room),
+        },
+    )
 
 
 async def destroy_room_after_grace(client_id: str, code: str, delay: int = 30):
@@ -4386,8 +4426,10 @@ async def destroy_room_after_grace(client_id: str, code: str, delay: int = 30):
     room = room_manager.rooms.get(code)
     if room is None:
         return
-    # Check if room has an ACTIVE host (host_id present in room.members)
-    host_active = room.host_id is not None and room.host_id in room.members
+    # Check if room has an ACTIVE host — present in the roster AND not still in
+    # the disconnect grace window (a reconnecting host is NOT active).
+    host_member = room.members.get(room.host_id) if room.host_id is not None else None
+    host_active = host_member is not None and not host_member.reconnecting
     if not host_active:
         # Host didn't rejoin — destroy room and notify remaining guests
         await analytics.log_room_destroyed(
@@ -4449,16 +4491,25 @@ async def handle_rejoin_room(client_id: str, websocket: WebSocket, msg: dict):
     }
     await ws_send(websocket, {"type": "room_joined", "state": state})
 
-    # Notify other members
-    await room_manager.broadcast(
-        room,
-        {
-            "type": "member_joined",
-            "count": len(room.members),
-            "members": room_manager.get_member_list(room),
-        },
-        exclude_id=client_id,
-    )
+    # If this rejoin landed within the disconnect grace window, cancel the
+    # pending "left" broadcast and stay SILENT — the room never saw them leave,
+    # so it must not see them "join" either. That silent pair IS the flap we're
+    # removing. Otherwise (grace expired → they were announced as left, or a
+    # genuinely fresh join) announce the join normally.
+    grace_task = _disconnect_grace_tasks.pop(previous_client_id, None) if previous_client_id else None
+    if grace_task is not None:
+        grace_task.cancel()
+        print(f"[WS] {client_id[:8]} rejoined room {code} within grace — silent (no flap)")
+    else:
+        await room_manager.broadcast(
+            room,
+            {
+                "type": "member_joined",
+                "count": len(room.members),
+                "members": room_manager.get_member_list(room),
+            },
+            exclude_id=client_id,
+        )
 
 
 @api.websocket("/ws")
