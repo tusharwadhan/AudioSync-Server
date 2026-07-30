@@ -202,10 +202,10 @@ class RoomListResponse(BaseModel):
 
 # App update configuration - modify these values to control updates
 APP_UPDATE_CONFIG = {
-    "latestVersion": "5.17.16",
-    "latestVersionCode": 71,
-    "apkUrl": "https://raw.githubusercontent.com/tusharwadhan/AudioSync-Server/tushar/releases/syncaura-5.17.16.apk",
-    "releaseNotes": "Listen Together: if you drift out of sync, a 'Catch up' button now appears on the room pill. Tap it to instantly slip back into sync with the host.",
+    "latestVersion": "5.17.17",
+    "latestVersionCode": 72,
+    "apkUrl": "https://raw.githubusercontent.com/tusharwadhan/AudioSync-Server/tushar/releases/syncaura-5.17.17.apk",
+    "releaseNotes": "Sleep timer: tap the timer icon in the player to stop playback after 15, 30, 45 or 60 minutes, at the end of the current song, or at a time you pick. Playlists now play in order with their own panel in Up Next, and Repeat All loops the whole playlist.",
     # 5.15.0 → 5.15.1 is a patch-level bump → the client classifier
     # routes this to the Minor tier (quiet card in Settings, red dot
     # on the home gear). `mandatoryBelow` is effectively ignored for
