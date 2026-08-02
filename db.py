@@ -104,3 +104,19 @@ async def get_session() -> AsyncGenerator[AsyncSession, None]:
 def is_configured() -> bool:
     """True if DATABASE_URL is set. Useful for /health-style checks."""
     return bool(_NORMALIZED_URL)
+
+
+def try_session_factory() -> async_sessionmaker[AsyncSession] | None:
+    """Session factory, or None when the DB isn't configured/constructible.
+
+    For best-effort work (diagnostics, error logging) that must never fail a
+    request just because Postgres is unavailable — the same posture as the
+    non-fatal `alembic upgrade` in start.sh. Callers still need their own
+    try/except around the actual query: this only guarantees that *getting*
+    a factory won't raise.
+    """
+    try:
+        _ensure_engine()
+    except Exception:
+        return None
+    return _SessionLocal

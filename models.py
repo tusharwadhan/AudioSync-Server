@@ -596,3 +596,46 @@ class LoungeMessage(Base):
         # Newest-first read pattern for the snapshot's "last 200".
         Index("ix_lounge_messages_sent_at_desc", sql_text("sent_at DESC")),
     )
+
+
+class PlaybackErrorLog(Base):
+    """A playback / download failure reported by a device.
+
+    Devices POST these to /log/playback-error with a tail of their in-memory
+    DebugLogger buffer attached, so a remote failure can be diagnosed without
+    pulling adb logs off the handset.
+
+    Durable copy of what used to live only in a process-local ring buffer and
+    a JSONL file on the instance disk — both of which are wiped by every
+    Render redeploy, i.e. exactly when a release is most worth watching.
+
+    Deliberately NOT linked to `users`: reports are anonymous device
+    diagnostics and must keep working for signed-out users, so `device_id` is
+    a plain column with no FK.
+    """
+    __tablename__ = "playback_error_logs"
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
+    device_id: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    device_model: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    android_version: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    app_version: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    app_version_code: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    network: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    error_type: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    song_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    song_title: Mapped[str | None] = mapped_column(String(512), nullable=True)
+    message: Mapped[str | None] = mapped_column(Text, nullable=True)
+    recent_logs: Mapped[str | None] = mapped_column(Text, nullable=True)
+    client_ip: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    # Stamped from the same value written into the in-memory ring so the two
+    # sources dedupe cleanly when the viewer merges them.
+    received_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utc_now, nullable=False
+    )
+
+    __table_args__ = (
+        Index("ix_playback_error_logs_received", "received_at"),
+        Index("ix_playback_error_logs_device_received", "device_id", "received_at"),
+        Index("ix_playback_error_logs_type_received", "error_type", "received_at"),
+    )

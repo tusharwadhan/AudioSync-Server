@@ -1,6 +1,7 @@
 from fastapi import (
     FastAPI,
     APIRouter,
+    BackgroundTasks,
     Depends,
     HTTPException,
     WebSocket,
@@ -2123,8 +2124,50 @@ class PlaybackErrorReport(BaseModel):
     recentLogs: str = ""            # tail of the app's DebugLogger buffer
 
 
+async def _persist_playback_error_to_db(entry: dict):
+    """Durable copy of a device error report in Postgres.
+
+    Strictly best-effort. The ring buffer and JSONL file are written first and
+    synchronously, so a paused/unreachable database costs us only cross-deploy
+    history — never a dropped report and never a failed request.
+    """
+    import db as _db
+
+    factory = _db.try_session_factory()
+    if factory is None:
+        return
+    try:
+        received = datetime.fromisoformat(entry["serverTime"])
+    except Exception:
+        received = datetime.now(timezone.utc)
+    try:
+        async with factory() as session:
+            session.add(models.PlaybackErrorLog(
+                device_id=(entry.get("deviceId") or "")[:128] or None,
+                device_model=(entry.get("deviceModel") or "")[:128] or None,
+                android_version=(entry.get("androidVersion") or "")[:32] or None,
+                app_version=(entry.get("appVersion") or "")[:32] or None,
+                app_version_code=entry.get("appVersionCode") or None,
+                network=(entry.get("network") or "")[:32] or None,
+                error_type=(entry.get("errorType") or "")[:64] or None,
+                song_id=(entry.get("songId") or "")[:64] or None,
+                song_title=(entry.get("songTitle") or "")[:512] or None,
+                message=entry.get("message") or None,
+                recent_logs=entry.get("recentLogs") or None,
+                client_ip=(entry.get("clientIp") or "")[:64] or None,
+                received_at=received,
+            ))
+            await session.commit()
+    except Exception as e:
+        print(f"[errlog] DB persist failed (non-fatal): {type(e).__name__}: {e}")
+
+
 @api.post("/log/playback-error")
-async def log_playback_error(report: PlaybackErrorReport, request: Request):
+async def log_playback_error(
+    report: PlaybackErrorReport,
+    request: Request,
+    background_tasks: BackgroundTasks,
+):
     entry = report.dict()
     # Cap the log payload so a misbehaving client can't balloon the file.
     entry["recentLogs"] = entry["recentLogs"][-32000:]
@@ -2138,6 +2181,9 @@ async def log_playback_error(report: PlaybackErrorReport, request: Request):
             f.write(json.dumps(entry, ensure_ascii=False) + "\n")
     except Exception as e:
         print(f"[errlog] failed to persist playback error: {e}")
+
+    # Durable copy, off the request path so the device never waits on the DB.
+    background_tasks.add_task(_persist_playback_error_to_db, entry)
 
     print(
         f"[errlog] {entry['errorType']} on {entry['deviceModel']} "
@@ -2162,22 +2208,94 @@ async def get_playback_errors(
     if not ADMIN_SECRET or request.headers.get("X-Admin-Secret") != ADMIN_SECRET:
         raise HTTPException(status_code=403, detail="Forbidden")
 
-    items = PLAYBACK_ERRORS
-    # Fall back to the file so restarts don't lose everything in memory.
-    if not items and os.path.exists(PLAYBACK_ERRORS_FILE):
+    capped = max(1, min(limit, PLAYBACK_ERRORS_MAX))
+
+    # Merge all three sources rather than picking one. Postgres holds the
+    # durable history (survives redeploys); the ring holds anything this
+    # instance saw that the DB write may have missed (e.g. DB paused); the
+    # JSONL file covers a restart within the same deploy. Previously the file
+    # was only consulted when the ring was empty, so a single fresh report
+    # hid every older entry.
+    merged: list[dict] = []
+    sources = {"db": 0, "memory": 0, "file": 0}
+
+    db_items = await _load_playback_errors_from_db(capped, device)
+    sources["db"] = len(db_items)
+    merged.extend(db_items)
+
+    sources["memory"] = len(PLAYBACK_ERRORS)
+    merged.extend(PLAYBACK_ERRORS)
+
+    if os.path.exists(PLAYBACK_ERRORS_FILE):
         try:
             with open(PLAYBACK_ERRORS_FILE, encoding="utf-8") as f:
-                items = [json.loads(line) for line in f if line.strip()]
-            items = items[-PLAYBACK_ERRORS_MAX:]
+                file_items = [json.loads(line) for line in f if line.strip()]
+            file_items = file_items[-PLAYBACK_ERRORS_MAX:]
+            sources["file"] = len(file_items)
+            merged.extend(file_items)
         except Exception as e:
             print(f"[errlog] failed to read persisted errors: {e}")
 
+    # Dedupe on the ingest timestamp + device + message; the DB row is stamped
+    # with the same serverTime the ring entry carries, so copies collapse.
+    seen: set = set()
+    unique: list[dict] = []
+    for e in merged:
+        key = (e.get("serverTime"), e.get("deviceId"), (e.get("message") or "")[:120])
+        if key in seen:
+            continue
+        seen.add(key)
+        unique.append(e)
+
     if device:
-        items = [e for e in items if e.get("deviceId") == device]
-    out = list(reversed(items[-max(1, min(limit, PLAYBACK_ERRORS_MAX)):]))
+        unique = [e for e in unique if e.get("deviceId") == device]
+
+    # Newest first. serverTime is ISO-8601 so lexical sort is chronological.
+    unique.sort(key=lambda e: e.get("serverTime") or "", reverse=True)
+    out = unique[:capped]
     if not include_logs:
         out = [{k: v for k, v in e.items() if k != "recentLogs"} for e in out]
-    return {"count": len(out), "errors": out}
+    return {"count": len(out), "total": len(unique), "sources": sources, "errors": out}
+
+
+async def _load_playback_errors_from_db(limit: int, device: str) -> list[dict]:
+    """Durable reports from Postgres, shaped like the in-memory entries.
+
+    Returns [] (never raises) when the DB is unavailable, so the viewer keeps
+    working off the ring/file during a database outage.
+    """
+    import db as _db
+    from sqlalchemy import select as _select
+
+    factory = _db.try_session_factory()
+    if factory is None:
+        return []
+    try:
+        async with factory() as session:
+            stmt = _select(models.PlaybackErrorLog)
+            if device:
+                stmt = stmt.where(models.PlaybackErrorLog.device_id == device)
+            stmt = stmt.order_by(models.PlaybackErrorLog.received_at.desc()).limit(limit)
+            rows = (await session.execute(stmt)).scalars().all()
+    except Exception as e:
+        print(f"[errlog] DB read failed (non-fatal): {type(e).__name__}: {e}")
+        return []
+
+    return [{
+        "deviceId": r.device_id or "",
+        "deviceModel": r.device_model or "",
+        "androidVersion": r.android_version or "",
+        "appVersion": r.app_version or "",
+        "appVersionCode": r.app_version_code or 0,
+        "network": r.network or "",
+        "errorType": r.error_type or "",
+        "songId": r.song_id or "",
+        "songTitle": r.song_title or "",
+        "message": r.message or "",
+        "recentLogs": r.recent_logs or "",
+        "serverTime": r.received_at.isoformat() if r.received_at else "",
+        "clientIp": r.client_ip or "",
+    } for r in rows]
 
 
 # TEMPORARY diagnostic for the listen_events push 500s (2026-07-14).
