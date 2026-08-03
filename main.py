@@ -19,6 +19,7 @@ from typing import Optional, List
 import yt_dlp
 import time
 import asyncio
+import concurrent.futures
 import httpx
 import os
 import threading
@@ -330,36 +331,180 @@ def register_fcm_token(client_id: str, token: str):
     print(f"[FCM] Token registered for {client_id[:8]}: {token[:20]}...")
 
 
+# FCM sends are blocking HTTPS calls. They must NOT share the default executor:
+# that pool also runs every yt-dlp / ytmusic extraction, and a mass disconnect
+# (redeploy, network partition) would queue hundreds of pushes ahead of every
+# /audio and /search request — stalling playback for users who never dropped,
+# while health checks still pass because the event loop stays responsive.
+_FCM_POOL = concurrent.futures.ThreadPoolExecutor(max_workers=4, thread_name_prefix="fcm")
+
+# Per-device wake throttle. Caps amplification when several code paths want to
+# wake the same device at once (the 3 retries here overlap with the host-action
+# and chat-message wakes, which together could otherwise fire ~10 high-priority
+# pushes in 20s and burn the device's FCM quota).
+_FCM_WAKE_MIN_INTERVAL = 5.0
+_last_wake_at: dict[str, float] = {}   # fcm token -> monotonic timestamp
+
+_shutting_down = False
+
+
+async def send_fcm_wake(client_id: str, room_code: str) -> bool:
+    """High-priority data push telling one client to re-establish its room WS.
+
+    High priority is what lets it through Doze; the client has no user-visible
+    notification to show, it just needs the process woken.
+    """
+    if not firebase_admin._apps or _shutting_down:
+        return False
+    token = _fcm_tokens.get(client_id)
+    if not token:
+        return False
+
+    now = time.monotonic()
+    last = _last_wake_at.get(token, 0.0)
+    if now - last < _FCM_WAKE_MIN_INTERVAL:
+        return False
+    _last_wake_at[token] = now
+
+    try:
+        message = messaging.Message(
+            data={"type": "room_reconnect", "roomCode": room_code},
+            token=token,
+            android=messaging.AndroidConfig(priority="high"),
+        )
+        loop = asyncio.get_running_loop()
+        await loop.run_in_executor(_FCM_POOL, messaging.send, message)
+        print(f"[FCM] room_reconnect -> {client_id[:8]} ({room_code})")
+        return True
+    except Exception as e:
+        # Prune tokens that can never succeed. Only pop each map if it still
+        # points at THIS client: the device may have reconnected under a new
+        # client_id and re-registered the same token while we were awaiting,
+        # and clobbering that would desync the two maps permanently.
+        dead = isinstance(e, messaging.UnregisteredError) or isinstance(
+            e, (messaging.SenderIdMismatchError, ValueError)
+        )
+        if dead:
+            print(f"[FCM] Dropping unusable token for {client_id[:8]}: {type(e).__name__}")
+            if _fcm_tokens.get(client_id) == token:
+                _fcm_tokens.pop(client_id, None)
+            if _fcm_token_to_client.get(token) == client_id:
+                _fcm_token_to_client.pop(token, None)
+            _last_wake_at.pop(token, None)
+        else:
+            print(f"[FCM] Failed to send to {client_id[:8]}: {e}")
+    return False
+
+
 async def send_fcm_to_disconnected_members(room_code: str):
-    """Send FCM wake-up to room members who are disconnected."""
+    """Send FCM wake-up to every currently-disconnected member of a room."""
     if not firebase_admin._apps:
         return
     room = room_manager.rooms.get(room_code)
-    if not room:
+    if room is None:
         return
-
     for client_id, info in list(room_manager._pending_disconnects.items()):
         if info["code"] != room_code:
             continue
-
-        token = _fcm_tokens.get(client_id)
-        if not token:
+        # Same roster guard the per-client wake uses. Without it a stale
+        # pending entry (they linger up to 60s after a room dies) could be
+        # matched by a NEW room that reused the 4-char code, waking a stranger.
+        member = room.members.get(client_id)
+        if member is None or not member.reconnecting:
             continue
+        await send_fcm_wake(client_id, room_code)
 
-        try:
-            message = messaging.Message(
-                data={"type": "room_reconnect", "roomCode": room_code},
-                token=token,
-                android=messaging.AndroidConfig(priority="high"),
-            )
-            await asyncio.to_thread(messaging.send, message)
-            print(f"[FCM] Sent room_reconnect to {client_id[:8]} for room {room_code}")
-        except messaging.UnregisteredError:
-            print(f"[FCM] Token expired for {client_id[:8]}, removing")
-            _fcm_tokens.pop(client_id, None)
-            _fcm_token_to_client.pop(token, None)
-        except Exception as e:
-            print(f"[FCM] Failed to send to {client_id[:8]}: {e}")
+
+# Live wake tasks, keyed by the disconnected client_id. Handles are kept so a
+# kick / leave / rejoin / shutdown can CANCEL a pending wake — without this a
+# kicked member is actively paged back into the room they were removed from.
+_wake_tasks: dict[str, "asyncio.Task"] = {}
+
+
+def cancel_wake(client_id: str):
+    """Stop any in-flight wake retries for a client."""
+    t = _wake_tasks.pop(client_id, None)
+    if t and not t.done():
+        t.cancel()
+
+
+def cancel_room_session(client_id: str):
+    """Forget a client entirely: no deferred 'left', no wake, no pending entry.
+
+    Used by paths where the member's departure is INTENTIONAL or enforced
+    (explicit leave, kick), so nothing may later page their device or announce
+    a leave for an identity that is already gone.
+
+    Purges by DEVICE, not just by client_id. client_id is a fresh uuid per
+    WebSocket connection, so a client that dropped and reconnected owns several
+    ids: leaving as the newest one used to leave the older one's pending entry
+    and roster ghost behind, still passing every wake guard. The FCM token is
+    the stable per-device identity, so we clear every id sharing it.
+    """
+    ids = {client_id}
+    token = _fcm_tokens.get(client_id)
+    if token:
+        ids.update(cid for cid, t in _fcm_tokens.items() if t == token)
+
+    for cid in ids:
+        cancel_wake(cid)
+        t = _disconnect_grace_tasks.pop(cid, None)
+        if t and not t.done():
+            t.cancel()
+        info = room_manager._pending_disconnects.pop(cid, None)
+        # Drop any roster ghost the stale id left behind, so the room doesn't
+        # later announce "X left" for someone who is sitting in it (or count
+        # a phantom member forever).
+        if info:
+            ghost_room = room_manager.rooms.get(info.get("code", ""))
+            if ghost_room is not None:
+                m = ghost_room.members.get(cid)
+                if m is not None and m.reconnecting:
+                    ghost_room.members.pop(cid, None)
+                    room_manager._client_to_room.pop(cid, None)
+    if token:
+        _last_wake_at.pop(token, None)
+
+
+async def wake_after_disconnect(client_id: str, room_code: str):
+    """Nudge a client that JUST dropped, and keep nudging inside the grace window.
+
+    Previously the only wake-ups happened when the host next acted (play /
+    pause / next / seek), so a member whose process was killed during quiet
+    playback was never poked at all and simply aged out of the grace window.
+
+    Retries because the first push often lands while the process is still
+    being torn down, and because Doze can defer delivery.
+
+    NEVER wakes someone who left on purpose. Three independent guards:
+      1. Explicit leave / kick pop `_client_to_room` BEFORE the socket closes,
+         so `disconnect_member` bails and no pending entry is ever created —
+         this coroutine is not even started for them.
+      2. Each attempt requires a live `_pending_disconnects` entry, which a
+         leave never creates and a rejoin removes.
+      3. Each attempt requires the member to still be in the roster flagged
+         `reconnecting`; leaving mid-grace drops them from the roster.
+    """
+    # Last retry at 15s, not 20s: the HOST's room is destroyed at 30s, and the
+    # client needs FCM delivery + process start + WS connect + a 2s rejoin
+    # delay after that. A 20s push left almost no budget for the case this
+    # feature most wants to save. All three stay inside the 45s member grace.
+    for delay in (0, 5, 15):
+        if delay:
+            # No try/except: CancelledError must propagate so a kick/leave can
+            # actually stop the retries and shutdown isn't silently swallowed.
+            await asyncio.sleep(delay)
+        # Back already, or the room is gone -> nothing to wake.
+        if client_id not in room_manager._pending_disconnects:
+            return
+        room = room_manager.rooms.get(room_code)
+        if room is None:
+            return
+        # Only wake someone the grace window is actually still holding open.
+        member = room.members.get(client_id)
+        if member is None or not member.reconnecting:
+            return
+        await send_fcm_wake(client_id, room_code)
 
 
 def get_best_thumbnail(info: dict) -> str:
@@ -853,6 +998,17 @@ async def startup_analytics():
 
 @app.on_event("shutdown")
 async def shutdown_analytics():
+    # Stop emitting wakes first: on a redeploy every member drops at once, and
+    # paging them all back to a process that is going away just makes their
+    # rejoin fail with "Room no longer exists". Also prevents "Task was
+    # destroyed but it is pending" noise and a hung FCM call delaying exit.
+    global _shutting_down
+    _shutting_down = True
+    for t in list(_wake_tasks.values()):
+        if not t.done():
+            t.cancel()
+    _wake_tasks.clear()
+    _FCM_POOL.shutdown(wait=False, cancel_futures=True)
     await analytics.close()
 
 
@@ -4368,6 +4524,11 @@ async def handle_kick_member(client_id: str, msg: dict):
     target_ws, success = room_manager.kick_member(room.code, client_id, target_id)
     if not success:
         return
+    # A kick during the grace window used to leave the victim's pending entry,
+    # deferred-leave task and wake retries running — so the server would page
+    # the kicked device back and it would silently rejoin under a new id.
+    # Removal must forget them completely.
+    cancel_room_session(target_id)
     print(f"[WS] Host {client_id[:8]} kicked {target_id[:8]} from room {room.code}")
     # Notify kicked client and close their connection
     try:
@@ -4413,6 +4574,12 @@ async def handle_share_lyrics(client_id: str, msg: dict):
 
 async def handle_leave(client_id: str):
     """Explicit leave (user clicked Leave button). Destroys room immediately if host."""
+    # The user chose to go: forget this DEVICE's room session entirely before
+    # anything else, so no deferred "left" broadcast and no wake push can fire
+    # for it afterwards — including for older client_ids the device used
+    # before a reconnect. This is what guarantees we never page someone back
+    # into a room they deliberately left.
+    cancel_room_session(client_id)
     # Clean up queue before leaving (remove their requests/votes)
     room = room_manager.get_room_for_client(client_id)
     room_snapshot = None
@@ -4503,6 +4670,29 @@ async def handle_disconnect(client_id: str):
         _disconnect_grace_tasks[client_id] = asyncio.create_task(
             member_left_after_grace(client_id, code, MEMBER_GRACE_SECONDS)
         )
+
+    # Phase 2: try to wake the client that just dropped. Gated on member_kept,
+    # which is only true for an UNEXPECTED disconnect that the grace window is
+    # holding open — an explicit leave or a kick already removed the member
+    # (and its _client_to_room entry) before the socket closed, so
+    # disconnect_member returned early and we never get here for them.
+    #
+    # Applies to the host too: a host whose process dies takes the whole room
+    # down when its own grace expires, so it is the most valuable wake of all.
+    if member_kept and room:
+        cancel_wake(client_id)
+        task = asyncio.create_task(wake_after_disconnect(client_id, code))
+        _wake_tasks[client_id] = task
+
+        def _wake_done(t: "asyncio.Task", cid=client_id):
+            _wake_tasks.pop(cid, None)
+            if t.cancelled():
+                return
+            exc = t.exception()
+            if exc:
+                print(f"[FCM] wake task for {cid[:8]} failed: {type(exc).__name__}: {exc}")
+
+        task.add_done_callback(_wake_done)
 
     if was_host and room:
         # Host gone: existing behavior destroys the room after its own grace and
@@ -4614,6 +4804,11 @@ async def handle_rejoin_room(client_id: str, websocket: WebSocket, msg: dict):
     # so it must not see them "join" either. That silent pair IS the flap we're
     # removing. Otherwise (grace expired → they were announced as left, or a
     # genuinely fresh join) announce the join normally.
+    # They're back — stop paging the old identity immediately rather than
+    # waiting for the next retry tick to notice.
+    if previous_client_id:
+        cancel_wake(previous_client_id)
+    cancel_wake(client_id)
     grace_task = _disconnect_grace_tasks.pop(previous_client_id, None) if previous_client_id else None
     if grace_task is not None:
         grace_task.cancel()
