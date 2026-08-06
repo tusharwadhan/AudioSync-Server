@@ -204,10 +204,10 @@ class RoomListResponse(BaseModel):
 
 # App update configuration - modify these values to control updates
 APP_UPDATE_CONFIG = {
-    "latestVersion": "5.17.18",
-    "latestVersionCode": 73,
-    "apkUrl": "https://raw.githubusercontent.com/tusharwadhan/AudioSync-Server/tushar/releases/syncaura-5.17.18.apk",
-    "releaseNotes": "Edge player: the open and close animation is rebuilt. No more flicker when it opens or closes, the screen dims smoothly with your finger instead of jumping, the close is quicker, and the Up Next card now sits right under the player instead of floating far below it.",
+    "latestVersion": "5.17.19",
+    "latestVersionCode": 74,
+    "apkUrl": "https://raw.githubusercontent.com/tusharwadhan/AudioSync-Server/tushar/releases/syncaura-5.17.19.apk",
+    "releaseNotes": "Listen Together stays connected. If your phone puts SyncAura to sleep and drops you out of a room, it now quietly reconnects you instead of leaving the room without you. There is also a new Listen Together section in Settings with a one-tap option to let the app keep running in the background, which is the main reason rooms used to drop when the screen went off.",
     # 5.15.0 → 5.15.1 is a patch-level bump → the client classifier
     # routes this to the Minor tier (quiet card in Settings, red dot
     # on the home gear). `mandatoryBelow` is effectively ignored for
