@@ -3502,6 +3502,10 @@ async def handle_create_room(client_id: str, websocket: WebSocket, msg: dict):
             "hostName": host_name,
             "hasPassword": password is not None,
             "members": room_manager.get_member_list(room),
+            # Persist this and send it back as memberSecret on rejoin. It is
+            # what proves you are the host, instead of a client_id anyone in
+            # the room can read off a member-list broadcast.
+            "memberSecret": room.members[client_id].secret,
         },
     )
 
@@ -3572,6 +3576,7 @@ async def handle_join_room(client_id: str, websocket: WebSocket, msg: dict):
         "members": room_manager.get_member_list(room),
         "role": role,
     }
+    state["memberSecret"] = room.members[client_id].secret
     await ws_send(websocket, {"type": "room_joined", "state": state})
 
     # Notify others with updated member list
@@ -4762,13 +4767,18 @@ async def handle_rejoin_room(client_id: str, websocket: WebSocket, msg: dict):
     code = msg.get("code", "").upper()
     name = msg.get("name", "Unknown")
     previous_client_id = msg.get("previousClientId")
+    # Server-minted proof of who is rejoining. Absent on installs that
+    # predate it, which is why the legacy previousClientId path survives.
+    member_secret = msg.get("memberSecret")
 
     if not code:
         await ws_send(websocket, {"type": "error", "message": "Room code required"})
         return
 
     room, was_host = room_manager.rejoin_room(
-        client_id, websocket, code, name, previous_client_id=previous_client_id
+        client_id, websocket, code, name,
+        previous_client_id=previous_client_id,
+        member_secret=member_secret,
     )
     if not room:
         await ws_send(
@@ -4797,6 +4807,7 @@ async def handle_rejoin_room(client_id: str, websocket: WebSocket, msg: dict):
         "members": room_manager.get_member_list(room),
         "role": role,
     }
+    state["memberSecret"] = room.members[client_id].secret
     await ws_send(websocket, {"type": "room_joined", "state": state})
 
     # If this rejoin landed within the disconnect grace window, cancel the
@@ -5025,11 +5036,16 @@ async def websocket_endpoint(websocket: WebSocket):
                 # `lounge_` included so any future lounge-namespaced
                 # message added on the client (R3+) gets a real error
                 # reply on an older server instead of silent drop.
+                # `control_` (remote control) included for the same reason,
+                # and it matters more here: the phone BLOCKS waiting for a
+                # pairing reply. Without this an app talking to an older
+                # server would sit on a spinner forever with no signal.
                 if (
                     msg_type.startswith("dm_")
                     or msg_type.startswith("user_")
                     or msg_type.startswith("social_")
                     or msg_type.startswith("lounge_")
+                    or msg_type.startswith("control_")
                 ):
                     try:
                         await websocket.send_json({

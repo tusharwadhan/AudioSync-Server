@@ -3,6 +3,7 @@ import random
 import string
 import json
 import uuid
+import secrets
 from dataclasses import dataclass, field
 from typing import Optional
 
@@ -24,6 +25,13 @@ class RoomMember:
     # don't rejoin within the grace window do we actually remove + announce.
     reconnecting: bool = False
     disconnect_time: float = 0.0
+    # Rejoin secret. Minted server-side at create/join and handed only to the
+    # member it belongs to. Rejoin currently trusts a client-supplied
+    # `previous_client_id` to restore host — but every member's client_id is
+    # broadcast in get_member_list(), so anyone in the room can claim the
+    # host's. This secret replaces that proof. Additive for now: rejoin still
+    # accepts the legacy path until enough installs send a secret.
+    secret: str = ""
 
 
 @dataclass
@@ -170,7 +178,8 @@ class RoomManager:
 
     def create_room(self, host_id: str, websocket, host_name: str = "Unknown", password: str = None) -> RoomState:
         code = self.generate_code()
-        member = RoomMember(client_id=host_id, websocket=websocket, name=host_name)
+        member = RoomMember(client_id=host_id, websocket=websocket, name=host_name,
+                            secret=secrets.token_urlsafe(24))
         room = RoomState(code=code, host_id=host_id, host_name=host_name, password=password, members={host_id: member})
         self.rooms[code] = room
         self._client_to_room[host_id] = code
@@ -181,7 +190,8 @@ class RoomManager:
         room = self.rooms.get(code.upper())
         if room is None:
             return None, False
-        member = RoomMember(client_id=client_id, websocket=websocket, name=name)
+        member = RoomMember(client_id=client_id, websocket=websocket, name=name,
+                            secret=secrets.token_urlsafe(24))
         room.members[client_id] = member
         self._client_to_room[client_id] = code.upper()
         room.peak_members = max(room.peak_members, len(room.members))
@@ -269,7 +279,8 @@ class RoomManager:
         return code, remaining_ws
 
     def rejoin_room(self, client_id: str, websocket, code: str, name: str = "Unknown",
-                    previous_client_id: str = None) -> tuple[Optional[RoomState], bool]:
+                    previous_client_id: str = None,
+                    member_secret: str = None) -> tuple[Optional[RoomState], bool]:
         """Attempt to rejoin a room after disconnect. Returns (room, was_host) or (None, False).
         previous_client_id: the client's old ID from before reconnection, used to clean up stale entries."""
         room = self.rooms.get(code.upper())
@@ -277,21 +288,48 @@ class RoomManager:
             return None, False
 
         was_host = False
+        carried_secret = ""
 
-        # Method 1: Check pending disconnects using the PREVIOUS client_id
-        lookup_id = previous_client_id or client_id
-        pending = self._pending_disconnects.pop(lookup_id, None)
-        if pending and pending.get("was_host") and pending["code"] == code.upper():
-            was_host = True
+        # Method 0 (preferred): a secret we minted and handed only to that
+        # member. Unlike previous_client_id this cannot be lifted from a
+        # member-list broadcast, so it is real proof of who is rejoining.
+        # Compared constant-time; the first match wins and short-circuits the
+        # legacy fallbacks entirely.
+        if member_secret:
+            for mid, m in list(room.members.items()):
+                if m.secret and secrets.compare_digest(m.secret, member_secret):
+                    was_host = (mid == room.host_id)
+                    carried_secret = m.secret
+                    if mid != client_id:
+                        room.members.pop(mid, None)
+                        self._client_to_room.pop(mid, None)
+                    self._pending_disconnects.pop(mid, None)
+                    break
+            else:
+                # A secret that matches nobody is a stale session (room was
+                # recreated, or the member was already reaped). Fall through
+                # to the legacy paths rather than hard-failing a reconnect.
+                pass
 
-        # Method 2: Fallback — check if previous_client_id IS the room's host_id directly
-        # (handles race condition where disconnect hasn't fired yet, or pending was already popped)
-        if not was_host and previous_client_id and room.host_id == previous_client_id:
-            was_host = True
+        # Methods 1-3 are the LEGACY paths, kept only for installs that have
+        # no secret yet. A verified secret is authoritative: if it said this
+        # member is not the host, these must not override it, or the takeover
+        # they exist to enable survives the fix.
+        if not carried_secret:
+            # Method 1: Check pending disconnects using the PREVIOUS client_id
+            lookup_id = previous_client_id or client_id
+            pending = self._pending_disconnects.pop(lookup_id, None)
+            if pending and pending.get("was_host") and pending["code"] == code.upper():
+                was_host = True
 
-        # Method 3: Fallback — if room has no active host (host_id not in members), restore host
-        if not was_host and room.host_id not in room.members:
-            was_host = True
+            # Method 2: Fallback — check if previous_client_id IS the room's host_id directly
+            # (handles race condition where disconnect hasn't fired yet, or pending was already popped)
+            if not was_host and previous_client_id and room.host_id == previous_client_id:
+                was_host = True
+
+            # Method 3: Fallback — if room has no active host (host_id not in members), restore host
+            if not was_host and room.host_id not in room.members:
+                was_host = True
 
         # Remove stale member entry with old client_id if it still lingers in the room
         if previous_client_id and previous_client_id in room.members:
@@ -302,7 +340,11 @@ class RoomManager:
         if was_host:
             room.host_id = client_id
 
-        member = RoomMember(client_id=client_id, websocket=websocket, name=name)
+        # Carry the existing secret forward so it stays stable across
+        # reconnects; mint one for legacy clients so they get the safe path
+        # from their next rejoin onward.
+        member = RoomMember(client_id=client_id, websocket=websocket, name=name,
+                            secret=carried_secret or secrets.token_urlsafe(24))
         room.members[client_id] = member
         self._client_to_room[client_id] = code.upper()
         room.peak_members = max(room.peak_members, len(room.members))
