@@ -204,10 +204,10 @@ class RoomListResponse(BaseModel):
 
 # App update configuration - modify these values to control updates
 APP_UPDATE_CONFIG = {
-    "latestVersion": "5.17.19",
-    "latestVersionCode": 74,
-    "apkUrl": "https://raw.githubusercontent.com/tusharwadhan/AudioSync-Server/tushar/releases/syncaura-5.17.19.apk",
-    "releaseNotes": "Listen Together stays connected. If your phone puts SyncAura to sleep and drops you out of a room, it now quietly reconnects you instead of leaving the room without you. There is also a new Listen Together section in Settings with a one-tap option to let the app keep running in the background, which is the main reason rooms used to drop when the screen went off.",
+    "latestVersion": "5.17.20",
+    "latestVersionCode": 75,
+    "apkUrl": "https://raw.githubusercontent.com/tusharwadhan/AudioSync-Server/tushar/releases/syncaura-5.17.20.apk",
+    "releaseNotes": "A rebuilt player header. The top of the player now tells you what you are actually listening to - the playlist you started from - instead of just saying Now Playing. Save, Add to playlist and Share moved into a labelled menu that opens inside the bar, and the sleep timer sits on the left with its presets one tap away, including Stop at a time. The bar itself doubles as a meter: it drains as your sleep timer counts down and fills as a song downloads, with the exact numbers alongside. Downloads can now be cancelled mid-way, and a song you saved yourself is marked in blue while one kept by auto-backup stays white. Songs that will not play also explain why now - not available in your region, removed from YouTube, needs a paid account - and SyncAura skips past them instead of stopping the queue.",
     # 5.15.0 → 5.15.1 is a patch-level bump → the client classifier
     # routes this to the Minor tier (quiet card in Settings, red dot
     # on the home gear). `mandatoryBelow` is effectively ignored for
