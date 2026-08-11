@@ -12,6 +12,7 @@ swallows every exception, so a module that sent internally could not tell a
 live phone from a dead one.
 """
 
+import json
 import time
 import secrets
 import string
@@ -27,6 +28,11 @@ TICKET_TTL = 90.0          # seconds a pairing code / ticket stays valid
 SESSION_IDLE_TTL = 6 * 3600.0
 CMD_WINDOW = 10.0          # rate-limit window for control_cmd
 CMD_MAX_IN_WINDOW = 40     # generous for a human, closes the firehose
+# /ws is unauthenticated, so anyone can open sockets and create sessions.
+# Without these two, N sockets x a 16MB state blob (uvicorn's default
+# ws_max_size) OOMs the whole API - extraction, updates, social included.
+MAX_SESSIONS = 500
+MAX_STATE_BYTES = 8 * 1024
 
 
 @dataclass
@@ -61,8 +67,15 @@ class ControlSessionManager:
     # ── sessions ──────────────────────────────────────────────────────
 
     def create(self, phone_client_id: str, phone_ws, owner_uid: str = None):
-        """Start a session for a phone. Returns (session, phone_secret)."""
-        self.end_for_client(phone_client_id)
+        """Start a session for a phone.
+
+        Returns (session, phone_secret, orphaned_ws) - the orphans belong to a
+        previous session this client was running and MUST be told, or their
+        browser sits on stale state forever believing it is still paired.
+        """
+        if len(self._sessions) >= MAX_SESSIONS:
+            return None, None, []
+        _, orphans = self.end_for_client(phone_client_id)
         sid = secrets.token_urlsafe(12)
         sess = ControlSession(
             id=sid,
@@ -73,7 +86,7 @@ class ControlSessionManager:
         )
         self._sessions[sid] = sess
         self._by_client[phone_client_id] = sid
-        return sess, sess.phone_secret
+        return sess, sess.phone_secret, orphans
 
     def rejoin(self, phone_client_id: str, phone_ws, secret: str) -> Optional[ControlSession]:
         """Re-attach a phone after a reconnect.
@@ -82,10 +95,16 @@ class ControlSessionManager:
         wake, network changes), so without this every Wi-Fi switch would drop
         the pairing and force the user to re-scan.
         """
-        if not secret:
+        # Raw client input: compare_digest raises TypeError on non-str and
+        # on non-ASCII str, and an unhandled raise tears down the socket.
+        if not secret or not isinstance(secret, str):
             return None
+        # This id may already be mapped (e.g. it was a controller). Clear it
+        # first so we never orphan another session by overwriting.
+        self.end_for_client(phone_client_id)
         for sess in self._sessions.values():
-            if secrets.compare_digest(sess.phone_secret, secret):
+            if secrets.compare_digest(sess.phone_secret.encode("utf-8"),
+                                      secret.encode("utf-8")):
                 self._by_client.pop(sess.phone_client_id, None)
                 sess.phone_client_id = phone_client_id
                 sess.phone_ws = phone_ws
@@ -122,7 +141,9 @@ class ControlSessionManager:
     def redeem(self, code: str) -> Optional[ControlSession]:
         """Burn a code and return its session. Single-use, right or wrong."""
         self._sweep_tickets()
-        t = self._tickets.pop((code or "").strip().upper(), None)
+        if not isinstance(code, str):
+            return None
+        t = self._tickets.pop(code.strip().upper(), None)
         if t is None or t.expires_at < time.time():
             return None
         return self._sessions.get(t.session_id)
@@ -131,6 +152,10 @@ class ControlSessionManager:
         sess = self._sessions.get(session_id)
         if sess is None:
             return False
+        # Same reason as rejoin(): overwriting a live mapping would strand
+        # whatever session it pointed at, with no way to ever reach it again.
+        if self._by_client.get(client_id) not in (None, sess.id):
+            self.end_for_client(client_id)
         sess.controllers[client_id] = ws
         sess.last_seen = time.time()
         self._by_client[client_id] = sess.id
@@ -178,9 +203,18 @@ class ControlSessionManager:
         self._cmd_hits[client_id] = hits
         return True
 
-    def set_state(self, session: ControlSession, state: dict):
-        session.last_state = state
+    def set_state(self, session: ControlSession, state) -> bool:
+        """Store the phone's now-playing state. Rejects anything oversized."""
         session.last_seen = time.time()
+        if not isinstance(state, dict):
+            return False
+        try:
+            if len(json.dumps(state)) > MAX_STATE_BYTES:
+                return False
+        except (TypeError, ValueError):
+            return False
+        session.last_state = state
+        return True
 
     def sweep(self) -> list:
         """Drop sessions idle past the TTL. Returns the sessions removed."""
@@ -191,8 +225,16 @@ class ControlSessionManager:
         for s in dead:
             self._sessions.pop(s.id, None)
             self._by_client.pop(s.phone_client_id, None)
+            self._cmd_hits.pop(s.phone_client_id, None)
             for cid in list(s.controllers):
                 self._by_client.pop(cid, None)
+                self._cmd_hits.pop(cid, None)
+        # Rate-limit buckets outlive their session when the phone drops
+        # first, since the controllers are unmapped before they disconnect.
+        now2 = time.time()
+        for cid, hits in list(self._cmd_hits.items()):
+            if not hits or now2 - hits[-1] > CMD_WINDOW * 10:
+                self._cmd_hits.pop(cid, None)
         return dead
 
     def _sweep_tickets(self):

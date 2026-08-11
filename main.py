@@ -1054,6 +1054,13 @@ async def startup_room_cleanup():
                     print(f"[Cleanup] Destroyed zombie room {code} (no active host)")
             room_manager.cleanup_stale_disconnects()
 
+            # Remote-control sessions idle past their TTL. Without this the
+            # TTL is decorative and sessions accumulate for the life of the
+            # process — sweep() was dead code until it was called from here.
+            for sess in control_manager.sweep():
+                for ws in list(sess.controllers.values()):
+                    await ws_send(ws, {"type": "control_closed", "reason": "idle"})
+
     asyncio.create_task(_cleanup_loop())
 
 
@@ -4777,7 +4784,14 @@ async def destroy_room_after_grace(client_id: str, code: str, delay: int = 30):
 
 async def handle_control_create(client_id: str, websocket: WebSocket, msg: dict):
     """Phone offers itself for remote control and gets a pairing code."""
-    sess, secret = control_manager.create(client_id, websocket)
+    sess, secret, orphans = control_manager.create(client_id, websocket)
+    if sess is None:
+        await ws_send(websocket, {"type": "control_error", "code": "server_busy"})
+        return
+    # A previous session of this phone just ended. Its browser would
+    # otherwise sit on stale state believing it is still paired.
+    for ws in orphans:
+        await ws_send(ws, {"type": "control_closed", "reason": "replaced"})
     code = control_manager.mint_code(sess.id)
     await ws_send(websocket, {
         "type": "control_ready",
@@ -4809,13 +4823,20 @@ async def handle_control_state(client_id: str, msg: dict):
     if sess is None or sess.phone_client_id != client_id:
         return
     state = msg.get("state") or {}
-    control_manager.set_state(sess, state)
+    if not control_manager.set_state(sess, state):
+        await ws_send(sess.phone_ws, {"type": "control_error", "code": "bad_state"})
+        return
     for ws in list(sess.controllers.values()):
         await ws_send(ws, {"type": "control_state", "state": state})
 
 
 async def handle_control_join(client_id: str, websocket: WebSocket, msg: dict):
     """Browser redeems a pairing code and starts mirroring the phone."""
+    # Throttled: a wrong guess costs the guesser nothing, and hit probability
+    # scales with the number of live codes.
+    if not control_manager.allow_cmd(client_id):
+        await ws_send(websocket, {"type": "control_error", "code": "rate_limited"})
+        return
     sess = control_manager.redeem(msg.get("code", ""))
     if sess is None:
         await ws_send(websocket, {"type": "control_error", "code": "bad_code"})

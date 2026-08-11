@@ -32,6 +32,12 @@ class RoomMember:
     # host's. This secret replaces that proof. Additive for now: rejoin still
     # accepts the legacy path until enough installs send a secret.
     secret: str = ""
+    # Sticky record of "this member is/was the room's host". host_id is the
+    # only host record today, and cleanup_stale_disconnects sets it to None
+    # after 60s — without this a host reconnecting past that window comes
+    # back as a guest, because the secret path deliberately skips the
+    # legacy fallback that used to restore them.
+    was_host: bool = False
 
 
 @dataclass
@@ -179,7 +185,7 @@ class RoomManager:
     def create_room(self, host_id: str, websocket, host_name: str = "Unknown", password: str = None) -> RoomState:
         code = self.generate_code()
         member = RoomMember(client_id=host_id, websocket=websocket, name=host_name,
-                            secret=secrets.token_urlsafe(24))
+                            secret=secrets.token_urlsafe(24), was_host=True)
         room = RoomState(code=code, host_id=host_id, host_name=host_name, password=password, members={host_id: member})
         self.rooms[code] = room
         self._client_to_room[host_id] = code
@@ -297,8 +303,13 @@ class RoomManager:
         # legacy fallbacks entirely.
         if member_secret:
             for mid, m in list(room.members.items()):
-                if m.secret and secrets.compare_digest(m.secret, member_secret):
-                    was_host = (mid == room.host_id)
+                # Compare BYTES: compare_digest raises TypeError on a
+                # non-ASCII str, and member_secret is raw client input — an
+                # unhandled raise here tears down the whole socket.
+                if (m.secret and isinstance(member_secret, str)
+                        and secrets.compare_digest(m.secret.encode("utf-8"),
+                                                   member_secret.encode("utf-8"))):
+                    was_host = (mid == room.host_id) or (room.host_id is None and m.was_host)
                     carried_secret = m.secret
                     if mid != client_id:
                         room.members.pop(mid, None)
@@ -331,8 +342,14 @@ class RoomManager:
             if not was_host and room.host_id not in room.members:
                 was_host = True
 
-        # Remove stale member entry with old client_id if it still lingers in the room
-        if previous_client_id and previous_client_id in room.members:
+        # Remove stale member entry with old client_id if it still lingers.
+        # Gated on NOT having verified a secret: previous_client_id is raw
+        # client input and every member's client_id is broadcast in
+        # get_member_list, so an ungated eviction let any member throw the
+        # host out of the roster — which then gets the whole room destroyed
+        # by startup_room_cleanup's "host not in members" sweep. Method 0
+        # already removed the caller's own stale entry.
+        if not carried_secret and previous_client_id and previous_client_id in room.members:
             room.members.pop(previous_client_id)
             self._client_to_room.pop(previous_client_id, None)
 
@@ -344,7 +361,8 @@ class RoomManager:
         # reconnects; mint one for legacy clients so they get the safe path
         # from their next rejoin onward.
         member = RoomMember(client_id=client_id, websocket=websocket, name=name,
-                            secret=carried_secret or secrets.token_urlsafe(24))
+                            secret=carried_secret or secrets.token_urlsafe(24),
+                            was_host=was_host)
         room.members[client_id] = member
         self._client_to_room[client_id] = code.upper()
         room.peak_members = max(room.peak_members, len(room.members))
