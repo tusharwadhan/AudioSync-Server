@@ -3576,7 +3576,11 @@ async def handle_join_room(client_id: str, websocket: WebSocket, msg: dict):
         "members": room_manager.get_member_list(room),
         "role": role,
     }
-    state["memberSecret"] = room.members[client_id].secret
+    # Defensive: a KeyError here would break joining outright, whereas an
+    # absent secret merely falls back to the legacy rejoin path.
+    _m = room.members.get(client_id)
+    if _m:
+        state["memberSecret"] = _m.secret
     await ws_send(websocket, {"type": "room_joined", "state": state})
 
     # Notify others with updated member list
@@ -4807,7 +4811,11 @@ async def handle_rejoin_room(client_id: str, websocket: WebSocket, msg: dict):
         "members": room_manager.get_member_list(room),
         "role": role,
     }
-    state["memberSecret"] = room.members[client_id].secret
+    # Defensive: a KeyError here would break joining outright, whereas an
+    # absent secret merely falls back to the legacy rejoin path.
+    _m = room.members.get(client_id)
+    if _m:
+        state["memberSecret"] = _m.secret
     await ws_send(websocket, {"type": "room_joined", "state": state})
 
     # If this rejoin landed within the disconnect grace window, cancel the
