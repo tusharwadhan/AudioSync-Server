@@ -32,6 +32,10 @@ COPY models.py .
 COPY sync.py .
 # Social v1 — global lounge + presence + DMs (imported by main.py).
 COPY social.py .
+# Remote control — browser drives the phone (imported by main.py). Missing
+# this COPY is not a degraded feature, it is an ImportError at boot that
+# takes the whole API down, extraction included.
+COPY control_session.py .
 COPY alembic.ini .
 COPY alembic ./alembic
 RUN chmod +x start.sh

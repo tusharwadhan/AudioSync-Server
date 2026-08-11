@@ -28,6 +28,8 @@ import uuid
 import re
 from datetime import datetime, timezone
 from room_manager import RoomManager
+import control_session
+from control_session import control_manager
 from ytmusicapi import YTMusic
 from analytics_db import AnalyticsDB
 import firebase_admin
@@ -4766,6 +4768,96 @@ async def destroy_room_after_grace(client_id: str, code: str, delay: int = 30):
         print(f"[WS] Room {code} destroyed after host grace period expired")
 
 
+# ── Remote control ────────────────────────────────────────────────────
+#
+# A browser driving a phone. Kept out of RoomManager on purpose: a client_id
+# maps to exactly one room, so a control-session-as-room could not coexist
+# with the Listen Together room it is supposed to be able to drive.
+
+
+async def handle_control_create(client_id: str, websocket: WebSocket, msg: dict):
+    """Phone offers itself for remote control and gets a pairing code."""
+    sess, secret = control_manager.create(client_id, websocket)
+    code = control_manager.mint_code(sess.id)
+    await ws_send(websocket, {
+        "type": "control_ready",
+        "sessionId": sess.id,
+        # Persist this: client_id changes on every reconnect, so it is the
+        # only way back to the same session after a network blip.
+        "phoneSecret": secret,
+        "code": code,
+        "expiresIn": int(control_session.TICKET_TTL),
+    })
+
+
+async def handle_control_rejoin(client_id: str, websocket: WebSocket, msg: dict):
+    """Phone re-attaches to its session after a reconnect."""
+    sess = control_manager.rejoin(client_id, websocket, msg.get("phoneSecret", ""))
+    if sess is None:
+        await ws_send(websocket, {"type": "control_closed", "reason": "unknown_session"})
+        return
+    await ws_send(websocket, {"type": "control_ready", "sessionId": sess.id,
+                              "resumed": True})
+    # Controllers were watching a socket that just changed underneath them.
+    for ws in list(sess.controllers.values()):
+        await ws_send(ws, {"type": "control_phone_back"})
+
+
+async def handle_control_state(client_id: str, msg: dict):
+    """Phone pushes what it is playing; fan out to its controllers."""
+    sess = control_manager.for_client(client_id)
+    if sess is None or sess.phone_client_id != client_id:
+        return
+    state = msg.get("state") or {}
+    control_manager.set_state(sess, state)
+    for ws in list(sess.controllers.values()):
+        await ws_send(ws, {"type": "control_state", "state": state})
+
+
+async def handle_control_join(client_id: str, websocket: WebSocket, msg: dict):
+    """Browser redeems a pairing code and starts mirroring the phone."""
+    sess = control_manager.redeem(msg.get("code", ""))
+    if sess is None:
+        await ws_send(websocket, {"type": "control_error", "code": "bad_code"})
+        return
+    control_manager.attach_controller(sess.id, client_id, websocket)
+    await ws_send(websocket, {
+        "type": "control_joined",
+        "sessionId": sess.id,
+        "state": sess.last_state or {},
+    })
+    await ws_send(sess.phone_ws, {"type": "control_controller_joined"})
+
+
+async def handle_control_cmd(client_id: str, websocket: WebSocket, msg: dict):
+    """Browser command -> phone. Fire and forget.
+
+    Never await a reply from the phone here: only this receive loop can read
+    the phone's messages, so waiting on one inside it deadlocks the socket.
+    Same reason handle_next is dispatched via create_task.
+    """
+    sess = control_manager.for_client(client_id)
+    if sess is None or client_id not in sess.controllers:
+        await ws_send(websocket, {"type": "control_error", "code": "not_paired"})
+        return
+    if not control_manager.allow_cmd(client_id):
+        await ws_send(websocket, {"type": "control_error", "code": "rate_limited"})
+        return
+    await ws_send(sess.phone_ws, {
+        "type": "control_cmd",
+        "action": msg.get("action", ""),
+        "value": msg.get("value"),
+    })
+
+
+async def handle_control_disconnect(client_id: str):
+    """Either side dropped. A phone drop ends the session for everyone."""
+    ended, orphans = control_manager.end_for_client(client_id)
+    if ended is not None:
+        for ws in orphans:
+            await ws_send(ws, {"type": "control_closed", "reason": "phone_gone"})
+
+
 async def handle_rejoin_room(client_id: str, websocket: WebSocket, msg: dict):
     """Handle a client rejoining a room after disconnect."""
     code = msg.get("code", "").upper()
@@ -4950,6 +5042,24 @@ async def websocket_endpoint(websocket: WebSocket):
             elif msg_type == "kick_member":
                 await handle_kick_member(client_id, msg)
 
+            elif msg_type == "control_create":
+                await handle_control_create(client_id, websocket, msg)
+
+            elif msg_type == "control_rejoin":
+                await handle_control_rejoin(client_id, websocket, msg)
+
+            elif msg_type == "control_state":
+                await handle_control_state(client_id, msg)
+
+            elif msg_type == "control_join":
+                await handle_control_join(client_id, websocket, msg)
+
+            elif msg_type == "control_cmd":
+                await handle_control_cmd(client_id, websocket, msg)
+
+            elif msg_type == "control_end":
+                await handle_control_disconnect(client_id)
+
             elif msg_type == "rejoin_room":
                 await handle_rejoin_room(client_id, websocket, msg)
 
@@ -5069,10 +5179,12 @@ async def websocket_endpoint(websocket: WebSocket):
         analytics.log_event("ws_disconnect", client_id=client_id)
         await handle_disconnect(client_id)
         await social.handle_social_disconnect(client_id)
+        await handle_control_disconnect(client_id)
     except Exception as e:
         print(f"[WS] Error for {client_id[:8]}: {e}")
         analytics.log_event("ws_disconnect", client_id=client_id)
         await handle_disconnect(client_id)
+        await handle_control_disconnect(client_id)
         await social.handle_social_disconnect(client_id)
 
 
