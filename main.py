@@ -10,7 +10,7 @@ from fastapi import (
     UploadFile,
     File,
 )
-from fastapi.responses import HTMLResponse, JSONResponse
+from fastapi.responses import HTMLResponse, JSONResponse, FileResponse
 import tempfile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
@@ -44,6 +44,18 @@ from sync import router as sync_router
 import social
 
 app = FastAPI(title="SyncAura API")
+
+# Remote-control web page. Root-level on purpose: everything under
+# /api/v1 goes through api_key_middleware, and the page is public — putting
+# it there would force it to embed the API key that gates search,
+# extraction and rooms, i.e. publish it to anyone who views source.
+@app.get("/remote", include_in_schema=False)
+async def remote_page():
+    return FileResponse(
+        os.path.join(os.path.dirname(__file__), "static", "remote.html"),
+        media_type="text/html",
+    )
+
 
 # Serve release APKs from /releases directory
 os.makedirs(os.path.join(os.path.dirname(__file__), "releases"), exist_ok=True)
