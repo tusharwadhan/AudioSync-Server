@@ -8,3 +8,4 @@ analytics.db
 
 # YouTube cookies (contains auth tokens)
 cookies.txt
+compile.log
