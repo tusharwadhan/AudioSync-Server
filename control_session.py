@@ -83,7 +83,10 @@ class ControlSessionManager:
         """
         if len(self._sessions) >= MAX_SESSIONS:
             return None, None, []
-        _, orphans = self.end_for_client(phone_client_id)
+        # destroy, not park: parking left the old session in _sessions with
+        # the SAME phone_client_id, and its later sweep popped the reverse
+        # index entry that by then pointed at the NEW session.
+        _, orphans = self.destroy_for_client(phone_client_id)
         sid = secrets.token_urlsafe(12)
         sess = ControlSession(
             id=sid,
@@ -172,6 +175,28 @@ class ControlSessionManager:
 
     # ── teardown ──────────────────────────────────────────────────────
 
+    def destroy_for_client(self, client_id: str):
+        """Hard teardown: used for an explicit re-create or an explicit off.
+
+        Unlike end_for_client this does NOT hold a grace window, and it burns
+        any outstanding pairing codes — otherwise the previous code stays
+        redeemable and lands a browser on a session nobody is driving.
+        """
+        sess = self.for_client(client_id)
+        if sess is None:
+            return None, []
+        orphans = list(sess.controllers.values())
+        self._sessions.pop(sess.id, None)
+        self._by_client.pop(sess.phone_client_id, None)
+        self._cmd_hits.pop(sess.phone_client_id, None)
+        for cid in list(sess.controllers):
+            self._by_client.pop(cid, None)
+            self._cmd_hits.pop(cid, None)
+        for code, t in list(self._tickets.items()):
+            if t.session_id == sess.id:
+                self._tickets.pop(code, None)
+        return sess, orphans
+
     def end_for_client(self, client_id: str):
         """Handle either side dropping. Returns (ended_session, orphaned_ws).
 
@@ -232,11 +257,19 @@ class ControlSessionManager:
                 or (s.phone_gone_at and now - s.phone_gone_at > PHONE_GRACE)]
         for s in dead:
             self._sessions.pop(s.id, None)
-            self._by_client.pop(s.phone_client_id, None)
-            self._cmd_hits.pop(s.phone_client_id, None)
+            # Guarded: a newer session may already own this client_id, and
+            # popping it blind unmapped the LIVE session — the browser froze
+            # on its last state a couple of minutes after pairing.
+            if self._by_client.get(s.phone_client_id) == s.id:
+                self._by_client.pop(s.phone_client_id, None)
+                self._cmd_hits.pop(s.phone_client_id, None)
             for cid in list(s.controllers):
-                self._by_client.pop(cid, None)
-                self._cmd_hits.pop(cid, None)
+                if self._by_client.get(cid) == s.id:
+                    self._by_client.pop(cid, None)
+                    self._cmd_hits.pop(cid, None)
+            for code, t in list(self._tickets.items()):
+                if t.session_id == s.id:
+                    self._tickets.pop(code, None)
         # Rate-limit buckets outlive their session when the phone drops
         # first, since the controllers are unmapped before they disconnect.
         now2 = time.time()

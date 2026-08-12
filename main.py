@@ -4892,6 +4892,18 @@ async def handle_control_cmd(client_id: str, websocket: WebSocket, msg: dict):
     })
 
 
+async def handle_control_end(client_id: str):
+    """User switched the remote off. Revoke immediately.
+
+    Not the grace path: that exists for a dropped socket, and using it here
+    left an attached browser driving a session the user believed was closed
+    until the idle sweep noticed, up to two minutes later.
+    """
+    sess, orphans = control_manager.destroy_for_client(client_id)
+    for ws in orphans:
+        await ws_send(ws, {"type": "control_closed", "reason": "ended"})
+
+
 async def handle_control_disconnect(client_id: str):
     """Either side dropped. A phone drop ends the session for everyone."""
     was_phone = control_manager.is_phone(client_id)
@@ -5111,7 +5123,7 @@ async def websocket_endpoint(websocket: WebSocket):
                 await handle_control_cmd(client_id, websocket, msg)
 
             elif msg_type == "control_end":
-                await handle_control_disconnect(client_id)
+                await handle_control_end(client_id)
 
             elif msg_type == "rejoin_room":
                 await handle_rejoin_room(client_id, websocket, msg)
