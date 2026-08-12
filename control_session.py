@@ -33,6 +33,11 @@ CMD_MAX_IN_WINDOW = 40     # generous for a human, closes the firehose
 # ws_max_size) OOMs the whole API - extraction, updates, social included.
 MAX_SESSIONS = 500
 MAX_STATE_BYTES = 8 * 1024
+# A phone dropping its socket is routine - backoff, FCM wake, Wi-Fi to
+# cellular. Ending the session immediately made control_rejoin unreachable:
+# by the time the phone came back there was nothing to rejoin, so the remote
+# bricked on the first blip and never re-paired.
+PHONE_GRACE = 90.0
 
 
 @dataclass
@@ -46,6 +51,9 @@ class ControlSession:
     last_state: Optional[dict] = None
     created_at: float = field(default_factory=time.time)
     last_seen: float = field(default_factory=time.time)
+    # Set when the phone's socket drops; cleared on rejoin. While set, the
+    # session is held open for PHONE_GRACE seconds.
+    phone_gone_at: float = 0.0
 
 
 @dataclass
@@ -108,6 +116,7 @@ class ControlSessionManager:
                 self._by_client.pop(sess.phone_client_id, None)
                 sess.phone_client_id = phone_client_id
                 sess.phone_ws = phone_ws
+                sess.phone_gone_at = 0.0
                 sess.last_seen = time.time()
                 self._by_client[phone_client_id] = sess.id
                 return sess
@@ -177,15 +186,13 @@ class ControlSessionManager:
             return None, []
 
         if sess.phone_client_id == client_id:
-            orphans = list(sess.controllers.values())
-            for cid in list(sess.controllers):
-                self._by_client.pop(cid, None)
-            self._sessions.pop(sid, None)
-            for code, t in list(self._tickets.items()):
-                if t.session_id == sid:
-                    self._tickets.pop(code, None)
+            # Hold the session for the grace window so a reconnecting phone
+            # can rejoin it. Controllers are told it went quiet, not that the
+            # session is gone.
+            sess.phone_ws = None
+            sess.phone_gone_at = time.time()
             self._cmd_hits.pop(client_id, None)
-            return sess, orphans
+            return None, list(sess.controllers.values())
 
         sess.controllers.pop(client_id, None)
         self._cmd_hits.pop(client_id, None)
@@ -221,7 +228,8 @@ class ControlSessionManager:
         self._sweep_tickets()
         now = time.time()
         dead = [s for s in self._sessions.values()
-                if now - s.last_seen > SESSION_IDLE_TTL]
+                if (now - s.last_seen > SESSION_IDLE_TTL)
+                or (s.phone_gone_at and now - s.phone_gone_at > PHONE_GRACE)]
         for s in dead:
             self._sessions.pop(s.id, None)
             self._by_client.pop(s.phone_client_id, None)

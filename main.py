@@ -1072,6 +1072,12 @@ async def startup_room_cleanup():
             for sess in control_manager.sweep():
                 for ws in list(sess.controllers.values()):
                     await ws_send(ws, {"type": "control_closed", "reason": "idle"})
+                # The phone believed it still had a session and would keep
+                # pushing state into nothing, holding a secret that can never
+                # rejoin.
+                if sess.phone_ws is not None:
+                    await ws_send(sess.phone_ws,
+                                  {"type": "control_closed", "reason": "idle"})
 
     asyncio.create_task(_cleanup_loop())
 
@@ -4859,7 +4865,10 @@ async def handle_control_join(client_id: str, websocket: WebSocket, msg: dict):
         "sessionId": sess.id,
         "state": sess.last_state or {},
     })
-    await ws_send(sess.phone_ws, {"type": "control_controller_joined"})
+    await ws_send(sess.phone_ws, {
+        "type": "control_controller_joined",
+        "controllers": len(sess.controllers),
+    })
 
 
 async def handle_control_cmd(client_id: str, websocket: WebSocket, msg: dict):
@@ -4885,10 +4894,21 @@ async def handle_control_cmd(client_id: str, websocket: WebSocket, msg: dict):
 
 async def handle_control_disconnect(client_id: str):
     """Either side dropped. A phone drop ends the session for everyone."""
+    was_phone = control_manager.is_phone(client_id)
+    sess_before = control_manager.for_client(client_id)
     ended, orphans = control_manager.end_for_client(client_id)
-    if ended is not None:
+    if was_phone:
+        # Held open for the grace window so the phone can rejoin. Tell the
+        # browsers it went quiet rather than that the session is over.
         for ws in orphans:
-            await ws_send(ws, {"type": "control_closed", "reason": "phone_gone"})
+            await ws_send(ws, {"type": "control_phone_quiet"})
+    elif sess_before is not None and sess_before.phone_ws is not None:
+        # A controller left. Without this the phone's heartbeat runs forever,
+        # since it only stops when told the last controller went away.
+        await ws_send(sess_before.phone_ws, {
+            "type": "control_controller_left",
+            "controllers": len(sess_before.controllers),
+        })
 
 
 async def handle_rejoin_room(client_id: str, websocket: WebSocket, msg: dict):
