@@ -288,6 +288,12 @@
   $('vol').addEventListener('change', function(){ cmd('volume', this.value / 100); });
   $('unpair').addEventListener('click', function(){
     paired = false;
+    // Actually detach. Hiding the UI locally left the socket open and the
+    // server still holding this controller, so the PHONE went on saying
+    // "Connected" to a browser that had walked away. Closing makes the
+    // server's disconnect path detach us and tell the phone; onclose then
+    // reconnects for the next pairing.
+    if (ws && ws.readyState === 1) { try { ws.close(); } catch (e) {} }
     $('playerView').classList.add('hide');
     $('pairView').classList.remove('hide');
     $('code').value = ''; $('pairBtn').disabled = true; $('pairErr').textContent = '';
