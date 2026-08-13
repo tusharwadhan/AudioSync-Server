@@ -135,6 +135,10 @@
              + location.host + '/api/v1/ws';
 
   var ws = null, paired = false, st = {}, drift = null, retry = 0;
+  // When we last flipped play/pause locally. A state push already in flight
+  // carries the value from BEFORE the command, and letting it win made the
+  // button flip back and then forward again - one click, three transitions.
+  var optimisticUntil = 0;
 
   function fmt(s){
     s = Math.max(0, Math.floor(s || 0));
@@ -197,7 +201,12 @@
         setStatus('connected', 'on');
 
       } else if (m.type === 'control_state') {
-        st = m.state || {}; drift = Date.now(); render();
+        var incoming = m.state || {};
+        // Keep our own play-state for a moment; take everything else.
+        if (Date.now() < optimisticUntil && 'isPlaying' in incoming) {
+          incoming.isPlaying = st.isPlaying;
+        }
+        st = incoming; drift = Date.now(); render();
         setStatus('connected', 'on');
 
       } else if (m.type === 'control_error') {
@@ -207,6 +216,10 @@
           fail('Too many attempts. Wait a moment and try again.');
         } else if (m.code === 'not_paired') {
           setStatus('phone disconnected', 'warn');
+        } else if (m.code === 'guest_in_room') {
+          setStatus("host controls playback", 'warn');
+        } else if (m.code === 'player_not_ready') {
+          setStatus('nothing playing on the phone', 'warn');
         }
 
       } else if (m.type === 'control_closed') {
@@ -218,6 +231,11 @@
           $('pairErr').textContent = 'The phone ended the session. Pair again to reconnect.';
         }, 1200);
 
+      } else if (m.type === 'control_phone_quiet') {
+        // Grace window: the phone's socket dropped but the session is held
+        // open for it to come back. Saying "connected" here made every
+        // command look like it silently did nothing.
+        setStatus('phone reconnecting…', 'warn');
       } else if (m.type === 'control_phone_back') {
         setStatus('connected', 'on');
       }
@@ -260,7 +278,9 @@
   $('play').addEventListener('click', function(){
     // Optimistic: flip locally so the button feels instant, then let the
     // phone's next state push confirm or correct it.
-    st.isPlaying = !st.isPlaying; render();
+    st.isPlaying = !st.isPlaying;
+    optimisticUntil = Date.now() + 1200;
+    render();
     cmd(st.isPlaying ? 'play' : 'pause');
   });
   $('next').addEventListener('click', function(){ cmd('next'); });

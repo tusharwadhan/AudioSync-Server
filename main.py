@@ -4892,6 +4892,16 @@ async def handle_control_cmd(client_id: str, websocket: WebSocket, msg: dict):
     })
 
 
+async def handle_control_phone_error(client_id: str, msg: dict):
+    """Relay a refusal from the phone to whoever asked for it."""
+    sess = control_manager.for_client(client_id)
+    if sess is None or sess.phone_client_id != client_id:
+        return
+    code = str(msg.get("code", ""))[:64]
+    for ws in list(sess.controllers.values()):
+        await ws_send(ws, {"type": "control_error", "code": code})
+
+
 async def handle_control_end(client_id: str):
     """User switched the remote off. Revoke immediately.
 
@@ -5124,6 +5134,14 @@ async def websocket_endpoint(websocket: WebSocket):
 
             elif msg_type == "control_end":
                 await handle_control_end(client_id)
+
+            elif msg_type == "control_error":
+                # Phone-originated errors ("host controls playback",
+                # "nothing playing") had nowhere to go: they fell through to
+                # the unknown-type branch, which replies to the PHONE. So a
+                # command the phone refused looked, in the browser, exactly
+                # like a command that worked.
+                await handle_control_phone_error(client_id, msg)
 
             elif msg_type == "rejoin_room":
                 await handle_rejoin_room(client_id, websocket, msg)
