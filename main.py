@@ -4934,6 +4934,32 @@ async def handle_control_end(client_id: str):
         await ws_send(ws, {"type": "control_closed", "reason": "ended"})
 
 
+async def _cleanup_disconnect(client_id: str):
+    """Run every teardown for a dropped socket, independently.
+
+    These used to be three bare awaits in a row, in two different orders in
+    the two except blocks. A browser controller is an odd client — it never
+    joins a room and never registers socially — so if either of the earlier
+    handlers raised on that unusual state, the control teardown never ran: the
+    controller stayed in the session and the phone was never told it left.
+    Measured on device: 12 control_controller_joined received, 0
+    control_controller_left, which is why the phone sat on "Connected" forever
+    after a browser refresh.
+
+    Control goes first because it is the one with a user-visible symptom, and
+    each is isolated so no handler can suppress another again.
+    """
+    for name, fn in (
+        ("control", handle_control_disconnect),
+        ("room", handle_disconnect),
+        ("social", social.handle_social_disconnect),
+    ):
+        try:
+            await fn(client_id)
+        except Exception as e:
+            print(f"[WS] {name} teardown failed for {client_id[:8]}: {e}")
+
+
 async def handle_control_disconnect(client_id: str):
     """Either side dropped. A phone drop ends the session for everyone."""
     was_phone = control_manager.is_phone(client_id)
@@ -5283,15 +5309,11 @@ async def websocket_endpoint(websocket: WebSocket):
     except WebSocketDisconnect:
         print(f"[WS] Client disconnected: {client_id[:8]}")
         analytics.log_event("ws_disconnect", client_id=client_id)
-        await handle_disconnect(client_id)
-        await social.handle_social_disconnect(client_id)
-        await handle_control_disconnect(client_id)
+        await _cleanup_disconnect(client_id)
     except Exception as e:
         print(f"[WS] Error for {client_id[:8]}: {e}")
         analytics.log_event("ws_disconnect", client_id=client_id)
-        await handle_disconnect(client_id)
-        await handle_control_disconnect(client_id)
-        await social.handle_social_disconnect(client_id)
+        await _cleanup_disconnect(client_id)
 
 
 # ── Song Identification via Lyrics ──
