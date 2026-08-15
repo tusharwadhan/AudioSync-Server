@@ -40,7 +40,10 @@
   .np{display:flex;gap:14px;align-items:center;margin-bottom:18px}
   .art{width:62px;height:62px;border-radius:12px;flex:0 0 auto;
     background:linear-gradient(140deg,#3a2b57,#1d2233);display:grid;place-items:center;
-    font-size:22px}
+    font-size:22px;
+    /* After the shorthand, not before — `background:` resets both of these,
+       so declaring them first meant the artwork never actually rendered. */
+    background-size:cover;background-position:center}
   .meta{min-width:0;flex:1}
   .t{font-size:15px;font-weight:700;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
   .a{font-size:12.5px;color:var(--accent2);margin-top:3px;
@@ -89,6 +92,10 @@
   .qa{font-size:11px;opacity:.5;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
   .qbadge{font-size:10px;opacity:.45;border:1px solid var(--line);border-radius:5px;
     padding:2px 5px;flex:0 0 auto}
+  .qadd{background:none;border:1px solid var(--line);color:inherit;border-radius:6px;
+    width:26px;height:26px;font-size:15px;line-height:1;cursor:pointer;flex:0 0 auto;opacity:.6}
+  .qadd:hover{opacity:1;border-color:#666}
+  .qrow.flash{background:#16241a}
   .empty{font-size:12px;opacity:.4;padding:10px 4px}
   .foot{margin-top:20px;padding-top:15px;border-top:1px solid var(--line);
     font-size:12px;color:var(--dim);display:flex;justify-content:space-between;
@@ -198,7 +205,7 @@
     return 'https://i.ytimg.com/vi/' + videoId + '/mqdefault.jpg';
   }
 
-  function rowHtml(item, badge){
+  function rowHtml(item, badge, withQueueBtn){
     return '<div class="qrow" data-id="' + item.videoId + '">' +
              '<img loading="lazy" src="' + thumb(item.videoId) + '" alt="">' +
              '<div class="qmeta">' +
@@ -206,7 +213,18 @@
                '<div class="qa">' + esc(item.artist || '') + '</div>' +
              '</div>' +
              (badge ? '<span class="qbadge">' + badge + '</span>' : '') +
+             // Separate control rather than a row mode: tapping a result
+             // should play it, and queuing is the deliberate second choice.
+             (withQueueBtn ? '<button class="qadd" title="Add to queue">+</button>' : '') +
            '</div>';
+  }
+
+  // Momentary confirmation. Queuing produces no visible change up here — the
+  // row stays put and the queue list is below the fold — so without this the
+  // click looks like it did nothing.
+  function flash(el){
+    el.classList.add('flash');
+    setTimeout(function(){ el.classList.remove('flash'); }, 600);
   }
 
   function esc(s){
@@ -222,7 +240,7 @@
       return;
     }
     $('queue').innerHTML = list.map(function(it){
-      return rowHtml(it, it.queued ? 'queued' : '');
+      return rowHtml(it, it.queued ? 'queued' : '', false);
     }).join('');
   }
 
@@ -231,12 +249,21 @@
       $('results').innerHTML = '<div class="empty">No results</div>';
       return;
     }
-    $('results').innerHTML = results.map(function(it){ return rowHtml(it, ''); }).join('');
+    $('results').innerHTML = results.map(function(it){ return rowHtml(it, '', true); }).join('');
   }
 
   function render(){
     $('title').textContent  = st.title  || '—';
     $('artist').textContent = st.artist || '';
+    // Built from the id, not sent: the phone holds artwork as a bitmap it
+    // cannot forward, and a URL would eat the state budget.
+    if (st.videoId) {
+      $('art').style.backgroundImage = 'url(' + thumb(st.videoId) + ')';
+      $('art').textContent = '';
+    } else {
+      $('art').style.backgroundImage = '';
+      $('art').textContent = '♪';
+    }
     renderQueue();
     $('dur').textContent    = fmt(st.duration);
     $('playIcon').innerHTML = st.isPlaying
@@ -401,6 +428,11 @@
   $('results').addEventListener('click', function(e){
     var row = e.target.closest('.qrow');
     if (!row) return;
+    var hitQ = lastResults.filter(function(r){ return r.videoId === row.dataset.id; })[0];
+    if (e.target.closest('.qadd')) {
+      if (hitQ) { cmd('queue_item', hitQ); flash(row, 'queued'); }
+      return;
+    }
     // Send the metadata with it: this song is not in any queue yet, so the
     // phone has no other way to know its title or artist.
     var hit = lastResults.filter(function(r){ return r.videoId === row.dataset.id; })[0];
