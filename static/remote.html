@@ -70,6 +70,26 @@
   input[type=range]::-moz-range-thumb{width:14px;height:14px;border:0;border-radius:50%;
     background:#fff;cursor:pointer}
 
+  .search{display:flex;align-items:center;gap:8px;margin-top:22px}
+  .search input{flex:1;background:#111;border:1px solid var(--line);color:inherit;
+    border-radius:9px;padding:9px 11px;font:inherit;outline:none}
+  .search input:focus{border-color:#555}
+  .lhead{margin:20px 0 8px;font-size:12px;letter-spacing:.08em;text-transform:uppercase;
+    opacity:.55}
+  /* Capped so a long queue scrolls inside its own box instead of pushing the
+     transport controls off-screen — the controls are the reason the page exists. */
+  .list{max-height:300px;overflow-y:auto;overflow-x:hidden}
+  .qrow{display:flex;align-items:center;gap:10px;padding:7px 4px;border-radius:8px;
+    cursor:pointer}
+  .qrow:hover{background:#141414}
+  .qrow img{width:44px;height:44px;object-fit:cover;border-radius:6px;flex:0 0 auto;
+    background:#111}
+  .qmeta{flex:1;min-width:0}
+  .qt{font-size:13px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+  .qa{font-size:11px;opacity:.5;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+  .qbadge{font-size:10px;opacity:.45;border:1px solid var(--line);border-radius:5px;
+    padding:2px 5px;flex:0 0 auto}
+  .empty{font-size:12px;opacity:.4;padding:10px 4px}
   .foot{margin-top:20px;padding-top:15px;border-top:1px solid var(--line);
     font-size:12px;color:var(--dim);display:flex;justify-content:space-between;
     align-items:center}
@@ -117,6 +137,15 @@
       <input type="range" id="vol" min="0" max="100" value="70" style="flex:1">
     </div>
 
+    <div class="search">
+      <input type="search" id="q" placeholder="Search for a song…" autocomplete="off">
+      <button class="link" id="qclear">Clear</button>
+    </div>
+    <div id="results" class="list hide"></div>
+
+    <div class="lhead" id="qhead">Up next</div>
+    <div id="queue" class="list"></div>
+
     <div class="foot">
       <span><span class="dot" id="dot"></span><span id="status">connecting…</span></span>
       <button class="link" id="unpair">Disconnect</button>
@@ -135,6 +164,9 @@
              + location.host + '/api/v1/ws';
 
   var ws = null, paired = false, st = {}, drift = null, retry = 0;
+  // Held so a click on a result can send the metadata back: a searched song is
+  // in no queue yet, so the phone has no other source for its title/artist.
+  var lastResults = [];
   // When we last flipped play/pause locally. A state push already in flight
   // carries the value from BEFORE the command, and letting it win made the
   // button flip back and then forward again - one click, three transitions.
@@ -158,9 +190,54 @@
     send({type:'control_cmd', action:action, value:(value===undefined?null:value)});
   }
 
+  // Thumbnails are rebuilt here rather than sent. The phone's state push has a
+  // hard 8KB ceiling on the server and an oversized push is rejected whole —
+  // which would blank the remote, not just the list — so ~110 bytes of URL per
+  // row is not worth spending when the id determines it.
+  function thumb(videoId){
+    return 'https://i.ytimg.com/vi/' + videoId + '/mqdefault.jpg';
+  }
+
+  function rowHtml(item, badge){
+    return '<div class="qrow" data-id="' + item.videoId + '">' +
+             '<img loading="lazy" src="' + thumb(item.videoId) + '" alt="">' +
+             '<div class="qmeta">' +
+               '<div class="qt">' + esc(item.title || '') + '</div>' +
+               '<div class="qa">' + esc(item.artist || '') + '</div>' +
+             '</div>' +
+             (badge ? '<span class="qbadge">' + badge + '</span>' : '') +
+           '</div>';
+  }
+
+  function esc(s){
+    return String(s).replace(/[&<>"']/g, function(c){
+      return {'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c];
+    });
+  }
+
+  function renderQueue(){
+    var list = st.upNext || [];
+    if (!list.length) {
+      $('queue').innerHTML = '<div class="empty">Nothing queued</div>';
+      return;
+    }
+    $('queue').innerHTML = list.map(function(it){
+      return rowHtml(it, it.queued ? 'queued' : '');
+    }).join('');
+  }
+
+  function renderResults(results){
+    if (!results.length) {
+      $('results').innerHTML = '<div class="empty">No results</div>';
+      return;
+    }
+    $('results').innerHTML = results.map(function(it){ return rowHtml(it, ''); }).join('');
+  }
+
   function render(){
     $('title').textContent  = st.title  || '—';
     $('artist').textContent = st.artist || '';
+    renderQueue();
     $('dur').textContent    = fmt(st.duration);
     $('playIcon').innerHTML = st.isPlaying
       ? '<path d="M6 5h4v14H6zm8 0h4v14h-4z"/>'
@@ -199,6 +276,13 @@
         $('playerView').classList.remove('hide');
         st = m.state || {}; drift = Date.now(); render();
         setStatus('connected', 'on');
+
+      } else if (m.type === 'control_search') {
+        lastResults = m.results || [];
+        renderResults(lastResults);
+        $('results').classList.remove('hide');
+        $('qhead').classList.add('hide');
+        $('queue').classList.add('hide');
 
       } else if (m.type === 'control_state') {
         var incoming = m.state || {};
@@ -285,6 +369,43 @@
   });
   $('next').addEventListener('click', function(){ cmd('next'); });
   $('prev').addEventListener('click', function(){ cmd('previous'); });
+
+  // Debounced: every keystroke would otherwise be a round-trip to the phone
+  // and a search on the server, and the browser's commands are rate-limited —
+  // typing fast would spend the budget and get the real query throttled.
+  var searchTimer = null;
+  $('q').addEventListener('input', function(){
+    var q = this.value.trim();
+    clearTimeout(searchTimer);
+    if (!q) { showQueue(); return; }
+    searchTimer = setTimeout(function(){ cmd('search', q); }, 350);
+  });
+  $('q').addEventListener('keydown', function(e){
+    if (e.key === 'Enter') { clearTimeout(searchTimer); cmd('search', this.value.trim()); }
+  });
+  $('qclear').addEventListener('click', function(){ $('q').value = ''; showQueue(); });
+
+  function showQueue(){
+    lastResults = [];
+    $('results').classList.add('hide');
+    $('qhead').classList.remove('hide');
+    $('queue').classList.remove('hide');
+  }
+
+  // One listener per list rather than one per row: rows are replaced on every
+  // state push, and per-row handlers would be re-bound several times a second.
+  $('queue').addEventListener('click', function(e){
+    var row = e.target.closest('.qrow');
+    if (row) cmd('play_item', row.dataset.id);
+  });
+  $('results').addEventListener('click', function(e){
+    var row = e.target.closest('.qrow');
+    if (!row) return;
+    // Send the metadata with it: this song is not in any queue yet, so the
+    // phone has no other way to know its title or artist.
+    var hit = lastResults.filter(function(r){ return r.videoId === row.dataset.id; })[0];
+    if (hit) cmd('play_search', hit);
+  });
   $('vol').addEventListener('change', function(){ cmd('volume', this.value / 100); });
   $('unpair').addEventListener('click', function(){
     paired = false;

@@ -4848,6 +4848,26 @@ async def handle_control_state(client_id: str, msg: dict):
         await ws_send(ws, {"type": "control_state", "state": state})
 
 
+async def handle_control_search(client_id: str, msg: dict):
+    """Phone returns search results; fan out to its controllers.
+
+    Deliberately NOT stored on the session, unlike control_state: results are a
+    reply to one browser's query, not a property of what the phone is playing.
+    Persisting them would mean a browser that joins later gets handed a stale
+    result list it never asked for.
+    """
+    sess = control_manager.for_client(client_id)
+    if sess is None or sess.phone_client_id != client_id:
+        return
+    payload = {
+        "type": "control_search",
+        "query": msg.get("query", ""),
+        "results": msg.get("results") or [],
+    }
+    for ws in list(sess.controllers.values()):
+        await ws_send(ws, payload)
+
+
 async def handle_control_join(client_id: str, websocket: WebSocket, msg: dict):
     """Browser redeems a pairing code and starts mirroring the phone."""
     # Throttled: a wrong guess costs the guesser nothing, and hit probability
@@ -5125,6 +5145,9 @@ async def websocket_endpoint(websocket: WebSocket):
 
             elif msg_type == "control_state":
                 await handle_control_state(client_id, msg)
+
+            elif msg_type == "control_search":
+                await handle_control_search(client_id, msg)
 
             elif msg_type == "control_join":
                 await handle_control_join(client_id, websocket, msg)
