@@ -4802,7 +4802,13 @@ async def destroy_room_after_grace(client_id: str, code: str, delay: int = 30):
 
 async def handle_control_create(client_id: str, websocket: WebSocket, msg: dict):
     """Phone offers itself for remote control and gets a pairing code."""
-    sess, secret, orphans = control_manager.create(client_id, websocket)
+    # owner_uid has existed on ControlSession since it was written but was never
+    # passed, so it was always None. It is populated here when the phone sent
+    # ws_auth — still None for a signed-out phone or an older build, so nothing
+    # may treat its presence as guaranteed.
+    sess, secret, orphans = control_manager.create(
+        client_id, websocket, owner_uid=uid_for_ws(client_id)
+    )
     if sess is None:
         await ws_send(websocket, {"type": "control_error", "code": "server_busy"})
         return
@@ -4934,6 +4940,71 @@ async def handle_control_end(client_id: str):
         await ws_send(ws, {"type": "control_closed", "reason": "ended"})
 
 
+# ── /ws identity ────────────────────────────────────────────────────────────
+#
+# `/ws` accepts anyone and mints a random client_id, so until now nothing on it
+# had an account behind it. Rooms are fine that way — they are code-based and
+# guests are often signed out — but the remote-control session has no idea whose
+# phone it is, which is why ControlSession.owner_uid has always been None.
+#
+# The social socket already solves this with `social_subscribe {idToken}`. This
+# is the same handshake for the main socket, because the phone opens TWO
+# separate connections to /ws (WebSocketManager for rooms + control,
+# SocialWebSocketManager for social) and identity established on one says
+# nothing about the other.
+#
+# Deliberately OPTIONAL. Nothing requires it yet: older app builds never send
+# it, and signed-out users still need rooms. It only makes identity available
+# where it wasn't — anything that starts *depending* on it must handle None.
+_ws_uids: dict[str, str] = {}
+
+
+def uid_for_ws(client_id: str) -> str | None:
+    """Verified Firebase uid for a main-socket client, if it authenticated."""
+    return _ws_uids.get(client_id)
+
+
+async def handle_ws_auth(client_id: str, websocket: WebSocket, msg: dict):
+    """`ws_auth {idToken}` — attach a verified account to this connection."""
+    token = msg.get("idToken") or msg.get("id_token") or ""
+    if not isinstance(token, str) or not token:
+        await ws_send(websocket, {"type": "ws_auth_error", "code": "auth_missing"})
+        return
+    decoded = await social._verify_id_token(token)
+    uid = (decoded or {}).get("uid") or (decoded or {}).get("user_id")
+    if not uid:
+        await ws_send(websocket, {"type": "ws_auth_error", "code": "auth_invalid"})
+        return
+    _ws_uids[client_id] = uid
+    # Backfill a session that already exists. control_create is sent
+    # synchronously off the socket's reader thread while ws_auth needs a
+    # dispatcher hop and a Firebase token fetch, so control_create usually wins
+    # the race — and always wins it on a cold token. Without this the session
+    # created microseconds earlier keeps owner_uid = None for its entire life:
+    # handle_control_rejoin never sets it either, so no reconnect repairs it.
+    # Doing it here makes the handshake order-independent rather than relying on
+    # the client to sequence two messages correctly.
+    sess = control_manager.for_client(client_id)
+    if sess is not None and sess.phone_client_id == client_id and sess.owner_uid is None:
+        sess.owner_uid = uid
+    await ws_send(websocket, {"type": "ws_auth_ok"})
+
+
+async def handle_ws_unauth(client_id: str, websocket: WebSocket):
+    """`ws_unauth` — drop this connection's identity, on sign-out.
+
+    Without it the socket keeps asserting the signed-out account for as long as
+    it lives, and this one is deliberately long-lived (wake locks, FCM keepalive,
+    a 6h idle TTL). The server would go on believing a signed-out phone — or the
+    next person to sign in on it — is the previous user.
+    """
+    _ws_uids.pop(client_id, None)
+    sess = control_manager.for_client(client_id)
+    if sess is not None and sess.phone_client_id == client_id:
+        sess.owner_uid = None
+    await ws_send(websocket, {"type": "ws_auth_cleared"})
+
+
 async def _cleanup_disconnect(client_id: str):
     """Run every teardown for a dropped socket, independently.
 
@@ -4949,6 +5020,7 @@ async def _cleanup_disconnect(client_id: str):
     Control goes first because it is the one with a user-visible symptom, and
     each is isolated so no handler can suppress another again.
     """
+    _ws_uids.pop(client_id, None)
     for name, fn in (
         ("control", handle_control_disconnect),
         ("room", handle_disconnect),
@@ -5169,6 +5241,12 @@ async def websocket_endpoint(websocket: WebSocket):
             elif msg_type == "control_rejoin":
                 await handle_control_rejoin(client_id, websocket, msg)
 
+            elif msg_type == "ws_auth":
+                await handle_ws_auth(client_id, websocket, msg)
+
+            elif msg_type == "ws_unauth":
+                await handle_ws_unauth(client_id, websocket)
+
             elif msg_type == "control_state":
                 await handle_control_state(client_id, msg)
 
@@ -5314,6 +5392,12 @@ async def websocket_endpoint(websocket: WebSocket):
         print(f"[WS] Error for {client_id[:8]}: {e}")
         analytics.log_event("ws_disconnect", client_id=client_id)
         await _cleanup_disconnect(client_id)
+    finally:
+        # Neither except catches asyncio.CancelledError — it is a BaseException
+        # since 3.8 — so a cancelled receive loop would leave this entry behind
+        # for the life of the process. Every other map here has a sweeper;
+        # this one does not, so a leak would be permanent.
+        _ws_uids.pop(client_id, None)
 
 
 # ── Song Identification via Lyrics ──
