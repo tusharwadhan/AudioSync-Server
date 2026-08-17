@@ -218,10 +218,10 @@ class RoomListResponse(BaseModel):
 
 # App update configuration - modify these values to control updates
 APP_UPDATE_CONFIG = {
-    "latestVersion": "5.17.20",
-    "latestVersionCode": 75,
-    "apkUrl": "https://raw.githubusercontent.com/tusharwadhan/AudioSync-Server/tushar/releases/syncaura-5.17.20.apk",
-    "releaseNotes": "A rebuilt player header. The top of the player now tells you what you are actually listening to - the playlist you started from - instead of just saying Now Playing. Save, Add to playlist and Share moved into a labelled menu that opens inside the bar, and the sleep timer sits on the left with its presets one tap away, including Stop at a time. The bar itself doubles as a meter: it drains as your sleep timer counts down and fills as a song downloads, with the exact numbers alongside. Downloads can now be cancelled mid-way, and a song you saved yourself is marked in blue while one kept by auto-backup stays white. Songs that will not play also explain why now - not available in your region, removed from YouTube, needs a paid account - and SyncAura skips past them instead of stopping the queue.",
+    "latestVersion": "5.17.21",
+    "latestVersionCode": 76,
+    "apkUrl": "https://raw.githubusercontent.com/tusharwadhan/AudioSync-Server/tushar/releases/syncaura-5.17.21.apk",
+    "releaseNotes": "Playback and downloads. Songs you already have now play straight from your device when the queue moves on, instead of being streamed again. Downloads that failed once will retry instead of staying stuck forever, half-finished files repair themselves, and a song no longer gets skipped when a track ends. The web remote gains a queue you can tap, search, and artwork.",
     # 5.15.0 → 5.15.1 is a patch-level bump → the client classifier
     # routes this to the Minor tier (quiet card in Settings, red dot
     # on the home gear). `mandatoryBelow` is effectively ignored for
