@@ -4802,6 +4802,21 @@ async def destroy_room_after_grace(client_id: str, code: str, delay: int = 30):
 
 async def handle_control_create(client_id: str, websocket: WebSocket, msg: dict):
     """Phone offers itself for remote control and gets a pairing code."""
+    # Refuse if this client is already an attached CONTROLLER of someone else's
+    # session. create() calls destroy_for_client(), which resolves the caller
+    # through _by_client -- and for a controller that resolves to the PHONE'S
+    # session, tearing it down whole. The phone is never told: destroy_for_client
+    # returns only sess.controllers as orphans, so the loop below cannot reach it.
+    # It keeps heartbeating state into a dead session while RemoteActivity still
+    # reads "Connected", recoverable only by toggling the remote off.
+    #
+    # Reachable by anyone the user has handed a pairing code to -- not by any
+    # browser, since an unattached one has no _by_client entry and would simply
+    # get its own new session.
+    existing = control_manager.for_client(client_id)
+    if existing is not None and existing.phone_client_id != client_id:
+        await ws_send(websocket, {"type": "control_error", "code": "already_controlling"})
+        return
     # owner_uid has existed on ControlSession since it was written but was never
     # passed, so it was always None. It is populated here when the phone sent
     # ws_auth — still None for a signed-out phone or an older build, so nothing
