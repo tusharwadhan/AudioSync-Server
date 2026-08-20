@@ -57,11 +57,11 @@ class ControlSession:
     # What this phone's BUILD can do, as asserted by the phone itself on
     # control_create and re-asserted on every control_rejoin.
     #
-    # Re-asserted, not merged: rejoin REPLACES this wholesale, absent meaning
-    # empty. A phone that later reconnects on an older build (a downgrade, or a
-    # restored APK) must lose the capability, or the server keeps waiting for
-    # acknowledgements that build cannot send and every browser is told the
-    # phone is unreachable, forever.
+    # Monotonic. rejoin() unions rather than replaces, because dropping a
+    # capability on a frame that merely forgot to mention it would fail OPEN --
+    # the approval gate would vanish from a live session with no symptom.
+    # A genuine downgrade is handled by handle_control_rejoin instead: it drops
+    # any outstanding pending and answers phone_needs_update.
     #
     # A phone can only ever weaken itself this way — the value is asserted over
     # the phone's own authenticated socket and no browser can influence it.
@@ -142,8 +142,17 @@ class ControlSessionManager:
                 sess.phone_ws = phone_ws
                 sess.phone_gone_at = 0.0
                 sess.last_seen = time.time()
-                # Replace, never merge — see ControlSession.caps.
-                sess.caps = set(caps or ())
+                # Monotonic: a capability is added, never removed. Replacing
+                # here was fail-OPEN -- one control_rejoin that omitted caps
+                # (a dropped field, an older build, a truncated frame) silently
+                # downgraded a live session back to immediate-attach, with
+                # nothing on either side to show for it.
+                #
+                # The downgrade case it was meant to serve is handled properly
+                # instead: handle_control_rejoin drops any outstanding pending
+                # and answers phone_needs_update, and requestNewCode mints a
+                # fresh session whose caps start empty.
+                sess.caps |= set(caps or ())
                 self._by_client[phone_client_id] = sess.id
                 return sess
         return None
@@ -205,13 +214,19 @@ class ControlSessionManager:
             return None, "expired"
         return sess, None
 
-    def ticket_valid(self, code: str) -> bool:
-        """Is this code still spendable? Re-checked before granting control.
+    def session_id_for_code(self, code: str) -> Optional[str]:
+        """Which session a code belongs to, spent or not."""
+        if not isinstance(code, str):
+            return None
+        t = self._tickets.get(code.strip().upper())
+        return t.session_id if t else None
 
-        The pending that carries an approval is clamped to the ticket's expiry,
-        but the sweep only runs every 60s, so a pending can outlive its ticket
-        by up to a minute. Without this a code could grant control well after it
-        expired.
+    def ticket_valid(self, code: str) -> bool:
+        """Is this code still spendable?
+
+        NOTE: the approve path checks the pending's own expires_at rather than
+        calling this, because that value is already clamped to the ticket at
+        peek time. Kept for tests and for callers that hold only a code.
         """
         if not isinstance(code, str):
             return False

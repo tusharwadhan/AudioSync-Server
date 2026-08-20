@@ -301,6 +301,10 @@
       var m; try { m = JSON.parse(ev.data); } catch(e){ return; }
 
       if (m.type === 'control_joined') {
+        // Approved. Without this the 70s timer keeps running and fires
+        // mid-session, writing "No answer from your phone" over a session that
+        // is working.
+        clearPendingTimer();
         paired = true;
         $('pairView').classList.add('hide');
         $('playerView').classList.remove('hide');
@@ -372,6 +376,12 @@
 
       } else if (m.type === 'control_closed') {
         paired = false;
+        // Back to the pair screen, so the button must be usable again — it is
+        // still disabled reading "Check your phone…" from the join that got us
+        // here. This is the same wedge the default error branch exists to
+        // prevent, on the one path that does not go through fail().
+        clearPendingTimer();
+        resetPairButton();
         setStatus(m.reason === 'phone_gone' ? 'phone went offline' : 'session ended', 'warn');
         setTimeout(function(){
           $('playerView').classList.add('hide');

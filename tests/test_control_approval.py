@@ -3,7 +3,7 @@
 Not a unit test of my own reimplementation -- it imports main.py's actual
 functions and drives them, so a divergence between plan and code shows up here.
 """
-import asyncio, sys, types
+import asyncio, sys, time, types
 
 sys.path.insert(0, 'd:/projects/audiosync-yt-dlp/server')
 
@@ -17,7 +17,10 @@ class FakeWS:
     def __init__(self, name, ua="Mozilla/5.0 (Windows NT 10.0) Chrome/120 Safari/537"):
         self.name = name
         self.headers = {"user-agent": ua}
-        self.client_state = None
+        # 'CONNECTED' by default. None would make the guard in _resolve_pending
+        # (`if state is not None and ...`) short-circuit, so every test would
+        # take the attach branch and the browser-left path would be unreachable.
+        self.client_state = 'CONNECTED'
 
     def __repr__(self):
         return f"<{self.name}>"
@@ -35,6 +38,8 @@ def load_main_pieces():
     want_fn = {
         '_describe_requester', '_drop_pending', 'drop_pendings_for_session',
         '_prompt_allowed', '_expire_unacked', 'handle_control_join',
+        '_parse_control_caps', '_prune_prompt_hits',
+        '_code_belongs_to_approval_phone',
         'handle_control_approval_ack', '_resolve_pending',
         'handle_control_approve', 'handle_control_deny', 'handle_control_cancel',
         'sweep_pendings',
@@ -60,7 +65,7 @@ def load_main_pieces():
             for t in node.targets:
                 if isinstance(t, ast.Name) and t.id in (
                         'ACK_DEADLINE', 'PROMPT_TTL', 'PROMPT_CAP',
-                        '_UA_FAMILIES', '_UA_PLATFORMS'):
+                        '_UA_FAMILIES', '_UA_PLATFORMS', '_KNOWN_CONTROL_CAPS'):
                     chunks.append(seg(node))
         elif isinstance(node, ast.AnnAssign):
             t = node.target
@@ -216,8 +221,80 @@ async def main():
     check("stale approve cancels the phone's sheet",
           m and m["type"] == "control_approval_cancelled")
 
+    # ---- regressions found by implementation review
+    print("  -- review regressions --")
+
+    # S1: caps are monotonic. A rejoin that omits them must NOT open the gate.
+    cm, sess, secret, phone = fresh()
+    cm.rejoin("phoneC2", phone, secret, caps=None)
+    check("rejoin without caps keeps the gate", "approval" in sess.caps)
+    code = cm.mint_code(sess.id)
+    b = FakeWS("bS1")
+    await join("bcS1", b, {"code": code})
+    check("still prompts after a capless rejoin",
+          last_to(phone)["type"] == "control_approval_request")
+
+    # S6: an approve that cannot be granted must not spend the code.
+    cm, sess, _, phone = fresh()
+    code = cm.mint_code(sess.id)
+    b = FakeWS("bS6")
+    await join("bcS6", b, {"code": code})
+    rid = last_to(phone)["requestId"]
+    await ack("phoneC", {"requestId": rid})
+    b.client_state = "DISCONNECTED"
+    await approve("phoneC", {"requestId": rid})
+    check("browser gone -> code NOT spent", cm.ticket_valid(code))
+    check("browser gone -> phone's sheet dismissed",
+          last_to(phone)["type"] == "control_approval_cancelled")
+
+    # S6b: expiry must be checked before spending too.
+    cm, sess, _, phone = fresh()
+    code = cm.mint_code(sess.id)
+    b = FakeWS("bS6b")
+    await join("bcS6b", b, {"code": code})
+    rid = last_to(phone)["requestId"]
+    await ack("phoneC", {"requestId": rid})
+    ns['_pending'][rid].expires_at = 0
+    await approve("phoneC", {"requestId": rid})
+    check("expired approve -> expired", last_to(b)["code"] == "expired")
+    check("expired approve -> code NOT spent", cm.ticket_valid(code))
+
+    # S7: a legacy phone must still see bad_code, not "denied".
+    cm, sess, _, phone = fresh(caps=set())
+    code = cm.mint_code(sess.id)
+    await join("bcS7a", FakeWS("bS7a"), {"code": code})   # spends it
+    b = FakeWS("bS7b")
+    await join("bcS7b", b, {"code": code})
+    check("legacy reuse -> bad_code, not denied", last_to(b)["code"] == "bad_code")
+
+    # ...while an approval phone tells the truth.
+    cm, sess, _, phone = fresh()
+    code = cm.mint_code(sess.id)
+    await join("bcS7c", FakeWS("bS7c"), {"code": code})
+    rid = last_to(phone)["requestId"]
+    await ack("phoneC", {"requestId": rid})
+    await deny("phoneC", {"requestId": rid})
+    b = FakeWS("bS7d")
+    await join("bcS7d", b, {"code": code})
+    check("approval reuse -> denied", last_to(b)["code"] == "denied")
+
+    # S5: prompt hits must not accumulate forever.
+    cm, sess, _, phone = fresh()
+    ns['_prompt_hits']['ghost-session'] = [time.time() - 120]
+    ns['_prune_prompt_hits']()
+    check("stale prompt hits pruned", 'ghost-session' not in ns['_prompt_hits'])
+
+    # caps parser, on hostile shapes
+    pc = ns['_parse_control_caps']
+    check("caps: non-list ignored", pc({"caps": "approval"}) == set())
+    check("caps: unknown dropped", pc({"caps": ["bogus"]}) == set())
+    check("caps: valid kept", pc({"caps": ["approval"]}) == {"approval"})
+
     print("\nALL PASS" if ok else "\nFAILURES ABOVE")
     return 0 if ok else 1
 
 
-sys.exit(asyncio.run(main()))
+if __name__ == "__main__":
+    # Guarded: without this, any pytest collection of tests/ would import this
+    # module, run the whole suite and exit the collector.
+    sys.exit(asyncio.run(main()))

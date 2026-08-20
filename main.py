@@ -1073,6 +1073,7 @@ async def startup_room_cleanup():
             # TTL is decorative and sessions accumulate for the life of the
             # process — sweep() was dead code until it was called from here.
             await sweep_pendings()
+            _prune_prompt_hits()
             for sess in control_manager.sweep():
                 for ws in list(sess.controllers.values()):
                     await ws_send(ws, {"type": "control_closed", "reason": "idle"})
@@ -5055,6 +5056,14 @@ async def _expire_unacked(request_id: str):
     await ws_send(p.browser_ws, {"type": "control_error", "code": "phone_unreachable"})
 
 
+def _code_belongs_to_approval_phone(code: str) -> bool:
+    """Did this code's session ever require approval? Decides whether 'denied'
+    is a truthful thing to tell the browser."""
+    sid = control_manager.session_id_for_code(code)
+    sess = control_manager.get(sid) if sid else None
+    return bool(sess and "approval" in sess.caps)
+
+
 async def handle_control_join(client_id: str, websocket: WebSocket, msg: dict):
     """Browser offers a pairing code. The phone decides whether it gets in."""
     # Throttled: a wrong guess costs the guesser nothing, and hit probability
@@ -5066,6 +5075,13 @@ async def handle_control_join(client_id: str, websocket: WebSocket, msg: dict):
     code = msg.get("code", "")
     sess, reason = control_manager.peek(code)
     if sess is None:
+        # peek() distinguishes bad_code / expired / denied where redeem() used to
+        # collapse everything to a miss. That is an improvement for the approval
+        # flow, but it also reaches phones that never opted in -- and the browser
+        # would then say "Declined on your phone" about a code nobody declined.
+        # Only report a decision when a decision was actually possible.
+        if reason == "denied" and not _code_belongs_to_approval_phone(code):
+            reason = "bad_code"
         await ws_send(websocket, {"type": "control_error", "code": reason})
         return
 
@@ -5180,20 +5196,27 @@ async def _resolve_pending(client_id: str, msg: dict, outcome: str):
         await ws_send(p.browser_ws, {"type": "control_error", "code": "cancelled"})
         return
 
-    control_manager.burn(p.code)
-
     if outcome == "deny":
+        control_manager.burn(p.code)
         await ws_send(p.browser_ws, {"type": "control_error", "code": "denied"})
         return
 
-    # Approve. The pending is clamped to the ticket, but the sweep runs only
-    # every 60s, so a pending can outlive its ticket by up to a minute.
+    # Approve. Both checks come BEFORE the burn: spending a code and then
+    # refusing to grant anything leaves the user with neither.
+    # The pending is clamped to the ticket, but the sweep runs only every 60s,
+    # so a pending can outlive its ticket by up to a minute.
     if p.expires_at < time.time():
         await ws_send(p.browser_ws, {"type": "control_error", "code": "expired"})
         return
     state = getattr(p.browser_ws, "client_state", None)
     if state is not None and state != WebSocketState.CONNECTED:
-        return  # browser left while the user was deciding
+        # Tell the phone, or its approval sheet sits there with nothing behind it.
+        await ws_send(sess.phone_ws, {
+            "type": "control_approval_cancelled",
+            "requestId": request_id, "reason": "browser_gone",
+        })
+        return
+    control_manager.burn(p.code)
     control_manager.attach_controller(sess.id, p.browser_client_id, p.browser_ws)
     await ws_send(p.browser_ws, {
         "type": "control_joined",
@@ -5216,6 +5239,15 @@ async def handle_control_deny(client_id: str, msg: dict):
 
 async def handle_control_cancel(client_id: str, msg: dict):
     await _resolve_pending(client_id, msg, "cancel")
+
+
+def _prune_prompt_hits():
+    """Session ids are random and single-use, so _prompt_allowed never revisits
+    one to prune it -- every session that ever received a join attempt would
+    otherwise keep its list for the life of the process."""
+    now = time.time()
+    for sid in [k for k, v in _prompt_hits.items() if not v or now - max(v) > 60.0]:
+        _prompt_hits.pop(sid, None)
 
 
 async def sweep_pendings():
@@ -5272,7 +5304,10 @@ async def _answer_pendings_for(client_id: str):
     existing orphan loops cannot reach them.
     """
     sess = control_manager.for_client(client_id)
-    if sess is None:
+    # Phone-only, for the same reason as handle_control_end: a controller
+    # resolves through _by_client to the phone's session and would be able to
+    # cancel pendings that are not its own.
+    if sess is None or sess.phone_client_id != client_id:
         return
     for p in drop_pendings_for_session(sess.id):
         if p is not None:
@@ -5286,6 +5321,14 @@ async def handle_control_end(client_id: str):
     left an attached browser driving a session the user believed was closed
     until the idle sweep noticed, up to two minutes later.
     """
+    # Only the phone may end its own session. Without this an attached
+    # CONTROLLER reaches destroy_for_client, which resolves it through
+    # _by_client to the PHONE'S session and tears it down -- and the phone is
+    # never told, because orphans holds only sess.controllers. Same shape as the
+    # control_create guard; this sibling was missed.
+    _sess = control_manager.for_client(client_id)
+    if _sess is None or _sess.phone_client_id != client_id:
+        return
     # Before the teardown, while the session is still resolvable.
     await _answer_pendings_for(client_id)
     sess, orphans = control_manager.destroy_for_client(client_id)
@@ -5402,7 +5445,14 @@ async def handle_control_disconnect(client_id: str):
                     "type": "control_approval_cancelled",
                     "requestId": waiting, "reason": "browser_gone",
                 })
-        return
+    # Deliberately NOT an early return. Holding a pending does not mean this
+    # client is ONLY a waiting browser: an already-attached controller can send
+    # another control_join, and a phone can hold a pending for its own code.
+    # Returning here skipped end_for_client entirely, so the dead client stayed
+    # in sess.controllers and _by_client forever (the phone's heartbeat keeps
+    # bumping last_seen, so the idle sweep never fires) and the phone was never
+    # told control_controller_left. end_for_client on an unknown client is a
+    # safe no-op, so falling through costs nothing.
 
     was_phone = control_manager.is_phone(client_id)
     sess_before = control_manager.for_client(client_id)
