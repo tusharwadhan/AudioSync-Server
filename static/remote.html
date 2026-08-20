@@ -291,7 +291,10 @@
 
     ws.onopen = function(){
       retry = 0;
-      if (!paired) setStatus('ready to pair');
+      // Any in-flight approval died with the old socket, and the server has
+      // no way to reach this browser again — it gets a fresh client_id on
+      // every reconnect and holds no rejoin secret.
+      if (!paired) { clearPendingTimer(); resetPairButton(); setStatus('ready to pair'); }
     };
 
     ws.onmessage = function(ev){
@@ -331,7 +334,41 @@
           setStatus("host controls playback", 'warn');
         } else if (m.code === 'player_not_ready') {
           setStatus('nothing playing on the phone', 'warn');
+        } else if (m.code === 'phone_offline') {
+          fail('Your phone isn’t connected right now. Try the same code again in a moment.');
+        } else if (m.code === 'phone_unreachable') {
+          fail('Couldn’t wake your phone. Open SyncAura and try again.');
+        } else if (m.code === 'phone_needs_update') {
+          fail('Update SyncAura on your phone to approve this connection.');
+        } else if (m.code === 'busy') {
+          fail('Your phone is already being asked to approve another computer.');
+        } else if (m.code === 'denied') {
+          fail('Declined on your phone. Ask it for a new code to try again.');
+        } else if (m.code === 'expired') {
+          fail('That request timed out. Ask the phone for a new code.');
+        } else if (m.code === 'cancelled') {
+          fail('Approval was interrupted on your phone. Try the same code again.');
+        } else if (m.code === 'throttled') {
+          fail('Too many approval requests. Wait a minute and try again.');
+        } else {
+          // Every remaining code MUST land here. pairBtn is disabled the moment
+          // Connect is pressed and fail() is the only thing that re-enables it,
+          // so an unhandled code leaves the button stuck on "Connecting…"
+          // forever — including any code added to the server after this page
+          // was cached.
+          fail('Couldn’t connect (' + (m.code || 'unknown') + ').');
         }
+
+      } else if (m.type === 'control_pending') {
+        // Approval is being asked for on the phone. Can legitimately take a
+        // while: the phone may be dozing and has to be woken first.
+        clearPendingTimer();
+        pendingTimer = setTimeout(function(){
+          pendingTimer = null;
+          fail('No answer from your phone. Ask it for a new code and try again.');
+        }, 70000);
+        $('pairBtn').textContent = 'Check your phone…';
+        setStatus('waiting for approval on your phone', 'warn');
 
       } else if (m.type === 'control_closed') {
         paired = false;
@@ -354,6 +391,10 @@
 
     ws.onclose = function(){
       setStatus('reconnecting…', 'warn');
+      // Without this the button stays on "Connecting…"/"Check your phone…"
+      // through every reconnect, because fail() is the only other thing that
+      // restores it and nothing calls fail() on a transport drop.
+      if (!paired) { clearPendingTimer(); resetPairButton(); }
       // The browser has no rejoin secret, so a dropped socket means
       // re-pairing. Back off rather than hammering a server that may be
       // restarting (free tier spins down).
@@ -364,10 +405,22 @@
     ws.onerror = function(){ /* onclose handles it */ };
   }
 
+  var pendingTimer = null;
+  function clearPendingTimer(){
+    if (pendingTimer) { clearTimeout(pendingTimer); pendingTimer = null; }
+  }
+
   function fail(msg){
+    clearPendingTimer();
     $('pairErr').textContent = msg;
     $('pairBtn').disabled = false;
     $('pairBtn').textContent = 'Connect';
+  }
+
+  function resetPairButton(){
+    var b = $('pairBtn');
+    b.textContent = 'Connect';
+    b.disabled = $('code').value.length !== 6;
   }
 
   // ── pairing ──
