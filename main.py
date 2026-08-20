@@ -4800,6 +4800,19 @@ async def destroy_room_after_grace(client_id: str, code: str, delay: int = 30):
 # with the Listen Together room it is supposed to be able to drive.
 
 
+# Capabilities a phone may assert. Anything else is discarded rather than
+# stored: this is raw client input reached before any authentication, and an
+# unbounded set from a hostile socket is a memory sink.
+_KNOWN_CONTROL_CAPS = frozenset({"approval"})
+
+
+def _parse_control_caps(msg: dict) -> set:
+    raw = msg.get("caps")
+    if not isinstance(raw, list):
+        return set()
+    return {c for c in raw if isinstance(c, str) and c in _KNOWN_CONTROL_CAPS}
+
+
 async def handle_control_create(client_id: str, websocket: WebSocket, msg: dict):
     """Phone offers itself for remote control and gets a pairing code."""
     # Refuse if this client is already an attached CONTROLLER of someone else's
@@ -4822,7 +4835,8 @@ async def handle_control_create(client_id: str, websocket: WebSocket, msg: dict)
     # ws_auth — still None for a signed-out phone or an older build, so nothing
     # may treat its presence as guaranteed.
     sess, secret, orphans = control_manager.create(
-        client_id, websocket, owner_uid=uid_for_ws(client_id)
+        client_id, websocket, owner_uid=uid_for_ws(client_id),
+        caps=_parse_control_caps(msg),
     )
     if sess is None:
         await ws_send(websocket, {"type": "control_error", "code": "server_busy"})
@@ -4845,7 +4859,12 @@ async def handle_control_create(client_id: str, websocket: WebSocket, msg: dict)
 
 async def handle_control_rejoin(client_id: str, websocket: WebSocket, msg: dict):
     """Phone re-attaches to its session after a reconnect."""
-    sess = control_manager.rejoin(client_id, websocket, msg.get("phoneSecret", ""))
+    # Caps are re-read here, not carried over. handle_control_rejoin backfills
+    # nothing today — the same trap owner_uid fell into — so a capability set
+    # only at create would be lost on the first Wi-Fi switch. Replacing also
+    # means a phone that reconnects on an older build correctly loses it.
+    sess = control_manager.rejoin(client_id, websocket, msg.get("phoneSecret", ""),
+                                  caps=_parse_control_caps(msg))
     if sess is None:
         await ws_send(websocket, {"type": "control_closed", "reason": "unknown_session"})
         return

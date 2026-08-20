@@ -54,6 +54,18 @@ class ControlSession:
     # Set when the phone's socket drops; cleared on rejoin. While set, the
     # session is held open for PHONE_GRACE seconds.
     phone_gone_at: float = 0.0
+    # What this phone's BUILD can do, as asserted by the phone itself on
+    # control_create and re-asserted on every control_rejoin.
+    #
+    # Re-asserted, not merged: rejoin REPLACES this wholesale, absent meaning
+    # empty. A phone that later reconnects on an older build (a downgrade, or a
+    # restored APK) must lose the capability, or the server keeps waiting for
+    # acknowledgements that build cannot send and every browser is told the
+    # phone is unreachable, forever.
+    #
+    # A phone can only ever weaken itself this way — the value is asserted over
+    # the phone's own authenticated socket and no browser can influence it.
+    caps: set = field(default_factory=set)
 
 
 @dataclass
@@ -74,7 +86,8 @@ class ControlSessionManager:
 
     # ── sessions ──────────────────────────────────────────────────────
 
-    def create(self, phone_client_id: str, phone_ws, owner_uid: str = None):
+    def create(self, phone_client_id: str, phone_ws, owner_uid: str = None,
+               caps: set = None):
         """Start a session for a phone.
 
         Returns (session, phone_secret, orphaned_ws) - the orphans belong to a
@@ -94,12 +107,14 @@ class ControlSessionManager:
             phone_ws=phone_ws,
             phone_secret=secrets.token_urlsafe(24),
             owner_uid=owner_uid,
+            caps=set(caps or ()),
         )
         self._sessions[sid] = sess
         self._by_client[phone_client_id] = sid
         return sess, sess.phone_secret, orphans
 
-    def rejoin(self, phone_client_id: str, phone_ws, secret: str) -> Optional[ControlSession]:
+    def rejoin(self, phone_client_id: str, phone_ws, secret: str,
+               caps: set = None) -> Optional[ControlSession]:
         """Re-attach a phone after a reconnect.
 
         client_id is per-connection, and reconnects are routine (backoff, FCM
@@ -121,6 +136,8 @@ class ControlSessionManager:
                 sess.phone_ws = phone_ws
                 sess.phone_gone_at = 0.0
                 sess.last_seen = time.time()
+                # Replace, never merge — see ControlSession.caps.
+                sess.caps = set(caps or ())
                 self._by_client[phone_client_id] = sess.id
                 return sess
         return None
