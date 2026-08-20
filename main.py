@@ -10,6 +10,9 @@ from fastapi import (
     UploadFile,
     File,
 )
+import dataclasses
+import secrets
+from starlette.websockets import WebSocketState
 from fastapi.responses import HTMLResponse, JSONResponse, FileResponse
 import tempfile
 from fastapi.middleware.cors import CORSMiddleware
@@ -1069,6 +1072,7 @@ async def startup_room_cleanup():
             # Remote-control sessions idle past their TTL. Without this the
             # TTL is decorative and sessions accumulate for the life of the
             # process — sweep() was dead code until it was called from here.
+            await sweep_pendings()
             for sess in control_manager.sweep():
                 for ws in list(sess.controllers.values()):
                     await ws_send(ws, {"type": "control_closed", "reason": "idle"})
@@ -4830,6 +4834,16 @@ async def handle_control_create(client_id: str, websocket: WebSocket, msg: dict)
     if existing is not None and existing.phone_client_id != client_id:
         await ws_send(websocket, {"type": "control_error", "code": "already_controlling"})
         return
+    # A re-create tears the old session down, so anything waiting on it must be
+    # answered rather than left on the browser's own 70s timer. By session id,
+    # not by cause: the server cannot tell requestNewCode from an
+    # unknown_session re-create -- both arrive here as control_create.
+    _prev = control_manager.for_client(client_id)
+    if _prev is not None:
+        for _p in drop_pendings_for_session(_prev.id):
+            if _p is not None:
+                await ws_send(_p.browser_ws,
+                              {"type": "control_error", "code": "expired"})
     # owner_uid has existed on ControlSession since it was written but was never
     # passed, so it was always None. It is populated here when the phone sent
     # ws_auth — still None for a signed-out phone or an older build, so nothing
@@ -4870,6 +4884,23 @@ async def handle_control_rejoin(client_id: str, websocket: WebSocket, msg: dict)
         return
     await ws_send(websocket, {"type": "control_ready", "sessionId": sess.id,
                               "resumed": True})
+    # The phone may have dropped mid-approval. Re-send on the new socket, or say
+    # explicitly that it is gone -- never nothing, or the phone sits on a prompt
+    # for a pending the server has forgotten. Idempotent by requestId.
+    for _rid, _p in list(_pending.items()):
+        if _p.session_id != sess.id:
+            continue
+        if "approval" not in sess.caps:
+            # Rejoined on a build that cannot answer. Drop it and say so.
+            _drop_pending(_rid)
+            await ws_send(_p.browser_ws,
+                          {"type": "control_error", "code": "phone_needs_update"})
+            continue
+        await ws_send(websocket, {
+            "type": "control_approval_request",
+            "requestId": _rid,
+            "requester": _p.requester,
+        })
     # Controllers were watching a socket that just changed underneath them.
     for ws in list(sess.controllers.values()):
         await ws_send(ws, {"type": "control_phone_back"})
@@ -4908,19 +4939,263 @@ async def handle_control_search(client_id: str, msg: dict):
         await ws_send(ws, payload)
 
 
+# -- approval pendings ---------------------------------------------------
+#
+# A browser offering a valid code is not attached straight away: the phone is
+# asked to approve, and the browser waits here meanwhile.
+#
+# Deliberately NOT an inline await in handle_control_join. Awaiting there would
+# stop that task calling receive_text() on the browser socket for the whole
+# window, so a close would go unobserved and _cleanup_disconnect would not run
+# for up to a minute. (Cross-socket awaits do not deadlock -- request_url_from_host
+# does exactly that -- so the reason is liveness, not deadlock.)
+
+ACK_DEADLINE = 20.0    # phone must acknowledge the request this fast
+PROMPT_TTL = 60.0      # and the user must then answer within this
+PROMPT_CAP = 3         # prompts per session per minute
+
+
+@dataclasses.dataclass
+class _Pending:
+    request_id: str
+    session_id: str
+    browser_client_id: str
+    browser_ws: object
+    code: str
+    requester: str
+    expires_at: float
+    acked: bool = False
+
+
+_pending: dict = {}                  # request_id -> _Pending
+_pending_by_browser: dict = {}       # browser_client_id -> request_id
+_ack_tasks: dict = {}                # request_id -> asyncio.Task
+_prompt_hits: dict = {}              # session_id -> [timestamps]
+
+_UA_FAMILIES = (
+    ("Edg/", "Edge"), ("OPR/", "Opera"), ("Firefox/", "Firefox"),
+    ("Chrome/", "Chrome"), ("Safari/", "Safari"),
+)
+_UA_PLATFORMS = (
+    ("Windows", "Windows"), ("Android", "Android"), ("iPhone", "iPhone"),
+    ("iPad", "iPad"), ("Mac OS X", "macOS"), ("Linux", "Linux"),
+)
+
+
+def _describe_requester(websocket) -> str:
+    """One of a closed set of strings, never the raw header.
+
+    The User-Agent on a WebSocket handshake is chosen by whoever opened it, and
+    this text is rendered on the phone approval prompt -- the only thing the
+    user has to judge the request by. Echoing it back would let an attacker
+    write their own reassurance there ("Chrome - this is your laptop").
+
+    No location: there is no geo dependency in this service, and deriving one
+    from X-Forwarded-For would be worse than useless, because Render appends to
+    that header without stripping what the client sent.
+    """
+    try:
+        ua = websocket.headers.get("user-agent") or ""
+    except Exception:
+        return "Unknown browser"
+    ua = ua[:300]
+    fam = next((name for token, name in _UA_FAMILIES if token in ua), None)
+    if fam is None:
+        return "Unknown browser"
+    plat = next((name for token, name in _UA_PLATFORMS if token in ua), None)
+    return f"{fam} on {plat}" if plat else fam
+
+
+def _drop_pending(request_id: str):
+    """Forget a pending. Never burns -- burning happens only on a decision."""
+    p = _pending.pop(request_id, None)
+    if p is None:
+        return None
+    if _pending_by_browser.get(p.browser_client_id) == request_id:
+        _pending_by_browser.pop(p.browser_client_id, None)
+    task = _ack_tasks.pop(request_id, None)
+    if task is not None:
+        task.cancel()
+    return p
+
+
+def drop_pendings_for_session(session_id: str):
+    """Any teardown of a session must take its pendings with it.
+
+    Phrased by session rather than by cause because the server cannot tell
+    requestNewCode from an unknown_session re-create: both arrive as
+    control_create.
+    """
+    return [_drop_pending(rid) for rid in
+            [r for r, p in list(_pending.items()) if p.session_id == session_id]]
+
+
+def _prompt_allowed(session_id: str) -> bool:
+    now = time.time()
+    hits = [t for t in _prompt_hits.get(session_id, []) if now - t < 60.0]
+    if len(hits) >= PROMPT_CAP:
+        _prompt_hits[session_id] = hits
+        return False
+    hits.append(now)
+    _prompt_hits[session_id] = hits
+    return True
+
+
+async def _expire_unacked(request_id: str):
+    """The phone never answered. Nothing was spent, so the code still works."""
+    try:
+        await asyncio.sleep(ACK_DEADLINE)
+    except asyncio.CancelledError:
+        return
+    _ack_tasks.pop(request_id, None)
+    p = _pending.get(request_id)
+    if p is None or p.acked:
+        return
+    _drop_pending(request_id)
+    await ws_send(p.browser_ws, {"type": "control_error", "code": "phone_unreachable"})
+
+
 async def handle_control_join(client_id: str, websocket: WebSocket, msg: dict):
-    """Browser redeems a pairing code and starts mirroring the phone."""
+    """Browser offers a pairing code. The phone decides whether it gets in."""
     # Throttled: a wrong guess costs the guesser nothing, and hit probability
     # scales with the number of live codes.
     if not control_manager.allow_cmd(client_id):
         await ws_send(websocket, {"type": "control_error", "code": "rate_limited"})
         return
-    sess = control_manager.redeem(msg.get("code", ""))
+
+    code = msg.get("code", "")
+    sess, reason = control_manager.peek(code)
     if sess is None:
-        await ws_send(websocket, {"type": "control_error", "code": "bad_code"})
+        await ws_send(websocket, {"type": "control_error", "code": reason})
         return
-    control_manager.attach_controller(sess.id, client_id, websocket)
-    await ws_send(websocket, {
+
+    # Phones on builds that cannot answer keep the old behaviour, or deploying
+    # this would kill remote control for everyone until they updated.
+    if "approval" not in sess.caps:
+        control_manager.burn(code)
+        control_manager.attach_controller(sess.id, client_id, websocket)
+        await ws_send(websocket, {
+            "type": "control_joined",
+            "sessionId": sess.id,
+            "state": sess.last_state or {},
+        })
+        await ws_send(sess.phone_ws, {
+            "type": "control_controller_joined",
+            "controllers": len(sess.controllers),
+        })
+        return
+
+    # An absent phone cannot approve. Refuse without spending the code, so the
+    # same one works once it is back -- a phone dropping its socket is routine.
+    if sess.phone_ws is None or sess.phone_gone_at:
+        await ws_send(websocket, {"type": "control_error", "code": "phone_offline"})
+        return
+
+    # One prompt at a time. Two would be indistinguishable on the phone, which
+    # is how a shoulder-surfer gets approved by the person being stolen from.
+    if any(p.session_id == sess.id for p in _pending.values()):
+        await ws_send(websocket, {"type": "control_error", "code": "busy"})
+        return
+
+    if not _prompt_allowed(sess.id):
+        await ws_send(websocket, {"type": "control_error", "code": "throttled"})
+        return
+
+    request_id = secrets.token_urlsafe(16)
+    requester = _describe_requester(websocket)
+    # Clamped to the ticket: a code peeked at t=85s must not buy a 60s window.
+    ticket_dies = control_manager.ticket_expiry(code)
+    expires_at = time.time() + PROMPT_TTL
+    if ticket_dies:
+        expires_at = min(expires_at, ticket_dies)
+    _pending[request_id] = _Pending(
+        request_id=request_id, session_id=sess.id, browser_client_id=client_id,
+        browser_ws=websocket, code=code, requester=requester,
+        expires_at=expires_at,
+    )
+    _pending_by_browser[client_id] = request_id
+    _ack_tasks[request_id] = asyncio.create_task(_expire_unacked(request_id))
+    await ws_send(sess.phone_ws, {
+        "type": "control_approval_request",
+        "requestId": request_id,
+        "requester": requester,
+    })
+
+
+async def handle_control_approval_ack(client_id: str, msg: dict):
+    """Phone confirms it got the request and is asking the user.
+
+    Proof of life that ws_send cannot give: it swallows every exception, so a
+    send into a half-open socket looks identical to a delivered one.
+    """
+    p = _pending.get(str(msg.get("requestId", "")))
+    if p is None:
+        return
+    sess = control_manager.get(p.session_id)
+    if sess is None or sess.phone_client_id != client_id:
+        return
+    if p.acked:
+        return  # duplicate request -> duplicate ack; a no-op, not a failure
+    p.acked = True
+    task = _ack_tasks.pop(p.request_id, None)
+    if task is not None:
+        task.cancel()
+    await ws_send(p.browser_ws, {"type": "control_pending",
+                                 "requestId": p.request_id})
+
+
+async def _resolve_pending(client_id: str, msg: dict, outcome: str):
+    """approve / deny / cancel share every check but the last step."""
+    request_id = str(msg.get("requestId", ""))
+    p = _pending.get(request_id)
+    if p is None:
+        # Stale: the pending expired or its session was torn down. Tell the
+        # phone so a prompt still on screen goes away. Never burn here -- the
+        # request id is unknown, so any code spent would be someone else's.
+        sess = control_manager.for_client(client_id)
+        if sess is not None and sess.phone_client_id == client_id:
+            await ws_send(sess.phone_ws, {
+                "type": "control_approval_cancelled",
+                "requestId": request_id, "reason": "expired",
+            })
+        return
+
+    sess = control_manager.get(p.session_id)
+    # Resolved from the pending, never from the approving socket: otherwise any
+    # phone could answer any other phone prompt, the request id being the only
+    # gate. handle_extract_response has exactly that bug; do not copy it.
+    if sess is None or sess.phone_client_id != client_id:
+        return
+    # A phone that redeemed its own code would sit in sess.controllers forever
+    # and corrupt the phone branch of end_for_client.
+    if p.browser_client_id == sess.phone_client_id:
+        _drop_pending(request_id)
+        return
+
+    _drop_pending(request_id)
+
+    if outcome == "cancel":
+        # Not a decision: the sensor became unavailable, the screen timed out, a
+        # call came in. Nothing is spent, so the same code still works.
+        await ws_send(p.browser_ws, {"type": "control_error", "code": "cancelled"})
+        return
+
+    control_manager.burn(p.code)
+
+    if outcome == "deny":
+        await ws_send(p.browser_ws, {"type": "control_error", "code": "denied"})
+        return
+
+    # Approve. The pending is clamped to the ticket, but the sweep runs only
+    # every 60s, so a pending can outlive its ticket by up to a minute.
+    if p.expires_at < time.time():
+        await ws_send(p.browser_ws, {"type": "control_error", "code": "expired"})
+        return
+    state = getattr(p.browser_ws, "client_state", None)
+    if state is not None and state != WebSocketState.CONNECTED:
+        return  # browser left while the user was deciding
+    control_manager.attach_controller(sess.id, p.browser_client_id, p.browser_ws)
+    await ws_send(p.browser_ws, {
         "type": "control_joined",
         "sessionId": sess.id,
         "state": sess.last_state or {},
@@ -4929,6 +5204,34 @@ async def handle_control_join(client_id: str, websocket: WebSocket, msg: dict):
         "type": "control_controller_joined",
         "controllers": len(sess.controllers),
     })
+
+
+async def handle_control_approve(client_id: str, msg: dict):
+    await _resolve_pending(client_id, msg, "approve")
+
+
+async def handle_control_deny(client_id: str, msg: dict):
+    await _resolve_pending(client_id, msg, "deny")
+
+
+async def handle_control_cancel(client_id: str, msg: dict):
+    await _resolve_pending(client_id, msg, "cancel")
+
+
+async def sweep_pendings():
+    """Answer the browser rather than leaving it to its own timer."""
+    now = time.time()
+    for rid in [r for r, pp in list(_pending.items()) if pp.expires_at < now]:
+        p = _drop_pending(rid)
+        if p is None:
+            continue
+        await ws_send(p.browser_ws, {"type": "control_error", "code": "expired"})
+        sess = control_manager.get(p.session_id)
+        if sess is not None and sess.phone_ws is not None:
+            await ws_send(sess.phone_ws, {
+                "type": "control_approval_cancelled",
+                "requestId": rid, "reason": "expired",
+            })
 
 
 async def handle_control_cmd(client_id: str, websocket: WebSocket, msg: dict):
@@ -4962,6 +5265,20 @@ async def handle_control_phone_error(client_id: str, msg: dict):
         await ws_send(ws, {"type": "control_error", "code": code})
 
 
+async def _answer_pendings_for(client_id: str):
+    """Tell anyone waiting on this client's session that it is over.
+
+    They are not in sess.controllers -- attach_controller never ran -- so the
+    existing orphan loops cannot reach them.
+    """
+    sess = control_manager.for_client(client_id)
+    if sess is None:
+        return
+    for p in drop_pendings_for_session(sess.id):
+        if p is not None:
+            await ws_send(p.browser_ws, {"type": "control_error", "code": "denied"})
+
+
 async def handle_control_end(client_id: str):
     """User switched the remote off. Revoke immediately.
 
@@ -4969,6 +5286,8 @@ async def handle_control_end(client_id: str):
     left an attached browser driving a session the user believed was closed
     until the idle sweep noticed, up to two minutes later.
     """
+    # Before the teardown, while the session is still resolvable.
+    await _answer_pendings_for(client_id)
     sess, orphans = control_manager.destroy_for_client(client_id)
     for ws in orphans:
         await ws_send(ws, {"type": "control_closed", "reason": "ended"})
@@ -5068,8 +5387,29 @@ async def _cleanup_disconnect(client_id: str):
 
 async def handle_control_disconnect(client_id: str):
     """Either side dropped. A phone drop ends the session for everyone."""
+    # A browser waiting on approval is NOT in _by_client -- attach_controller is
+    # the only thing that puts it there, and it has not run yet -- so it looks
+    # identical to an unknown client below. Detect it by its pending instead.
+    waiting = _pending_by_browser.get(client_id)
+    if waiting is not None:
+        p = _drop_pending(waiting)
+        if p is not None:
+            sess = control_manager.get(p.session_id)
+            if sess is not None and sess.phone_ws is not None:
+                # Dismiss a prompt that is still on screen for a browser that
+                # has already gone.
+                await ws_send(sess.phone_ws, {
+                    "type": "control_approval_cancelled",
+                    "requestId": waiting, "reason": "browser_gone",
+                })
+        return
+
     was_phone = control_manager.is_phone(client_id)
     sess_before = control_manager.for_client(client_id)
+    # A phone drop does NOT drop its pendings: reconnects are routine (backoff,
+    # FCM wake, Wi-Fi to cellular), and discarding the pending here would mean a
+    # user authenticating mid-switch gets an unknown requestId. The pending has
+    # its own deadline; let that decide.
     ended, orphans = control_manager.end_for_client(client_id)
     if was_phone:
         # Held open for the grace window so the phone can rejoin. Tell the
@@ -5289,6 +5629,18 @@ async def websocket_endpoint(websocket: WebSocket):
 
             elif msg_type == "control_join":
                 await handle_control_join(client_id, websocket, msg)
+
+            elif msg_type == "control_approval_ack":
+                await handle_control_approval_ack(client_id, msg)
+
+            elif msg_type == "control_approve":
+                await handle_control_approve(client_id, msg)
+
+            elif msg_type == "control_deny":
+                await handle_control_deny(client_id, msg)
+
+            elif msg_type == "control_cancel":
+                await handle_control_cancel(client_id, msg)
 
             elif msg_type == "control_cmd":
                 await handle_control_cmd(client_id, websocket, msg)

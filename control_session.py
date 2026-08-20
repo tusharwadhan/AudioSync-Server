@@ -73,6 +73,12 @@ class _Ticket:
     code: str
     session_id: str
     expires_at: float
+    # Spent, but deliberately left in _tickets until it expires or its session
+    # dies. Popping on use would make "is this code known?" and "is this code
+    # still usable?" the same question, so a user retyping a code they just
+    # used would get bad_code instead of denied/expired. Sweeping is unchanged:
+    # _sweep_tickets reaps on expires_at and ignores this.
+    used: bool = False
 
 
 class ControlSessionManager:
@@ -167,15 +173,67 @@ class ControlSessionManager:
                 return code
         return None
 
-    def redeem(self, code: str) -> Optional[ControlSession]:
-        """Burn a code and return its session. Single-use, right or wrong."""
-        self._sweep_tickets()
+    def peek(self, code: str):
+        """Resolve a code WITHOUT spending it.
+
+        Split out of the old redeem() because a code must survive being offered
+        to a phone that turns out to be unreachable: the browser is told to try
+        again, and the same code has to still work. Spending happens later, at
+        the moment control is actually granted or refused — see burn().
+
+        Returns (session, reason). reason is None on success, otherwise one of
+        "bad_code" / "expired" / "denied", the last meaning the code was already
+        spent on a decision.
+        """
         if not isinstance(code, str):
-            return None
-        t = self._tickets.pop(code.strip().upper(), None)
-        if t is None or t.expires_at < time.time():
-            return None
-        return self._sessions.get(t.session_id)
+            return None, "bad_code"
+        # Look up BEFORE sweeping: sweeping first removes the expired ticket, so
+        # a code that timed out would report bad_code ("that code didn't work")
+        # instead of expired ("ask the phone for a new one") — two different
+        # messages on the browser, and the wrong one sends the user hunting for
+        # a typo that isn't there.
+        t = self._tickets.get(code.strip().upper())
+        self._sweep_tickets()
+        if t is None:
+            return None, "bad_code"
+        if t.expires_at < time.time():
+            return None, "expired"
+        if t.used:
+            return None, "denied"
+        sess = self._sessions.get(t.session_id)
+        if sess is None:
+            return None, "expired"
+        return sess, None
+
+    def ticket_valid(self, code: str) -> bool:
+        """Is this code still spendable? Re-checked before granting control.
+
+        The pending that carries an approval is clamped to the ticket's expiry,
+        but the sweep only runs every 60s, so a pending can outlive its ticket
+        by up to a minute. Without this a code could grant control well after it
+        expired.
+        """
+        if not isinstance(code, str):
+            return False
+        t = self._tickets.get(code.strip().upper())
+        return bool(t and not t.used and t.expires_at >= time.time())
+
+    def burn(self, code: str) -> bool:
+        """Spend a code. Marks rather than pops — see _Ticket.used."""
+        if not isinstance(code, str):
+            return False
+        t = self._tickets.get(code.strip().upper())
+        if t is None or t.used:
+            return False
+        t.used = True
+        return True
+
+    def ticket_expiry(self, code: str) -> float:
+        """When this code dies, for clamping a pending's own deadline."""
+        if not isinstance(code, str):
+            return 0.0
+        t = self._tickets.get(code.strip().upper())
+        return t.expires_at if t else 0.0
 
     def attach_controller(self, session_id: str, client_id: str, ws) -> bool:
         sess = self._sessions.get(session_id)
