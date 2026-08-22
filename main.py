@@ -1074,6 +1074,7 @@ async def startup_room_cleanup():
             # process — sweep() was dead code until it was called from here.
             await sweep_pendings()
             _prune_prompt_hits()
+            _prune_request_hits()
             for sess in control_manager.sweep():
                 for ws in list(sess.controllers.values()):
                     await ws_send(ws, {"type": "control_closed", "reason": "idle"})
@@ -4966,6 +4967,11 @@ class _Pending:
     requester: str
     expires_at: float
     acked: bool = False
+    # Codeless requests only: shown on both ends so the user can compare them.
+    pair_digits: str = ""
+    # Which account asked. Used to make a refusal stick, since there is no
+    # ticket to burn when no code was involved.
+    owner_uid: str = ""
 
 
 _pending: dict = {}                  # request_id -> _Pending
@@ -5138,6 +5144,107 @@ async def handle_control_join(client_id: str, websocket: WebSocket, msg: dict):
     })
 
 
+# Codeless requests are capped per ACCOUNT, not per connection: client_id is a
+# fresh uuid4 on every socket, so a per-connection bucket resets on reconnect.
+_request_hits: dict = {}       # uid -> [timestamps]
+REQUEST_CAP = 3                # per uid per minute
+DENY_COOLDOWN = 300.0          # seconds a refusal keeps that account out
+_deny_until: dict = {}         # (uid, session_id) -> timestamp
+
+
+def _request_allowed(uid: str) -> bool:
+    now = time.time()
+    hits = [t for t in _request_hits.get(uid, []) if now - t < 60.0]
+    if len(hits) >= REQUEST_CAP:
+        _request_hits[uid] = hits
+        return False
+    hits.append(now)
+    _request_hits[uid] = hits
+    return True
+
+
+def _prune_request_hits():
+    now = time.time()
+    for uid in [k for k, v in _request_hits.items() if not v or now - max(v) > 60.0]:
+        _request_hits.pop(uid, None)
+    for key in [k for k, t in _deny_until.items() if t < now]:
+        _deny_until.pop(key, None)
+
+
+async def handle_control_request(client_id: str, websocket: WebSocket, msg: dict):
+    """Browser asks its OWN phone for control. No pairing code involved.
+
+    The account comes from this socket's verified ws_auth identity and nothing
+    else -- never from the message body. That is the whole security boundary:
+    a browser can only ever reach a phone signed into the same account, so
+    there is nothing to guess and nothing to enumerate.
+
+    Only reaches a phone whose socket is UP. A ControlSession is destroyed
+    PHONE_GRACE after the phone drops, and outside a room nothing keeps that
+    socket alive -- so a sleeping phone has no session to find. Waking one needs
+    a device binding that outlives the session; until that exists this answers
+    no_device and the pairing code remains the way in.
+    """
+    uid = uid_for_ws(client_id)
+    if not uid:
+        await ws_send(websocket, {"type": "control_error", "code": "not_signed_in"})
+        return
+
+    if not _request_allowed(uid):
+        await ws_send(websocket, {"type": "control_error", "code": "throttled"})
+        return
+
+    # Derived from the phone's live socket, NOT from the stored owner_uid.
+    # Nothing clears owner_uid when an account signs out while offline, so it
+    # can outlive the account that set it -- which would point one person's
+    # browser at another person's phone. _ws_uids is popped on socket death, so
+    # deriving it cannot go stale.
+    target = None
+    for sess in control_manager.sessions_with_live_phone():
+        if uid_for_ws(sess.phone_client_id) == uid:
+            target = sess
+            break
+
+    if target is None:
+        await ws_send(websocket, {"type": "control_error", "code": "no_device"})
+        return
+
+    # A refusal has to mean something. With a pairing code, deny burns the
+    # ticket and peek reports "denied" forever. There is no ticket here, so the
+    # cooldown is what stops a denied requester simply pressing Connect again.
+    if _deny_until.get((uid, target.id), 0) > time.time():
+        await ws_send(websocket, {"type": "control_error", "code": "denied"})
+        return
+
+    if any(p.session_id == target.id for p in _pending.values()):
+        await ws_send(websocket, {"type": "control_error", "code": "busy"})
+        return
+    if not _prompt_allowed(target.id):
+        await ws_send(websocket, {"type": "control_error", "code": "throttled"})
+        return
+
+    request_id = secrets.token_urlsafe(16)
+    # Shown on BOTH the phone prompt and the browser. Without a code the
+    # requester string is identical for the owner and for anyone else holding a
+    # session, so this is the only thing that distinguishes "my laptop" from
+    # "someone else's". The user compares two numbers.
+    pair_digits = f"{secrets.randbelow(10000):04d}"
+    _pending[request_id] = _Pending(
+        request_id=request_id, session_id=target.id, browser_client_id=client_id,
+        browser_ws=websocket, code="", requester=_describe_requester(websocket),
+        expires_at=time.time() + PROMPT_TTL, pair_digits=pair_digits, owner_uid=uid,
+    )
+    _pending_by_browser[client_id] = request_id
+    _ack_tasks[request_id] = asyncio.create_task(_expire_unacked(request_id))
+    await ws_send(target.phone_ws, {
+        "type": "control_approval_request",
+        "requestId": request_id,
+        "requester": _pending[request_id].requester,
+        "pairDigits": pair_digits,
+    })
+    await ws_send(websocket, {"type": "control_requested", "pairDigits": pair_digits})
+
+
 async def handle_control_approval_ack(client_id: str, msg: dict):
     """Phone confirms it got the request and is asking the user.
 
@@ -5198,6 +5305,11 @@ async def _resolve_pending(client_id: str, msg: dict, outcome: str):
 
     if outcome == "deny":
         control_manager.burn(p.code)
+        # burn() is a no-op for a codeless pending (there is no ticket), so
+        # without this a refusal would last exactly as long as it took the
+        # requester to press Connect again.
+        if p.owner_uid:
+            _deny_until[(p.owner_uid, p.session_id)] = time.time() + DENY_COOLDOWN
         await ws_send(p.browser_ws, {"type": "control_error", "code": "denied"})
         return
 
@@ -5679,6 +5791,9 @@ async def websocket_endpoint(websocket: WebSocket):
 
             elif msg_type == "control_join":
                 await handle_control_join(client_id, websocket, msg)
+
+            elif msg_type == "control_request":
+                await handle_control_request(client_id, websocket, msg)
 
             elif msg_type == "control_approval_ack":
                 await handle_control_approval_ack(client_id, msg)

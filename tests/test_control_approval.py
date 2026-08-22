@@ -11,6 +11,7 @@ sys.path.insert(0, 'd:/projects/audiosync-yt-dlp/server')
 import control_session
 
 sent = []          # (ws, message)
+_UIDS = {}         # client_id -> uid, standing in for main.py's _ws_uids
 
 
 class FakeWS:
@@ -40,6 +41,7 @@ def load_main_pieces():
         '_prompt_allowed', '_expire_unacked', 'handle_control_join',
         '_parse_control_caps', '_prune_prompt_hits',
         '_code_belongs_to_approval_phone',
+        'handle_control_request', '_request_allowed', '_prune_request_hits',
         'handle_control_approval_ack', '_resolve_pending',
         'handle_control_approve', 'handle_control_deny', 'handle_control_cancel',
         'sweep_pendings',
@@ -65,18 +67,21 @@ def load_main_pieces():
             for t in node.targets:
                 if isinstance(t, ast.Name) and t.id in (
                         'ACK_DEADLINE', 'PROMPT_TTL', 'PROMPT_CAP',
-                        '_UA_FAMILIES', '_UA_PLATFORMS', '_KNOWN_CONTROL_CAPS'):
+                        '_UA_FAMILIES', '_UA_PLATFORMS', '_KNOWN_CONTROL_CAPS',
+                        'REQUEST_CAP', 'DENY_COOLDOWN'):
                     chunks.append(seg(node))
         elif isinstance(node, ast.AnnAssign):
             t = node.target
             if isinstance(t, ast.Name) and t.id in (
-                    '_pending', '_pending_by_browser', '_ack_tasks', '_prompt_hits'):
+                    '_pending', '_pending_by_browser', '_ack_tasks', '_prompt_hits',
+                    '_request_hits', '_deny_until'):
                 chunks.append(seg(node))
 
     ns = {
         'asyncio': asyncio, 'time': __import__('time'),
         'secrets': __import__('secrets'), 'dataclasses': __import__('dataclasses'),
         'ws_send': fake_ws_send, 'control_manager': None,
+        'uid_for_ws': lambda cid: _UIDS.get(cid),
         'WebSocketState': types.SimpleNamespace(CONNECTED='CONNECTED'),
         'WebSocket': object,
     }
@@ -289,6 +294,86 @@ async def main():
     check("caps: non-list ignored", pc({"caps": "approval"}) == set())
     check("caps: unknown dropped", pc({"caps": ["bogus"]}) == set())
     check("caps: valid kept", pc({"caps": ["approval"]}) == {"approval"})
+
+    # ---- codeless pairing (control_request)
+    print("  -- codeless pairing --")
+    request = ns['handle_control_request']
+
+    def fresh_codeless(phone_uid="uid-owner"):
+        cm, sess, secret, phone = fresh()
+        ns['_request_hits'].clear(); ns['_deny_until'].clear()
+        _UIDS.clear()
+        _UIDS["phoneC"] = phone_uid          # the phone's verified identity
+        return cm, sess, phone
+
+    # signed-out browser gets nowhere
+    cm, sess, phone = fresh_codeless()
+    b = FakeWS("bc0")
+    await request("browser0", b, {})
+    check("signed out -> not_signed_in", last_to(b)["code"] == "not_signed_in")
+
+    # a DIFFERENT account cannot reach this phone
+    cm, sess, phone = fresh_codeless()
+    _UIDS["browserX"] = "uid-someone-else"
+    bx = FakeWS("bcX")
+    await request("browserX", bx, {})
+    check("other account -> no_device", last_to(bx)["code"] == "no_device")
+    check("other account raised NO prompt", last_to(phone) is None)
+
+    # the owner's own browser reaches it, and both ends see the same digits
+    cm, sess, phone = fresh_codeless()
+    _UIDS["browserO"] = "uid-owner"
+    bo = FakeWS("bcO")
+    await request("browserO", bo, {})
+    prompt = last_to(phone)
+    check("owner -> prompt raised", prompt and prompt["type"] == "control_approval_request")
+    check("prompt carries pairDigits", len(prompt.get("pairDigits", "")) == 4)
+    check("browser sees the SAME digits",
+          last_to(bo).get("pairDigits") == prompt["pairDigits"])
+
+    # ...and approving attaches, with no code anywhere in it
+    rid = prompt["requestId"]
+    await ack("phoneC", {"requestId": rid})
+    await approve("phoneC", {"requestId": rid})
+    check("codeless approve attaches", last_to(bo)["type"] == "control_joined")
+
+    # a phone whose socket is down is not reachable
+    cm, sess, phone = fresh_codeless()
+    _UIDS["browserO"] = "uid-owner"
+    sess.phone_ws = None
+    await request("browserO", FakeWS("bcD"), {})
+    check("dead phone socket -> no_device",
+          last_to(sent[-1][0])["code"] == "no_device")
+
+    # deny must STICK — there is no ticket to burn here
+    cm, sess, phone = fresh_codeless()
+    _UIDS["browserO"] = "uid-owner"
+    b1 = FakeWS("bc1")
+    await request("browserO", b1, {})
+    rid = last_to(phone)["requestId"]
+    await ack("phoneC", {"requestId": rid})
+    await deny("phoneC", {"requestId": rid})
+    check("codeless deny -> denied", last_to(b1)["code"] == "denied")
+    b2 = FakeWS("bc2b")
+    await request("browserO", b2, {})
+    check("deny sticks: retry refused", last_to(b2)["code"] == "denied")
+    check("retry raised NO second prompt",
+          last_to(phone)["type"] != "control_approval_request"
+          or last_to(phone)["requestId"] == rid)
+
+    # per-account cap
+    cm, sess, phone = fresh_codeless()
+    _UIDS["browserO"] = "uid-owner"
+    throttled = False
+    for i in range(6):
+        bi = FakeWS(f"bcap{i}")
+        await request("browserO", bi, {})
+        if (last_to(bi) or {}).get("code") == "throttled":
+            throttled = True
+            break
+        for r in list(ns['_pending']):
+            ns['_drop_pending'](r)
+    check("per-account cap throttles", throttled)
 
     print("\nALL PASS" if ok else "\nFAILURES ABOVE")
     return 0 if ok else 1

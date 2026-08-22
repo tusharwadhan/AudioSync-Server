@@ -157,6 +157,18 @@ class ControlSessionManager:
                 return sess
         return None
 
+    def sessions_with_live_phone(self):
+        """Every session whose phone socket is currently up, newest first.
+
+        Ownership is deliberately NOT resolved here. owner_uid is a stored field
+        that goes stale (nothing clears it when an account signs out while
+        offline), so the caller derives the owner from the phone's LIVE socket
+        identity instead. See handle_control_request.
+        """
+        live = [x for x in self._sessions.values()
+                if x.phone_ws is not None and not x.phone_gone_at]
+        return sorted(live, key=lambda x: x.last_seen, reverse=True)
+
     def get(self, session_id: str) -> Optional[ControlSession]:
         return self._sessions.get(session_id)
 
