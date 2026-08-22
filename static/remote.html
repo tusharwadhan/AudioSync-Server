@@ -37,21 +37,25 @@
   .primary:disabled{opacity:.45;cursor:default}
   .err{margin-top:11px;font-size:12.5px;color:#ff9a9a;min-height:17px}
 
-  .np{display:flex;gap:14px;align-items:center;margin-bottom:18px}
-  .art{width:62px;height:62px;border-radius:12px;flex:0 0 auto;
+  .np{display:flex;gap:15px;align-items:center;margin-bottom:20px;position:relative}
+  .art{width:74px;height:74px;border-radius:14px;flex:0 0 auto;
+    box-shadow:0 10px 26px rgba(0,0,0,.5);
     background:linear-gradient(140deg,#3a2b57,#1d2233);display:grid;place-items:center;
     font-size:22px;
     /* After the shorthand, not before — `background:` resets both of these,
        so declaring them first meant the artwork never actually rendered. */
     background-size:cover;background-position:center}
   .meta{min-width:0;flex:1}
-  .t{font-size:15px;font-weight:700;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
-  .a{font-size:12.5px;color:var(--accent2);margin-top:3px;
+  .t{font-size:15.5px;font-weight:700;line-height:1.3;letter-spacing:-.01em;
+     display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;
+     overflow:hidden}
+  .a{font-size:12.5px;color:var(--accent2);margin-top:4px;
     white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 
-  .bar{height:4px;background:rgba(255,255,255,.12);border-radius:4px;overflow:hidden}
-  .bar i{display:block;height:100%;width:0;background:var(--accent);
-    border-radius:4px;transition:width .25s linear}
+  .bar{height:5px;background:rgba(255,255,255,.10);border-radius:4px;overflow:hidden}
+  .bar i{display:block;height:100%;width:0;border-radius:4px;
+    background:linear-gradient(90deg,var(--accent),var(--accent2));
+    transition:width .25s linear}
   .times{display:flex;justify-content:space-between;font-size:11px;color:var(--dim);
     margin-top:7px;font-variant-numeric:tabular-nums}
 
@@ -60,8 +64,10 @@
     display:grid;place-items:center;transition:.15s}
   .tp:hover{background:rgba(255,255,255,.08)}
   .tp svg{width:26px;height:26px;fill:currentColor}
-  .tp.play{width:62px;height:62px;background:#fff;color:#000}
-  .tp.play:hover{background:#e9e9e9}
+  .tp.play{width:62px;height:62px;background:#fff;color:#000;
+    box-shadow:0 6px 20px rgba(255,255,255,.14)}
+  .tp.play:hover{background:#e9e9e9;transform:scale(1.04)}
+  .tp.play:active{transform:scale(.97)}
   .tp.play svg{width:27px;height:27px}
 
   .vol{display:flex;align-items:center;gap:11px;margin-top:20px}
@@ -73,18 +79,35 @@
   input[type=range]::-moz-range-thumb{width:14px;height:14px;border:0;border-radius:50%;
     background:#fff;cursor:pointer}
 
-  .search{display:flex;align-items:center;gap:8px;margin-top:22px}
-  .search input{flex:1;background:#111;border:1px solid var(--line);color:inherit;
-    border-radius:9px;padding:9px 11px;font:inherit;outline:none}
-  .search input:focus{border-color:#555}
+  .search{display:flex;align-items:center;gap:10px;margin-top:22px}
+  /* The base `input` rule is the PAIRING CODE field: 20px/700, .32em tracking,
+     uppercase, centred. `font:inherit` resets size/weight/family but NOT
+     letter-spacing, text-transform or text-align -- which is why this box was
+     rendering "S E A R C H   F O R   A   S O N G". Undo all three explicitly. */
+  .search input{flex:1;height:42px;background:#0e1016;border:1px solid var(--line);
+    color:inherit;border-radius:11px;padding:0 13px;font:inherit;font-size:13.5px;
+    font-weight:500;letter-spacing:normal;text-transform:none;text-align:left;
+    outline:none;transition:border-color .15s,background .15s}
+  .search input::placeholder{color:var(--dim);font-weight:400}
+  .search input:focus{border-color:var(--accent);background:#111420}
   .lhead{margin:20px 0 8px;font-size:12px;letter-spacing:.08em;text-transform:uppercase;
     opacity:.55}
   /* Capped so a long queue scrolls inside its own box instead of pushing the
      transport controls off-screen — the controls are the reason the page exists. */
-  .list{max-height:300px;overflow-y:auto;overflow-x:hidden}
-  .qrow{display:flex;align-items:center;gap:10px;padding:7px 4px;border-radius:8px;
-    cursor:pointer}
-  .qrow:hover{background:#141414}
+  .list{max-height:300px;overflow-y:auto;overflow-x:hidden;
+    scrollbar-width:thin;scrollbar-color:rgba(255,255,255,.16) transparent}
+  .list::-webkit-scrollbar{width:6px}
+  .list::-webkit-scrollbar-track{background:transparent}
+  .list::-webkit-scrollbar-thumb{background:rgba(255,255,255,.14);border-radius:3px}
+  .list::-webkit-scrollbar-thumb:hover{background:rgba(255,255,255,.26)}
+  /* Fades the last row instead of clipping it mid-glyph, so it reads as
+     "more below" rather than as a rendering fault. */
+  .listwrap{position:relative}
+  .listwrap::after{content:'';position:absolute;left:0;right:6px;bottom:0;height:34px;
+    background:linear-gradient(transparent,var(--panel));pointer-events:none}
+  .qrow{display:flex;align-items:center;gap:11px;padding:8px 8px;border-radius:10px;
+    cursor:pointer;transition:background .12s}
+  .qrow:hover{background:rgba(255,255,255,.055)}
   .qrow img{width:44px;height:44px;object-fit:cover;border-radius:6px;flex:0 0 auto;
     background:#111}
   .qmeta{flex:1;min-width:0}
@@ -176,7 +199,7 @@
     <div id="results" class="list hide"></div>
 
     <div class="lhead" id="qhead">Up next</div>
-    <div id="queue" class="list"></div>
+    <div class="listwrap"><div id="queue" class="list"></div></div>
 
     <div class="foot">
       <span><span class="dot" id="dot"></span><span id="status">connecting…</span></span>
