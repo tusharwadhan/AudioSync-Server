@@ -103,6 +103,8 @@
   .link{background:none;color:var(--dim);font-size:12px;text-decoration:underline}
   .hide{display:none!important}
 </style>
+  <script src="https://www.gstatic.com/firebasejs/10.12.2/firebase-app-compat.js"></script>
+  <script src="https://www.gstatic.com/firebasejs/10.12.2/firebase-auth-compat.js"></script>
 </head>
 <body>
 
@@ -110,13 +112,36 @@
 
   <div id="pairView">
     <h1>SyncAura Remote</h1>
-    <p class="sub">Open SyncAura on your phone, go to <b>Remote</b>, and type the
-       six characters it shows.</p>
-    <input id="code" maxlength="6" autocomplete="off" autocapitalize="characters"
-           spellcheck="false" placeholder="······" aria-label="Pairing code">
-    <button class="primary" id="pairBtn" disabled>Connect</button>
-    <div class="err" id="pairErr"></div>
+
+    <div id="quickView">
+      <p class="sub">Sign in and your phone will ask you to approve — no code needed.</p>
+      <button class="primary" id="signInBtn">Sign in with Google</button>
+      <button class="primary hide" id="askBtn">Connect to my phone</button>
+      <div id="whoami" class="sub hide"></div>
+      <div id="digits" class="hide">
+        <div class="sub">Check these match your phone</div>
+        <div id="digitsVal"></div>
+      </div>
+      <div class="err" id="quickErr"></div>
+      <div class="sub"><a href="#" id="useCode">Use a pairing code instead</a></div>
+    </div>
+
+    <div id="codeView" class="hide">
+      <p class="sub">Open SyncAura on your phone, go to <b>Remote</b>, and type the
+         six characters it shows.</p>
+      <input id="code" maxlength="6" autocomplete="off" autocapitalize="characters"
+             spellcheck="false" placeholder="······" aria-label="Pairing code">
+      <button class="primary" id="pairBtn" disabled>Connect</button>
+      <div class="err" id="pairErr"></div>
+      <div class="sub"><a href="#" id="useAccount">Use my account instead</a></div>
+    </div>
   </div>
+
+  <style>
+    #digitsVal { font-size: 2.1rem; letter-spacing: .5rem; font-weight: 700;
+                 margin: .3rem 0 .6rem; }
+    #quickView a, #codeView a { color: inherit; opacity: .7; }
+  </style>
 
   <div id="playerView" class="hide">
     <div class="np">
@@ -187,6 +212,64 @@
   function setStatus(text, cls){
     $('status').textContent = text;
     $('dot').className = 'dot' + (cls ? ' ' + cls : '');
+  }
+
+  // ── account sign-in ───────────────────────────────────────────────────
+  //
+  // The apiKey is not a secret: it identifies the project, it does not
+  // authorise anything. What actually constrains it is Firebase's Authorized
+  // Domains list, which decides where a sign-in may be completed.
+  var FB = {
+    apiKey: "AIzaSyBhq-A6-lRXzouutJzsq8UXYlc7TApVNI8",
+    authDomain: "audiosync-dfee2.firebaseapp.com",
+    projectId: "audiosync-dfee2",
+    appId: "1:823868308702:web:3dec16fc2003085ed4164f"
+  };
+  var fbAuth = null, authed = false;
+
+  function quickErr(msg){ $('quickErr').textContent = msg || ''; }
+
+  function initAuth(){
+    if (typeof firebase === 'undefined') {
+      // The SDK failed to load (offline, blocked, CDN down). Do not strand the
+      // user on a dead button — the code flow still works.
+      showCodeView();
+      return;
+    }
+    firebase.initializeApp(FB);
+    fbAuth = firebase.auth();
+    fbAuth.onAuthStateChanged(function(user){
+      if (user) {
+        $('signInBtn').classList.add('hide');
+        $('askBtn').classList.remove('hide');
+        $('whoami').classList.remove('hide');
+        $('whoami').textContent = user.email || user.displayName || 'Signed in';
+        sendAuth(user);
+      } else {
+        $('signInBtn').classList.remove('hide');
+        $('askBtn').classList.add('hide');
+        $('whoami').classList.add('hide');
+        authed = false;
+      }
+    });
+  }
+
+  // Re-sent on every socket open: ws_auth is per-CONNECTION, so a reconnect
+  // silently drops the identity and control_request would answer not_signed_in.
+  function sendAuth(user){
+    if (!user || !ws || ws.readyState !== 1) return;
+    user.getIdToken().then(function(tok){
+      send({type: 'ws_auth', idToken: tok});
+    }).catch(function(){ quickErr('Could not verify your sign-in. Try again.'); });
+  }
+
+  function showCodeView(){
+    $('quickView').classList.add('hide');
+    $('codeView').classList.remove('hide');
+  }
+  function showQuickView(){
+    $('codeView').classList.add('hide');
+    $('quickView').classList.remove('hide');
   }
 
   function send(obj){
@@ -295,6 +378,8 @@
       // no way to reach this browser again — it gets a fresh client_id on
       // every reconnect and holds no rejoin secret.
       if (!paired) { clearPendingTimer(); resetPairButton(); setStatus('ready to pair'); }
+      authed = false;
+      if (fbAuth && fbAuth.currentUser) sendAuth(fbAuth.currentUser);
     };
 
     ws.onmessage = function(ev){
@@ -352,6 +437,12 @@
           fail('That request timed out. Ask the phone for a new code.');
         } else if (m.code === 'cancelled') {
           fail('Approval was interrupted on your phone. Try the same code again.');
+        } else if (m.code === 'no_device') {
+          quickErr('No phone signed in to this account is reachable. Open SyncAura on your phone, or use a pairing code.');
+          resetPairButton();
+        } else if (m.code === 'not_signed_in') {
+          quickErr('Sign in first, or use a pairing code.');
+          resetPairButton();
         } else if (m.code === 'throttled') {
           fail('Too many approval requests. Wait a minute and try again.');
         } else {
@@ -362,6 +453,20 @@
           // was cached.
           fail('Couldn’t connect (' + (m.code || 'unknown') + ').');
         }
+
+      } else if (m.type === 'ws_auth_ok') {
+        authed = true;
+
+      } else if (m.type === 'ws_auth_error') {
+        authed = false;
+        quickErr('Could not verify your sign-in. Use a pairing code.');
+
+      } else if (m.type === 'control_requested') {
+        // Show the digits BEFORE the phone is approved, so the user has
+        // something to compare against the prompt rather than after the fact.
+        $('digitsVal').textContent = m.pairDigits || '';
+        $('digits').classList.remove('hide');
+        setStatus('waiting for approval on your phone', 'warn');
 
       } else if (m.type === 'control_pending') {
         // Approval is being asked for on the phone. Can legitimately take a
@@ -431,6 +536,10 @@
     var b = $('pairBtn');
     b.textContent = 'Connect';
     b.disabled = $('code').value.length !== 6;
+    var a = $('askBtn');
+    a.textContent = 'Connect to my phone';
+    a.disabled = false;
+    $('digits').classList.add('hide');
   }
 
   // ── pairing ──
@@ -442,6 +551,30 @@
   $('code').addEventListener('keydown', function(e){
     if (e.key === 'Enter' && this.value.length === 6) $('pairBtn').click();
   });
+  $('signInBtn').addEventListener('click', function(){
+    quickErr('');
+    if (!fbAuth) { quickErr('Sign-in unavailable. Use a pairing code.'); return; }
+    var provider = new firebase.auth.GoogleAuthProvider();
+    fbAuth.signInWithPopup(provider).catch(function(e){
+      // Popups are blocked often enough that a bare failure looks like a bug.
+      quickErr(e && e.code === 'auth/popup-blocked'
+        ? 'Your browser blocked the sign-in popup.'
+        : 'Sign-in failed. You can use a pairing code instead.');
+    });
+  });
+
+  $('askBtn').addEventListener('click', function(){
+    quickErr('');
+    $('digits').classList.add('hide');
+    if (!ws || ws.readyState !== 1) { quickErr('Not connected to the server yet.'); return; }
+    if (!authed) { quickErr('Still verifying your sign-in — try again in a second.'); return; }
+    this.disabled = true; this.textContent = 'Asking your phone…';
+    send({type: 'control_request'});
+  });
+
+  $('useCode').addEventListener('click', function(e){ e.preventDefault(); showCodeView(); });
+  $('useAccount').addEventListener('click', function(e){ e.preventDefault(); showQuickView(); });
+
   $('pairBtn').addEventListener('click', function(){
     if (!ws || ws.readyState !== 1) { fail('Not connected to the server yet.'); return; }
     this.disabled = true; this.textContent = 'Connecting…';
@@ -515,6 +648,7 @@
     $('code').value = ''; $('pairBtn').disabled = true; $('pairErr').textContent = '';
   });
 
+  initAuth();
   connect();
 })();
 </script>
