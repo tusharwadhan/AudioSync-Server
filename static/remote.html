@@ -464,7 +464,13 @@
     $('playIcon').innerHTML = st.isPlaying
       ? '<path d="M6 5h4v14H6zm8 0h4v14h-4z"/>'
       : '<path d="M8 5v14l11-7z"/>';
-    if (typeof st.volume === 'number' && document.activeElement !== $('vol')) {
+    // Held off after a local change, exactly like the play button. The phone's
+    // settle push lands ~400ms later and can still carry the PREVIOUS volume --
+    // it raced our command -- so without this the slider visibly snaps back,
+    // which is what makes rapid tapping feel broken.
+    if (typeof st.volume === 'number' &&
+        document.activeElement !== $('vol') &&
+        Date.now() > volOptimisticUntil) {
       $('vol').value = Math.round(st.volume * 100);
     }
     tick();
@@ -817,6 +823,11 @@
   window.addEventListener('blur', closeMenu);
 
   // ── keyboard ──────────────────────────────────────────────────────────
+  // Long enough to cover the phone's 400ms settle push plus a slow round trip,
+  // and re-armed on every change, so a burst of taps is protected as one.
+  var volOptimisticUntil = 0;
+  function markVolumeLocal(){ volOptimisticUntil = Date.now() + 1500; }
+
   var hudTimer = null;
   function hud(msg){
     var el = $('hud');
@@ -848,8 +859,11 @@
   }
 
   function nudgeVolume(delta){
-    var cur = typeof st.volume === 'number' ? st.volume : ($('vol').value / 100);
+    // Read the SLIDER, not st.volume: during a burst st.volume may still hold
+    // an older echo, and compounding from it makes the steps jump around.
+    var cur = ($('vol').value || 0) / 100;
     var next = Math.max(0, Math.min(1, cur + delta));
+    markVolumeLocal();
     st.volume = next;
     $('vol').value = Math.round(next * 100);
     cmd('volume', next);
@@ -858,7 +872,8 @@
 
   var preMuteVolume = null;
   function toggleMute(){
-    var cur = typeof st.volume === 'number' ? st.volume : ($('vol').value / 100);
+    markVolumeLocal();
+    var cur = ($('vol').value || 0) / 100;
     if (cur > 0.001) {
       preMuteVolume = cur;
       st.volume = 0; $('vol').value = 0; cmd('volume', 0);
@@ -994,7 +1009,22 @@
     var hit = lastResults.filter(function(r){ return r.videoId === row.dataset.id; })[0];
     if (hit) cmd('play_search', hit);
   });
-  $('vol').addEventListener('change', function(){ cmd('volume', this.value / 100); });
+  // 'input' as well as 'change': on a drag, 'change' only fires on release, so
+  // the phone stayed at the old level until you let go.
+  var volSendTimer = null;
+  $('vol').addEventListener('input', function(){
+    markVolumeLocal();
+    var v = this.value / 100;
+    // Coalesced: a drag emits dozens of events and the server allows 40
+    // commands per 10s.
+    clearTimeout(volSendTimer);
+    volSendTimer = setTimeout(function(){ cmd('volume', v); }, 120);
+  });
+  $('vol').addEventListener('change', function(){
+    markVolumeLocal();
+    clearTimeout(volSendTimer);
+    cmd('volume', this.value / 100);
+  });
   $('unpair').addEventListener('click', function(){
     paired = false;
     // Actually detach. Hiding the UI locally left the socket open and the
