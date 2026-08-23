@@ -277,6 +277,13 @@
     padding:max(18px,env(safe-area-inset-top)) max(18px,env(safe-area-inset-right))
             max(18px,env(safe-area-inset-bottom)) max(18px,env(safe-area-inset-left));
   }
+  /* display:contents so .main and #pairView ARE the grid items. Without it
+     #playerView sits between them as a plain block with height:auto, .main's
+     minmax(0,1fr) has no definite height to divide, and .list{height:100%}
+     degenerates to auto -- at 25 rows the panel grew to ~1975px inside a 900px
+     viewport and the footer, Shortcuts and Disconnect went off-screen with
+     overflow:hidden making them unreachable. */
+  #playerView{display:contents}
   .main{display:grid;grid-template-rows:auto minmax(0,1fr);gap:16px;min-height:0;min-width:0}
 
 
@@ -339,7 +346,11 @@
   .foot{margin-top:0}
 
   @media (max-width:820px){
+    /* Pairing card FIRST: with the player in the flexible row it filled the
+       screen and pushed #pairView to ~1215px, unreachable behind
+       overflow:hidden -- so re-pairing on a phone needed a page reload. */
     .app{grid-template-columns:1fr;grid-template-rows:auto minmax(0,1fr)}
+    #pairView{order:-1;justify-self:stretch;width:auto}
     .stage{padding:14px;gap:12px}
     .art{width:56px;height:56px}
   }
@@ -640,8 +651,8 @@
           ? '<button class="qbtn" data-act="next" title="Play next">&#8593;</button>' +
             '<button class="qbtn" data-act="queue" title="Add to queue">+</button>'
           : '');
-    return '<div class="qrow' + (queued ? ' queued' : '') + '" data-id="' + item.videoId + '">' +
-             '<img loading="lazy" src="' + thumb(item.videoId) + '" alt="">' +
+    return '<div class="qrow' + (queued ? ' queued' : '') + '" data-id="' + esc(item.videoId) + '">' +
+             '<img loading="lazy" src="' + esc(thumb(item.videoId)) + '" alt="">' +
              '<div class="qmeta">' +
                '<div class="qt">' + esc(item.title || '') + '</div>' +
                '<div class="qa">' + esc(item.artist || '') + '</div>' +
@@ -691,9 +702,12 @@
       // promote before it scrolls past.
       return rowHtml(it, '', !it.queued, !!it.queued);
     }).join('');
-    if (next === el.innerHTML) return;      // nothing changed; don't disturb it
+    if (next === el.innerHTML) { markStartingRow(); return; }
     el.innerHTML = next;
     el.scrollTop = keep;
+    // Re-applied after every render: innerHTML drops the class, and a song
+    // started from search results lives in the other list.
+    markStartingRow();
   }
 
   function renderResults(results){
@@ -737,6 +751,9 @@
   // The phone pushes state every few seconds; advance the playhead locally
   // between pushes so the bar moves smoothly instead of stepping.
   function tick(){
+    // A heartbeat every 5s, plus one on every state change, would otherwise
+    // yank the playhead back to the phone's position mid-gesture.
+    if (scrubbing) return;
     var p = st.position || 0;
     if (st.isPlaying && drift != null) p += (Date.now() - drift) / 1000;
     if (st.duration) p = Math.min(p, st.duration);
@@ -794,7 +811,10 @@
         st = incoming; drift = Date.now();
         // The phone has said what it is playing, so the wait is over -- whether
         // it landed on the song we asked for or not.
-        if (wasStarting && (st.videoId === wasStarting || st.isPlaying)) endStarting();
+            // Match the id, not st.isPlaying: the first settle push lands ~400ms
+        // later and isPlaying is already true if the phone was playing
+        // something else, which ended the wait before the track had switched.
+        if (wasStarting && st.videoId === wasStarting) endStarting();
         if (radioLoading) {
           var nowIds = (st.upNext || []).map(function(x){ return x.videoId; }).join(',');
           // Fresh rows, or none coming. Either way stop pretending to wait.
@@ -838,6 +858,20 @@
         } else if (m.code === 'not_signed_in') {
           quickErr('Sign in first, or use a pairing code.');
           resetPairButton();
+        } else if (m.code === 'item_gone' || m.code === 'play_failed' ||
+                   m.code === 'player_not_ready' || m.code === 'guest_in_room' ||
+                   m.code === 'not_paired') {
+          // Every one of these means the play did NOT happen, so the card must
+          // stop pretending to wait. They also used to fall through to fail(),
+          // which writes into #pairErr -- inside the hidden pair view while
+          // paired, so the user saw nothing at all.
+          endStarting();
+          radioLoading = false;
+          renderQueue();
+          hud(m.code === 'guest_in_room' ? 'Host controls playback'
+            : m.code === 'item_gone'     ? 'That song is no longer there'
+            : m.code === 'not_paired'    ? 'Phone disconnected'
+            : 'Could not play that');
         } else if (m.code === 'already_queued') {
           hud('Already in the queue');
         } else if (m.code === 'throttled') {
@@ -903,6 +937,12 @@
 
     ws.onclose = function(){
       setStatus('reconnecting…', 'warn');
+      // The server has detached this controller and the browser holds no rejoin
+      // secret -- it gets a fresh client_id next time. Staying "paired" left a
+      // live-looking player whose controls answered not_paired, with the
+      // pairing form hidden: recoverable only by reloading.
+      if (paired) { paired = false; setOffline(true); }
+      endStarting(); radioLoading = false;
       // Without this the button stays on "Connecting…"/"Check your phone…"
       // through every reconnect, because fail() is the only other thing that
       // restores it and nothing calls fail() on a transport drop.
@@ -1141,7 +1181,9 @@
   }
   function endStarting(){
     startingId = null;
-    clearTimeout(startTimer);
+    // The timer is NOT cancelled here: its job is to release radioLoading, and
+    // cancelling it meant a play that never landed (403, guest_in_room,
+    // item_gone) left six skeletons shimmering permanently.
     // Not cleared here: the song has started but its radio may still be in
     // flight. renderQueue keeps the skeletons until the list genuinely changes.
 
@@ -1149,7 +1191,7 @@
     markStartingRow();
   }
   function markStartingRow(){
-    var rows = $('queue').querySelectorAll('.qrow');
+    var rows = document.querySelectorAll('#queue .qrow, #results .qrow');
     Array.prototype.forEach.call(rows, function(r){
       r.classList.toggle('starting', !!startingId && r.dataset.id === startingId);
     });
@@ -1169,6 +1211,14 @@
   //
   // The bar was read-only: seeking existed only on the keyboard and nothing
   // said so. Click to jump, drag to scrub, hover for a preview.
+  // The drag paints directly: tick() deliberately bails while scrubbing.
+  function tickForce(){
+    var pct = st.duration ? (st.position / st.duration * 100) : 0;
+    $('prog').style.width = pct + '%';
+    $('knob').style.left = pct + '%';
+    $('pos').textContent = fmt(st.position);
+  }
+
   function scrubFrac(e){
     var r = $('scrub').getBoundingClientRect();
     var x = (e.touches ? e.touches[0].clientX : e.clientX) - r.left;
@@ -1202,15 +1252,24 @@
   });
   document.addEventListener('mousemove', function(e){
     if (!scrubbing) return;
+    // Released over browser chrome or another window, no mouseup reaches the
+    // document -- the playhead then followed the bare cursor and the next
+    // click anywhere fired a stale seek. buttons===0 means it is already up.
+    if (e.buttons === 0) { finishScrub(e); return; }
     var f = scrubFrac(e);
-    st.position = st.duration * f; drift = Date.now(); tick();
+    st.position = st.duration * f; drift = Date.now(); tickForce();
   });
-  document.addEventListener('mouseup', function(e){
+  function finishScrub(e){
     if (!scrubbing) return;
     scrubbing = false;
     $('scrub').classList.remove('dragging');
     seekToFrac(scrubFrac(e));            // one command, at the end
     hud(fmt(st.position));
+  }
+  document.addEventListener('mouseup', finishScrub);
+  window.addEventListener('blur', function(){
+    // Alt-tabbing mid-drag is the other way to never see a mouseup.
+    if (scrubbing) { scrubbing = false; $('scrub').classList.remove('dragging'); }
   });
 
   $('mute').addEventListener('click', toggleMute);
@@ -1282,6 +1341,8 @@
   }
 
   function toggleMute(){
+    // Repainted here too: render() is gated on the optimistic window that
+    // markVolumeLocal just pushed 1.5s out, so it would not run.
     markVolumeLocal();
     var cur = ($('vol').value || 0) / 100;
     if (cur > 0.001) {
@@ -1443,8 +1504,19 @@
     var row = e.target.closest('.qrow');
     if (!row) return;
     var hitQ = lastResults.filter(function(r){ return r.videoId === row.dataset.id; })[0];
-    if (e.target.closest('.qadd')) {
-      if (hitQ) { cmd('queue_item', hitQ); flash(row, 'queued'); }
+    // .qbtn, not .qadd: rowHtml stopped emitting .qadd when the hover actions
+    // landed, so this branch never matched and "+" fell through to play_search
+    // -- interrupting whatever was playing instead of queueing.
+    var rAct = e.target.closest('.qbtn');
+    if (rAct) {
+      if (hitQ) {
+        var payload = {};
+        for (var k in hitQ) if (Object.prototype.hasOwnProperty.call(hitQ, k)) payload[k] = hitQ[k];
+        payload.next = (rAct.dataset.act === 'next');
+        cmd('queue_item', payload);
+        rAct.classList.add('done'); rAct.textContent = '\u2713';
+        hud(payload.next ? 'Playing next' : 'Added to queue');
+      }
       return;
     }
     // Send the metadata with it: this song is not in any queue yet, so the
@@ -1456,6 +1528,7 @@
   // the phone stayed at the old level until you let go.
   $('vol').addEventListener('input', function(){
     markVolumeLocal();
+    paintMuteIcon(this.value / 100);
     sendVolumeSoon(this.value / 100);
   });
   $('vol').addEventListener('change', function(){
