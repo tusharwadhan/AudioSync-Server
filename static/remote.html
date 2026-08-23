@@ -396,7 +396,10 @@
       return;
     }
     $('queue').innerHTML = list.map(function(it){
-      return rowHtml(it, it.queued ? 'queued' : '', false);
+      // The + only on suggestions. A queued song is already where the button
+      // would put it, and a radio suggestion is exactly the thing you want to
+      // promote before it scrolls past.
+      return rowHtml(it, it.queued ? 'queued' : '', !it.queued);
     }).join('');
   }
 
@@ -815,7 +818,19 @@
   // state push, and per-row handlers would be re-bound several times a second.
   $('queue').addEventListener('click', function(e){
     var row = e.target.closest('.qrow');
-    if (row) cmd('play_item', row.dataset.id);
+    if (!row) return;
+    if (e.target.closest('.qadd')) {
+      // Queue it instead of playing it. The row already carries everything
+      // enqueueSong needs, so unlike a search result there is nothing extra
+      // to look up.
+      var it = (st.upNext || []).filter(function(x){ return x.videoId === row.dataset.id; })[0];
+      if (it) {
+        cmd('queue_item', {videoId: it.videoId, title: it.title, artist: it.artist});
+        flash(row, 'queued');
+      }
+      return;
+    }
+    cmd('play_item', row.dataset.id);
   });
   $('results').addEventListener('click', function(e){
     var row = e.target.closest('.qrow');
