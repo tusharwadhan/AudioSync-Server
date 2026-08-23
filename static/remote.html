@@ -103,8 +103,14 @@
   /* Fades the last row instead of clipping it mid-glyph, so it reads as
      "more below" rather than as a rendering fault. */
   .listwrap{position:relative}
-  .listwrap::after{content:'';position:absolute;left:0;right:6px;bottom:0;height:34px;
-    background:linear-gradient(transparent,var(--panel));pointer-events:none}
+  /* Only when there is genuinely more below. Unconditional, it greyed out a
+     one-line "Nothing queued", faded the last of a two-row list as if it
+     scrolled, and — with #queue hidden during a search — smeared a band across
+     the bottom of the results instead. */
+  .listwrap.faded::after{
+    content:'';position:absolute;left:0;right:6px;bottom:0;height:34px;
+    background:linear-gradient(transparent,var(--panel));pointer-events:none;
+  }
   .qrow{display:flex;align-items:center;gap:11px;padding:8px 8px;border-radius:10px;
     cursor:pointer;transition:background .12s}
   .qrow:hover{background:rgba(255,255,255,.055)}
@@ -409,15 +415,28 @@
   function renderQueue(){
     var list = st.upNext || [];
     if (!list.length) {
+      var w = $('queue').parentNode;
+      if (w && w.classList) w.classList.remove('faded');
       $('queue').innerHTML = '<div class="empty">Nothing queued</div>';
       return;
     }
-    $('queue').innerHTML = list.map(function(it){
+    // render() runs on every state push — every 5s, and 400ms after every
+    // command — and rewriting innerHTML resets scrollTop to 0. Scrolling the
+    // list and then pressing any key snapped it back to the top, which defeats
+    // the point of making it scrollable.
+    var el = $('queue');
+    var keep = el.scrollTop;
+    var wrap = el.parentNode;
+    if (wrap && wrap.classList) wrap.classList.toggle('faded', list.length > 4);
+    var next = list.map(function(it){
       // The + only on suggestions. A queued song is already where the button
       // would put it, and a radio suggestion is exactly the thing you want to
       // promote before it scrolls past.
       return rowHtml(it, it.queued ? 'queued' : '', !it.queued);
     }).join('');
+    if (next === el.innerHTML) return;      // nothing changed; don't disturb it
+    el.innerHTML = next;
+    el.scrollTop = keep;
   }
 
   function renderResults(results){
@@ -509,7 +528,11 @@
         if (m.code === 'bad_code') {
           fail('That code didn’t work. It expires after 90 seconds — ask the phone for a new one.');
         } else if (m.code === 'rate_limited') {
-          fail('Too many attempts. Wait a moment and try again.');
+          // While paired, pairErr lives inside the hidden pair view — fail()
+          // would write somewhere nobody can see, so the page would keep
+          // animating a position the phone had stopped receiving.
+          if (paired) { hud('Too fast — easing off'); }
+          else fail('Too many attempts. Wait a moment and try again.');
         } else if (m.code === 'not_paired') {
           setStatus('phone disconnected', 'warn');
         } else if (m.code === 'guest_in_room') {
@@ -742,7 +765,12 @@
   $('menu').addEventListener('click', function(e){
     var btn = e.target.closest('button');
     if (!btn || !menuFor) return;
-    var it = menuFor.item, row = menuFor.row, act = btn.dataset.act;
+    var it = menuFor.item, act = btn.dataset.act;
+    // Re-resolved rather than captured: the queue re-renders on every state
+    // push, so the row this menu opened over is usually already detached and
+    // flashing it would light up nothing.
+    var row = document.querySelector('#queue .qrow[data-id="' + it.videoId + '"]') ||
+              document.querySelector('#results .qrow[data-id="' + it.videoId + '"]');
     if (act === 'play') {
       // A row already in Up Next can be played by id; a search hit has to carry
       // its metadata, because the phone has never seen it.
@@ -753,8 +781,15 @@
       }
       hud('Playing');
     } else {
-      cmd('queue_item', {videoId: it.videoId, title: it.title, artist: it.artist,
-                         next: act === 'next'});
+      // Send the whole item, not a rebuilt subset: a search hit carries
+      // thumbnail and duration that the phone cannot recover from a videoId,
+      // and dropping them leaves the queued song with no artwork on the lock
+      // screen. (Up Next rows have neither by design — the payload is
+      // deliberately small — so this is a no-op for them.)
+      var payload = {};
+      for (var k in it) if (Object.prototype.hasOwnProperty.call(it, k)) payload[k] = it[k];
+      payload.next = (act === 'next');
+      cmd('queue_item', payload);
       if (row) flash(row);
       hud(act === 'next' ? 'Playing next' : 'Added to queue');
     }
@@ -773,7 +808,10 @@
   wireMenu('results');
 
   document.addEventListener('click', function(e){
-    if (!e.target.closest('#menu')) closeMenu();
+    // e.target is not always an Element — a programmatic click can target the
+    // document, which has no closest().
+    var t = e.target;
+    if (!t || typeof t.closest !== 'function' || !t.closest('#menu')) closeMenu();
   });
   document.addEventListener('scroll', closeMenu, true);
   window.addEventListener('blur', closeMenu);
@@ -788,10 +826,17 @@
     hudTimer = setTimeout(function(){ el.classList.remove('on'); }, 900);
   }
 
+  // Only fields that actually swallow characters. The volume slider is an
+  // <input> too, and treating it as one meant that after dragging it every
+  // shortcut silently stopped working until you clicked elsewhere.
+  var NON_TEXT_INPUT = /^(range|button|checkbox|radio|submit|reset|color|file|image)$/;
   function isTyping(el){
     if (!el) return false;
+    if (el.isContentEditable) return true;
     var t = (el.tagName || '').toLowerCase();
-    return t === 'input' || t === 'textarea' || t === 'select' || el.isContentEditable;
+    if (t === 'textarea' || t === 'select') return true;
+    if (t !== 'input') return false;
+    return !NON_TEXT_INPUT.test((el.type || 'text').toLowerCase());
   }
 
   function togglePlay(){
@@ -855,6 +900,15 @@
   document.addEventListener('keydown', function(e){
     // Never steal the browser's own chords.
     if (e.ctrlKey || e.metaKey || e.altKey) return;
+    // Auto-repeat fires ~30x/second. The server allows 40 commands per 10s, so
+    // holding an arrow to scrub burns the whole budget in about a second — and
+    // holding an arrow is the most natural thing this feature invites.
+    if (e.repeat) return;
+    // Mid-composition an IME reports every keystroke as Enter/229; acting on
+    // them would eat characters the user is still assembling.
+    if (e.isComposing || e.keyCode === 229) return;
+    // With the menu open, only Escape means anything.
+    if (menuFor && e.key !== 'Escape') { e.preventDefault(); return; }
 
     // Escape works even from inside the search box — that is the point of it.
     if (e.key === 'Escape') {
