@@ -832,12 +832,6 @@
           // animating a position the phone had stopped receiving.
           if (paired) { hud('Too fast — easing off'); }
           else fail('Too many attempts. Wait a moment and try again.');
-        } else if (m.code === 'not_paired') {
-          setStatus('phone disconnected', 'warn');
-        } else if (m.code === 'guest_in_room') {
-          setStatus("host controls playback", 'warn');
-        } else if (m.code === 'player_not_ready') {
-          setStatus('nothing playing on the phone', 'warn');
         } else if (m.code === 'phone_offline') {
           fail('Your phone isn’t connected right now. Try the same code again in a moment.');
         } else if (m.code === 'phone_unreachable') {
@@ -868,6 +862,13 @@
           endStarting();
           radioLoading = false;
           renderQueue();
+          // These used to be three separate branches ABOVE this one, which
+          // shadowed it -- so the most reachable failure of the lot (every
+          // Listen Together guest who taps a row gets guest_in_room) left the
+          // card spinning and the controls inert for the full 20s.
+          if (m.code === 'not_paired')            setStatus('phone disconnected', 'warn');
+          else if (m.code === 'guest_in_room')    setStatus('host controls playback', 'warn');
+          else if (m.code === 'player_not_ready') setStatus('nothing playing on the phone', 'warn');
           hud(m.code === 'guest_in_room' ? 'Host controls playback'
             : m.code === 'item_gone'     ? 'That song is no longer there'
             : m.code === 'not_paired'    ? 'Phone disconnected'
@@ -913,6 +914,7 @@
 
       } else if (m.type === 'control_closed') {
         paired = false;
+        endStarting(); radioLoading = false;
         // Back to the pair screen, so the button must be usable again — it is
         // still disabled reading "Check your phone…" from the join that got us
         // here. This is the same wedge the default error branch exists to
@@ -967,6 +969,17 @@
     $('pairErr').textContent = msg;
     $('pairBtn').disabled = false;
     $('pairBtn').textContent = 'Connect';
+    // pairErr and pairBtn both live inside #codeView, which is hidden while the
+    // account flow is on screen -- so a denied or expired approval left
+    // "Asking your phone…" disabled with the message nowhere visible, and the
+    // fingerprint still sweeping. Reload was the only way out, on the branch's
+    // headline feature.
+    if (!$('quickView').classList.contains('hide')) quickErr(msg);
+    var ask = $('askBtn');
+    ask.disabled = false;
+    ask.textContent = 'Connect to my phone';
+    showFingerprint(false);
+    $('digits').classList.add('hide');
   }
 
   function resetPairButton(){
@@ -1247,7 +1260,9 @@
     // Local only while dragging: one command per pixel would exhaust the
     // server's 40-per-10s budget before the drag finished.
     var f = scrubFrac(e);
-    st.position = st.duration * f; drift = Date.now(); tick();
+    // tickForce, not tick: `scrubbing` is already true and tick() bails on it,
+    // so the click painted nothing until release.
+    st.position = st.duration * f; drift = Date.now(); tickForce();
     e.preventDefault();
   });
   document.addEventListener('mousemove', function(e){
@@ -1268,8 +1283,14 @@
   }
   document.addEventListener('mouseup', finishScrub);
   window.addEventListener('blur', function(){
-    // Alt-tabbing mid-drag is the other way to never see a mouseup.
-    if (scrubbing) { scrubbing = false; $('scrub').classList.remove('dragging'); }
+    // Alt-tabbing mid-drag is the other way to never see a mouseup. Abandon
+    // rather than seek -- but the bar must go back to where the phone actually
+    // is, or it animates on from a position nobody was told about.
+    if (!scrubbing) return;
+    scrubbing = false;
+    $('scrub').classList.remove('dragging');
+    drift = Date.now();
+    tick();
   });
 
   $('mute').addEventListener('click', toggleMute);
@@ -1347,11 +1368,12 @@
     var cur = ($('vol').value || 0) / 100;
     if (cur > 0.001) {
       preMuteVolume = cur;
-      st.volume = 0; $('vol').value = 0; cmd('volume', 0);
+      st.volume = 0; $('vol').value = 0; paintMuteIcon(0); cmd('volume', 0);
       hud('Muted');
     } else {
       var back = preMuteVolume || 0.7;
-      st.volume = back; $('vol').value = Math.round(back * 100); cmd('volume', back);
+      st.volume = back; $('vol').value = Math.round(back * 100);
+      paintMuteIcon(back); cmd('volume', back);
       hud('Volume ' + Math.round(back * 100) + '%');
     }
   }
