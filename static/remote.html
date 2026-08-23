@@ -126,6 +126,22 @@
   .link{background:none;color:var(--dim);font-size:12px;text-decoration:underline}
   .hide{display:none!important}
 
+  .menu{
+    position:fixed;z-index:60;min-width:172px;padding:5px;
+    background:#191c24;border:1px solid var(--line2);border-radius:11px;
+    box-shadow:0 18px 44px rgba(0,0,0,.6);
+  }
+  .menu button{
+    display:block;width:100%;text-align:left;background:none;color:var(--text);
+    font:inherit;font-size:13px;padding:9px 11px;border-radius:7px;cursor:pointer;
+  }
+  .menu button:hover{background:rgba(255,255,255,.07)}
+  .menu .mtitle{
+    padding:7px 11px 9px;font-size:11.5px;color:var(--dim);
+    white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:230px;
+    border-bottom:1px solid var(--line);margin-bottom:4px;
+  }
+
   /* Momentary feedback for a keypress. The controls are 60cm away on a phone,
      so without this a shortcut gives no sign it landed. */
   .hud{
@@ -160,6 +176,7 @@
 </head>
 <body>
 <div class="hud" id="hud" role="status" aria-live="polite"></div>
+<div class="menu hide" id="menu" role="menu"></div>
 
 <div class="card">
 
@@ -519,6 +536,8 @@
         } else if (m.code === 'not_signed_in') {
           quickErr('Sign in first, or use a pairing code.');
           resetPairButton();
+        } else if (m.code === 'already_queued') {
+          hud('Already in the queue');
         } else if (m.code === 'throttled') {
           fail('Too many approval requests. Wait a minute and try again.');
         } else {
@@ -684,6 +703,81 @@
   });
   $('qclear').addEventListener('click', function(){ $('q').value = ''; showQueue(); });
 
+  // ── row menu ──────────────────────────────────────────────────────────
+  //
+  // Right-click, matching the phone's long-press menu. Left-click still plays
+  // immediately, which is the common case and should stay one gesture.
+  var menuFor = null;
+
+  function closeMenu(){
+    $('menu').classList.add('hide');
+    menuFor = null;
+  }
+
+  function itemFor(videoId){
+    var inQueue = (st.upNext || []).filter(function(x){ return x.videoId === videoId; })[0];
+    if (inQueue) return {videoId: inQueue.videoId, title: inQueue.title, artist: inQueue.artist};
+    var inResults = lastResults.filter(function(r){ return r.videoId === videoId; })[0];
+    return inResults || null;
+  }
+
+  function openMenu(x, y, videoId, row){
+    var it = itemFor(videoId);
+    if (!it) return;
+    menuFor = {item: it, row: row};
+    var m = $('menu');
+    m.innerHTML =
+      '<div class="mtitle">' + esc(it.title || 'This song') + '</div>' +
+      '<button data-act="play">Play now</button>' +
+      '<button data-act="next">Play next</button>' +
+      '<button data-act="queue">Add to queue</button>';
+    m.classList.remove('hide');
+    // Placed after unhiding so the measurement is real; flipped rather than
+    // clipped when it would run off the edge.
+    var r = m.getBoundingClientRect();
+    m.style.left = Math.min(x, window.innerWidth  - r.width  - 8) + 'px';
+    m.style.top  = Math.min(y, window.innerHeight - r.height - 8) + 'px';
+  }
+
+  $('menu').addEventListener('click', function(e){
+    var btn = e.target.closest('button');
+    if (!btn || !menuFor) return;
+    var it = menuFor.item, row = menuFor.row, act = btn.dataset.act;
+    if (act === 'play') {
+      // A row already in Up Next can be played by id; a search hit has to carry
+      // its metadata, because the phone has never seen it.
+      if ((st.upNext || []).some(function(x){ return x.videoId === it.videoId; })) {
+        cmd('play_item', it.videoId);
+      } else {
+        cmd('play_search', it);
+      }
+      hud('Playing');
+    } else {
+      cmd('queue_item', {videoId: it.videoId, title: it.title, artist: it.artist,
+                         next: act === 'next'});
+      if (row) flash(row);
+      hud(act === 'next' ? 'Playing next' : 'Added to queue');
+    }
+    closeMenu();
+  });
+
+  function wireMenu(listId){
+    $(listId).addEventListener('contextmenu', function(e){
+      var row = e.target.closest('.qrow');
+      if (!row) return;
+      e.preventDefault();
+      openMenu(e.clientX, e.clientY, row.dataset.id, row);
+    });
+  }
+  wireMenu('queue');
+  wireMenu('results');
+
+  document.addEventListener('click', function(e){
+    if (!e.target.closest('#menu')) closeMenu();
+  });
+  document.addEventListener('scroll', closeMenu, true);
+  window.addEventListener('blur', closeMenu);
+
   // ── keyboard ──────────────────────────────────────────────────────────
   var hudTimer = null;
   function hud(msg){
@@ -764,6 +858,7 @@
 
     // Escape works even from inside the search box — that is the point of it.
     if (e.key === 'Escape') {
+      if (menuFor) { closeMenu(); e.preventDefault(); return; }
       if (isTyping(document.activeElement)) {
         if ($('q').value) { $('q').value = ''; showQueue(); }
         document.activeElement.blur();
