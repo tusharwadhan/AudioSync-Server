@@ -826,6 +826,7 @@
   // Long enough to cover the phone's 400ms settle push plus a slow round trip,
   // and re-armed on every change, so a burst of taps is protected as one.
   var volOptimisticUntil = 0;
+  var lastVolStep = 0;
   function markVolumeLocal(){ volOptimisticUntil = Date.now() + 1500; }
 
   var hudTimer = null;
@@ -866,8 +867,17 @@
     markVolumeLocal();
     st.volume = next;
     $('vol').value = Math.round(next * 100);
-    cmd('volume', next);
+    sendVolumeSoon(next);
     hud('Volume ' + Math.round(next * 100) + '%');
+  }
+
+  // One trailing send for the slider drag AND for a held arrow key. Both can
+  // emit dozens of events a second; the server allows 40 commands per 10s, so
+  // only the final value goes.
+  var volSendTimer = null;
+  function sendVolumeSoon(v){
+    clearTimeout(volSendTimer);
+    volSendTimer = setTimeout(function(){ cmd('volume', v); }, 120);
   }
 
   var preMuteVolume = null;
@@ -915,10 +925,24 @@
   document.addEventListener('keydown', function(e){
     // Never steal the browser's own chords.
     if (e.ctrlKey || e.metaKey || e.altKey) return;
-    // Auto-repeat fires ~30x/second. The server allows 40 commands per 10s, so
-    // holding an arrow to scrub burns the whole budget in about a second — and
-    // holding an arrow is the most natural thing this feature invites.
-    if (e.repeat) return;
+    // Auto-repeat fires ~30x/second and the server allows 40 commands per 10s,
+    // so a held key would burn the budget in about a second.
+    //
+    // Volume is the exception, because holding up/down is how people actually
+    // adjust it. Safe here only because the send is coalesced (sendVolumeSoon)
+    // — the slider moves on every repeat, but one command goes at the end.
+    // Throttled to ~9 steps/second: at the raw repeat rate a hold crosses the
+    // whole range in well under a second, which is impossible to land on a
+    // level you want.
+    var isVolKey = (e.key === 'ArrowUp' || e.key === 'ArrowDown');
+    if (e.repeat) {
+      if (!isVolKey) return;
+      var now = Date.now();
+      if (now - lastVolStep < 110) { e.preventDefault(); return; }
+      lastVolStep = now;
+    } else if (isVolKey) {
+      lastVolStep = Date.now();
+    }
     // Mid-composition an IME reports every keystroke as Enter/229; acting on
     // them would eat characters the user is still assembling.
     if (e.isComposing || e.keyCode === 229) return;
@@ -1011,14 +1035,9 @@
   });
   // 'input' as well as 'change': on a drag, 'change' only fires on release, so
   // the phone stayed at the old level until you let go.
-  var volSendTimer = null;
   $('vol').addEventListener('input', function(){
     markVolumeLocal();
-    var v = this.value / 100;
-    // Coalesced: a drag emits dozens of events and the server allows 40
-    // commands per 10s.
-    clearTimeout(volSendTimer);
-    volSendTimer = setTimeout(function(){ cmd('volume', v); }, 120);
+    sendVolumeSoon(this.value / 100);
   });
   $('vol').addEventListener('change', function(){
     markVolumeLocal();
