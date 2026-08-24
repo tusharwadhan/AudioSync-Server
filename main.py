@@ -221,10 +221,10 @@ class RoomListResponse(BaseModel):
 
 # App update configuration - modify these values to control updates
 APP_UPDATE_CONFIG = {
-    "latestVersion": "5.17.21",
-    "latestVersionCode": 76,
-    "apkUrl": "https://raw.githubusercontent.com/tusharwadhan/AudioSync-Server/tushar/releases/syncaura-5.17.21.apk",
-    "releaseNotes": "Playback and downloads. Songs you already have now play straight from your device when the queue moves on, instead of being streamed again. Downloads that failed once will retry instead of staying stuck forever, half-finished files repair themselves, and a song no longer gets skipped when a track ends. The web remote gains a queue you can tap, search, and artwork.",
+    "latestVersion": "5.17.22",
+    "latestVersionCode": 77,
+    "apkUrl": "https://raw.githubusercontent.com/tusharwadhan/AudioSync-Server/tushar/releases/syncaura-5.17.22.apk",
+    "releaseNotes": "Background playback and the web remote. Songs you already have downloaded now keep playing when the queue moves on with the app closed — they were silently falling back to streaming and stopping. The remote at audiosync-server.onrender.com is rebuilt: sign in and your phone asks you to approve with a fingerprint, no code to type. You can scrub the progress bar, mute, use the keyboard, and add, reorder or remove songs from the queue. Volume from the remote now moves the phone's own volume instead of a hidden one it could get stuck on.",
     # 5.15.0 → 5.15.1 is a patch-level bump → the client classifier
     # routes this to the Minor tier (quiet card in Settings, red dot
     # on the home gear). `mandatoryBelow` is effectively ignored for
