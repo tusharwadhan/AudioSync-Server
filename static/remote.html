@@ -288,7 +288,7 @@
 
 
   .stage{
-    min-width:0;background:var(--panel);border:1px solid var(--line);
+    min-width:0;overflow:hidden;background:var(--panel);border:1px solid var(--line);
     border-radius:18px;padding:16px;display:flex;flex-direction:column;gap:14px;
     box-shadow:0 20px 50px rgba(0,0,0,.45);position:relative;
     transition:filter .35s ease,opacity .35s ease;
@@ -296,6 +296,10 @@
   .side{
     min-width:0;min-height:0;background:var(--panel);border:1px solid var(--line);
     border-radius:18px;padding:16px;display:grid;
+    /* The column is explicit for a reason: with only rows declared the implicit
+       column is `auto`, i.e. max-content -- and one long unbroken song title
+       then pushed the search bar and every row ~117px past the panel edge. */
+    grid-template-columns:minmax(0,1fr);
     grid-template-rows:auto auto minmax(0,1fr) auto auto;gap:13px;
     box-shadow:0 20px 50px rgba(0,0,0,.45);
   }
@@ -341,8 +345,8 @@
   .mute:hover{background:rgba(255,255,255,.07);color:var(--text)}
   .mute svg{width:18px;height:18px;fill:currentColor}
 
-  .list{max-height:none;height:100%}
-  .listwrap{min-height:0}
+  .list{max-height:none;height:100%;min-width:0}
+  .listwrap{min-height:0;min-width:0}
   .foot{margin-top:0}
 
   @media (max-width:820px){
