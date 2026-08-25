@@ -4972,6 +4972,10 @@ class _Pending:
     # Which account asked. Used to make a refusal stick, since there is no
     # ticket to burn when no code was involved.
     owner_uid: str = ""
+    # Email flow only. The requester has no account, so a refusal has to stick
+    # to the TARGET instead -- see _email_deny_until.
+    via_email: bool = False
+    target_uid: str = ""
 
 
 _pending: dict = {}                  # request_id -> _Pending
@@ -5245,6 +5249,170 @@ async def handle_control_request(client_id: str, websocket: WebSocket, msg: dict
     await ws_send(websocket, {"type": "control_requested", "pairDigits": pair_digits})
 
 
+# ── Connect by email ──────────────────────────────────────────────────────
+#
+# The codeless flow above needs a signed-in browser, which is the one thing you
+# cannot always have: a friend's laptop, a machine you will not put your Google
+# password into. This flow takes a typed address instead and asks that phone.
+#
+# That deletes the boundary the codeless flow relies on -- a browser can now
+# name a phone that is not its own -- so everything below exists to make the two
+# ways of abusing it expensive.
+#
+# ENUMERATION. Every state that does NOT make the phone buzz answers
+# identically: no account, account with no phone connected, phone already being
+# asked, target over its cap, target still in a refusal cooldown. All five hold
+# the browser for the same PROMPT_TTL and then return the same `expired` a real
+# unanswered prompt returns. Nothing distinguishes "not a user here" from "asleep".
+#
+# States that DO buzz the phone answer honestly -- approve, deny, cancel come
+# straight back. That is a real oracle: a fast `denied` proves the address has
+# an account with a phone on it. It is deliberate, because using it costs the
+# attacker a prompt on the victim's screen every single time. The oracle is
+# loud, and a loud oracle is not much of one.
+#
+# It is NOT timing-proof. A patient attacker who measures the decoy's fixed ack
+# delay against a real phone's round trip can tell them apart. Closing that
+# needs a fake latency distribution fitted to real ones, which is not worth it
+# for what it protects; the honest floor is that this stops casual enumeration.
+#
+# HARASSMENT is capped on the target, never on the requester. There is no
+# trustworthy requester identity: no sign-in is required, and the client IP
+# cannot be recovered here -- Render appends to X-Forwarded-For without
+# stripping what the client sent, so the left-most entry is attacker-written
+# (the same trap that made User-Agent unusable in _describe_requester). Every
+# requester-side key is therefore forgeable and rotating, and a limit keyed on
+# one is a limit on nobody. Keyed on the target it holds no matter how many
+# addresses, IPs or browsers the attacker cycles through.
+#
+# The cost is that an attacker can burn a victim's email-flow budget and lock
+# them out of it. That is accepted: it locks nobody out of their own phone. The
+# owner's signed-in codeless flow and the pairing code both bypass every limit
+# here, and both are the better path anyway.
+
+EMAIL_TARGET_HOURLY_CAP = 6      # prompts one account can receive per hour
+EMAIL_DENY_COOLDOWN = 900.0      # a refusal shuts the flow for 15 minutes
+_email_target_hits: dict = {}    # target uid -> [timestamps]
+_email_deny_until: dict = {}     # target uid -> timestamp
+_decoys: dict = {}               # browser client_id -> asyncio.Task
+
+
+def _email_target_allowed(uid: str) -> bool:
+    now = time.time()
+    hits = [t for t in _email_target_hits.get(uid, []) if now - t < 3600.0]
+    if len(hits) >= EMAIL_TARGET_HOURLY_CAP:
+        _email_target_hits[uid] = hits
+        return False
+    hits.append(now)
+    _email_target_hits[uid] = hits
+    return True
+
+
+def _cancel_decoy(client_id: str):
+    task = _decoys.pop(client_id, None)
+    if task is not None:
+        task.cancel()
+
+
+async def _decoy_wait(client_id: str, websocket):
+    """Hold the browser for as long as a real unanswered prompt would.
+
+    Returning "no such account" the moment the address misses would turn this
+    endpoint into a free membership check for any address in the world. So the
+    miss is served as a wait: the same control_requested with digits, the same
+    control_pending a moment later, the same expired at the end.
+    """
+    try:
+        # Jittered, not fixed. A real ack is a round trip to a phone that may be
+        # dozing -- anywhere from a tenth of a second to several. A constant
+        # here would be the tell that this is the decoy; a spread at least
+        # overlaps the real distribution instead of sitting beside it.
+        await asyncio.sleep(0.25 + secrets.randbelow(2600) / 1000.0)
+        await ws_send(websocket, {"type": "control_pending", "requestId": ""})
+        await asyncio.sleep(PROMPT_TTL)
+        await ws_send(websocket, {"type": "control_error", "code": "expired"})
+    except asyncio.CancelledError:
+        return
+    finally:
+        _decoys.pop(client_id, None)
+
+
+async def handle_control_request_email(client_id: str, websocket: WebSocket, msg: dict):
+    """Browser names a phone by its account email. That phone decides."""
+    raw = msg.get("email")
+    email = raw.strip().lower() if isinstance(raw, str) else ""
+    # A malformed address is refused outright. It reveals nothing about who
+    # holds an account -- it cannot be one -- so there is nothing to hide, and
+    # spending a minute in the decoy would only punish a typo.
+    if not email or len(email) > 254 or email.count("@") != 1 or \
+            email.startswith("@") or email.endswith("@") or "." not in email.split("@")[1]:
+        await ws_send(websocket, {"type": "control_error", "code": "bad_email"})
+        return
+
+    # One request in flight per browser. Without this the decoy tasks pile up
+    # and each one fires its own expired at the page.
+    _cancel_decoy(client_id)
+    if client_id in _pending_by_browser:
+        await ws_send(websocket, {"type": "control_error", "code": "busy_here"})
+        return
+
+    async def decoy():
+        # Answer first, exactly as the real path does, THEN wait.
+        await ws_send(websocket, {"type": "control_requested",
+                                  "pairDigits": f"{secrets.randbelow(10000):04d}"})
+        _decoys[client_id] = asyncio.create_task(_decoy_wait(client_id, websocket))
+
+    target = None
+    for sess in control_manager.sessions_with_live_phone():
+        if email_for_ws(sess.phone_client_id) == email:
+            target = sess
+            break
+
+    # Phones on builds that cannot show an approval prompt are not reachable
+    # this way at all: with no code to redeem, "join anyway" would be a silent
+    # takeover of any phone whose owner's address someone knew.
+    if target is None or "approval" not in target.caps:
+        await decoy()
+        return
+
+    uid = uid_for_ws(target.phone_client_id) or target.id
+    if _email_deny_until.get(uid, 0) > time.time():
+        await decoy()
+        return
+    if any(p.session_id == target.id for p in _pending.values()):
+        await decoy()
+        return
+    if not _email_target_allowed(uid):
+        await decoy()
+        return
+    if not _prompt_allowed(target.id):
+        await decoy()
+        return
+
+    request_id = secrets.token_urlsafe(16)
+    pair_digits = f"{secrets.randbelow(10000):04d}"
+    # " - by email" is the whole difference the phone can see between this and
+    # the owner's own signed-in browser, and the app renders the requester line
+    # verbatim -- so it costs no app release. It matters: for the codeless flow
+    # the request provably came from this account, and here it did not.
+    requester = _describe_requester(websocket) + "  \u00b7  by email"
+    _pending[request_id] = _Pending(
+        request_id=request_id, session_id=target.id, browser_client_id=client_id,
+        browser_ws=websocket, code="", requester=requester,
+        expires_at=time.time() + PROMPT_TTL, pair_digits=pair_digits,
+        via_email=True, target_uid=uid,
+    )
+    _pending_by_browser[client_id] = request_id
+    _ack_tasks[request_id] = asyncio.create_task(_expire_unacked(request_id))
+    await ws_send(target.phone_ws, {
+        "type": "control_approval_request",
+        "requestId": request_id,
+        "requester": requester,
+        "pairDigits": pair_digits,
+    })
+    await ws_send(websocket, {"type": "control_requested", "pairDigits": pair_digits})
+
+
 async def handle_control_approval_ack(client_id: str, msg: dict):
     """Phone confirms it got the request and is asking the user.
 
@@ -5310,6 +5478,13 @@ async def _resolve_pending(client_id: str, msg: dict, outcome: str):
         # requester to press Connect again.
         if p.owner_uid:
             _deny_until[(p.owner_uid, p.session_id)] = time.time() + DENY_COOLDOWN
+        # Keyed on the target, not the requester: an email requester has no
+        # identity to key on, and any it offered would be its next attempt's to
+        # change. Every subsequent email request to this phone falls into the
+        # decoy for the cooldown, so a refusal reads the same as the phone
+        # having been off all along.
+        if p.via_email and p.target_uid:
+            _email_deny_until[p.target_uid] = time.time() + EMAIL_DENY_COOLDOWN
         await ws_send(p.browser_ws, {"type": "control_error", "code": "denied"})
         return
 
@@ -5360,6 +5535,10 @@ def _prune_prompt_hits():
     now = time.time()
     for sid in [k for k, v in _prompt_hits.items() if not v or now - max(v) > 60.0]:
         _prompt_hits.pop(sid, None)
+    for uid in [k for k, v in _email_target_hits.items() if not v or now - max(v) > 3600.0]:
+        _email_target_hits.pop(uid, None)
+    for uid in [k for k, t in _email_deny_until.items() if t < now]:
+        _email_deny_until.pop(uid, None)
 
 
 async def sweep_pendings():
@@ -5465,11 +5644,23 @@ async def handle_control_end(client_id: str):
 # it, and signed-out users still need rooms. It only makes identity available
 # where it wasn't — anything that starts *depending* on it must handle None.
 _ws_uids: dict[str, str] = {}
+_ws_emails: dict[str, str] = {}
 
 
 def uid_for_ws(client_id: str) -> str | None:
     """Verified Firebase uid for a main-socket client, if it authenticated."""
     return _ws_uids.get(client_id)
+
+
+def email_for_ws(client_id: str) -> str | None:
+    """Normalised email from the same verified token, for the email flow.
+
+    From the ID token, never from a message body or a database row: it has to
+    be the address Firebase itself attests for the account this socket proved
+    it holds. Lower-cased and stripped so the comparison against typed input
+    is the same on both sides.
+    """
+    return _ws_emails.get(client_id)
 
 
 async def handle_ws_auth(client_id: str, websocket: WebSocket, msg: dict):
@@ -5484,6 +5675,14 @@ async def handle_ws_auth(client_id: str, websocket: WebSocket, msg: dict):
         await ws_send(websocket, {"type": "ws_auth_error", "code": "auth_invalid"})
         return
     _ws_uids[client_id] = uid
+    email = (decoded or {}).get("email") or ""
+    if isinstance(email, str) and email.strip():
+        _ws_emails[client_id] = email.strip().lower()
+    else:
+        # An account can genuinely have no email claim (phone or anonymous
+        # providers). Popping rather than leaving the previous value means the
+        # email flow simply cannot find this phone, which is the safe failure.
+        _ws_emails.pop(client_id, None)
     # Backfill a session that already exists. control_create is sent
     # synchronously off the socket's reader thread while ws_auth needs a
     # dispatcher hop and a Firebase token fetch, so control_create usually wins
@@ -5507,6 +5706,7 @@ async def handle_ws_unauth(client_id: str, websocket: WebSocket):
     next person to sign in on it — is the previous user.
     """
     _ws_uids.pop(client_id, None)
+    _ws_emails.pop(client_id, None)
     sess = control_manager.for_client(client_id)
     if sess is not None and sess.phone_client_id == client_id:
         sess.owner_uid = None
@@ -5529,6 +5729,7 @@ async def _cleanup_disconnect(client_id: str):
     each is isolated so no handler can suppress another again.
     """
     _ws_uids.pop(client_id, None)
+    _ws_emails.pop(client_id, None)
     for name, fn in (
         ("control", handle_control_disconnect),
         ("room", handle_disconnect),
@@ -5545,6 +5746,7 @@ async def handle_control_disconnect(client_id: str):
     # A browser waiting on approval is NOT in _by_client -- attach_controller is
     # the only thing that puts it there, and it has not run yet -- so it looks
     # identical to an unknown client below. Detect it by its pending instead.
+    _cancel_decoy(client_id)
     waiting = _pending_by_browser.get(client_id)
     if waiting is not None:
         p = _drop_pending(waiting)
@@ -5795,6 +5997,9 @@ async def websocket_endpoint(websocket: WebSocket):
             elif msg_type == "control_request":
                 await handle_control_request(client_id, websocket, msg)
 
+            elif msg_type == "control_request_email":
+                await handle_control_request_email(client_id, websocket, msg)
+
             elif msg_type == "control_approval_ack":
                 await handle_control_approval_ack(client_id, msg)
 
@@ -5949,6 +6154,7 @@ async def websocket_endpoint(websocket: WebSocket):
         # for the life of the process. Every other map here has a sweeper;
         # this one does not, so a leak would be permanent.
         _ws_uids.pop(client_id, None)
+        _ws_emails.pop(client_id, None)
 
 
 # ── Song Identification via Lyrics ──

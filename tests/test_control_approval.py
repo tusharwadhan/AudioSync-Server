@@ -74,7 +74,10 @@ def load_main_pieces():
             t = node.target
             if isinstance(t, ast.Name) and t.id in (
                     '_pending', '_pending_by_browser', '_ack_tasks', '_prompt_hits',
-                    '_request_hits', '_deny_until'):
+                    '_request_hits', '_deny_until',
+                    # _prune_prompt_hits sweeps these too, so the namespace
+                    # needs them even though no case here is about the email flow.
+                    '_email_target_hits', '_email_deny_until', '_decoys'):
                 chunks.append(seg(node))
 
     ns = {

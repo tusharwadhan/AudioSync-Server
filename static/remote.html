@@ -238,6 +238,11 @@
   #pairView h1{font-size:16px;margin:0}
   #pairView .sub{margin:0;font-size:12.5px}
   #pairView input{height:46px;font-size:17px;letter-spacing:.28em}
+  /* An address is read, not recited: the tracking that makes a six-character
+     code legible makes an email look broken, and `font: inherit` on the shared
+     input rule does not reset letter-spacing. */
+  #pairView input[type=email]{letter-spacing:normal;text-transform:none;
+    font-size:15px;text-align:center}
   #pairView .primary{margin-top:0}
   #whoami{font-size:12px}
   #digitsVal{font-size:32px;letter-spacing:.4em;text-indent:.4em;font-weight:800;
@@ -498,18 +503,20 @@
       <button class="primary" id="signInBtn">Sign in with Google</button>
       <button class="primary hide" id="askBtn">Connect to my phone</button>
       <div id="whoami" class="sub hide"></div>
-      <div class="fp" id="fp">
-        <svg viewBox="0 0 24 24" aria-hidden="true">
-          <path class="fpbase" d="M17.81 4.47c-.08 0-.16-.02-.23-.06C15.66 3.42 14 3 12.01 3c-1.98 0-3.86.47-5.57 1.41-.24.13-.54.04-.68-.2-.13-.24-.04-.55.2-.68C7.82 2.52 9.86 2 12.01 2c2.13 0 3.99.47 6.03 1.52.25.13.34.43.21.67-.09.18-.26.28-.44.28zM3.5 9.72c-.1 0-.2-.03-.29-.09-.23-.16-.28-.47-.12-.7.99-1.4 2.25-2.5 3.75-3.27C9.98 4.04 14 4.03 17.15 5.65c1.5.77 2.76 1.86 3.75 3.25.16.22.11.54-.12.7-.23.16-.54.11-.7-.12-.9-1.26-2.04-2.25-3.39-2.94-2.87-1.47-6.54-1.47-9.4.01-1.36.7-2.5 1.7-3.4 2.96-.08.14-.23.21-.39.21zm6.25 12.07c-.13 0-.26-.05-.35-.15-.87-.87-1.34-1.43-2.01-2.64-.69-1.23-1.05-2.73-1.05-4.34 0-2.97 2.54-5.39 5.66-5.39s5.66 2.42 5.66 5.39c0 .28-.22.5-.5.5s-.5-.22-.5-.5c0-2.42-2.09-4.39-4.66-4.39-2.57 0-4.66 1.97-4.66 4.39 0 1.44.32 2.77.93 3.85.64 1.15 1.08 1.64 1.85 2.42.19.2.19.51 0 .71-.11.1-.24.15-.37.15zm7.17-1.85c-1.19 0-2.24-.3-3.1-.89-1.49-1.01-2.38-2.65-2.38-4.39 0-.28.22-.5.5-.5s.5.22.5.5c0 1.41.72 2.74 1.94 3.56.71.48 1.54.71 2.54.71.24 0 .64-.03 1.04-.1.27-.05.53.13.58.41.05.27-.13.53-.41.58-.57.11-1.07.12-1.21.12zM14.91 22c-.04 0-.09-.01-.13-.02-1.59-.44-2.63-1.03-3.72-2.1-1.4-1.39-2.17-3.24-2.17-5.22 0-1.62 1.38-2.94 3.08-2.94 1.7 0 3.08 1.32 3.08 2.94 0 1.07.93 1.94 2.08 1.94s2.08-.87 2.08-1.94c0-3.77-3.25-6.83-7.25-6.83-2.84 0-5.44 1.58-6.61 4.03-.39.81-.59 1.76-.59 2.8 0 .78.07 2.01.67 3.61.1.26-.03.55-.29.64-.26.1-.55-.04-.64-.29-.49-1.31-.73-2.61-.73-3.96 0-1.2.23-2.29.68-3.24 1.33-2.79 4.28-4.6 7.51-4.6 4.55 0 8.25 3.51 8.25 7.83 0 1.62-1.38 2.94-3.08 2.94s-3.08-1.32-3.08-2.94c0-1.07-.93-1.94-2.08-1.94s-2.08.87-2.08 1.94c0 1.71.66 3.31 1.87 4.51.95.94 1.86 1.46 3.27 1.85.27.07.42.35.35.61-.05.23-.26.38-.47.38z"/>
-          <path class="fpscan" d="M17.81 4.47c-.08 0-.16-.02-.23-.06C15.66 3.42 14 3 12.01 3c-1.98 0-3.86.47-5.57 1.41-.24.13-.54.04-.68-.2-.13-.24-.04-.55.2-.68C7.82 2.52 9.86 2 12.01 2c2.13 0 3.99.47 6.03 1.52.25.13.34.43.21.67-.09.18-.26.28-.44.28zM3.5 9.72c-.1 0-.2-.03-.29-.09-.23-.16-.28-.47-.12-.7.99-1.4 2.25-2.5 3.75-3.27C9.98 4.04 14 4.03 17.15 5.65c1.5.77 2.76 1.86 3.75 3.25.16.22.11.54-.12.7-.23.16-.54.11-.7-.12-.9-1.26-2.04-2.25-3.39-2.94-2.87-1.47-6.54-1.47-9.4.01-1.36.7-2.5 1.7-3.4 2.96-.08.14-.23.21-.39.21zm6.25 12.07c-.13 0-.26-.05-.35-.15-.87-.87-1.34-1.43-2.01-2.64-.69-1.23-1.05-2.73-1.05-4.34 0-2.97 2.54-5.39 5.66-5.39s5.66 2.42 5.66 5.39c0 .28-.22.5-.5.5s-.5-.22-.5-.5c0-2.42-2.09-4.39-4.66-4.39-2.57 0-4.66 1.97-4.66 4.39 0 1.44.32 2.77.93 3.85.64 1.15 1.08 1.64 1.85 2.42.19.2.19.51 0 .71-.11.1-.24.15-.37.15zm7.17-1.85c-1.19 0-2.24-.3-3.1-.89-1.49-1.01-2.38-2.65-2.38-4.39 0-.28.22-.5.5-.5s.5.22.5.5c0 1.41.72 2.74 1.94 3.56.71.48 1.54.71 2.54.71.24 0 .64-.03 1.04-.1.27-.05.53.13.58.41.05.27-.13.53-.41.58-.57.11-1.07.12-1.21.12zM14.91 22c-.04 0-.09-.01-.13-.02-1.59-.44-2.63-1.03-3.72-2.1-1.4-1.39-2.17-3.24-2.17-5.22 0-1.62 1.38-2.94 3.08-2.94 1.7 0 3.08 1.32 3.08 2.94 0 1.07.93 1.94 2.08 1.94s2.08-.87 2.08-1.94c0-3.77-3.25-6.83-7.25-6.83-2.84 0-5.44 1.58-6.61 4.03-.39.81-.59 1.76-.59 2.8 0 .78.07 2.01.67 3.61.1.26-.03.55-.29.64-.26.1-.55-.04-.64-.29-.49-1.31-.73-2.61-.73-3.96 0-1.2.23-2.29.68-3.24 1.33-2.79 4.28-4.6 7.51-4.6 4.55 0 8.25 3.51 8.25 7.83 0 1.62-1.38 2.94-3.08 2.94s-3.08-1.32-3.08-2.94c0-1.07-.93-1.94-2.08-1.94s-2.08.87-2.08 1.94c0 1.71.66 3.31 1.87 4.51.95.94 1.86 1.46 3.27 1.85.27.07.42.35.35.61-.05.23-.26.38-.47.38z"/>
-        </svg>
-      </div>
-      <div id="digits" class="hide">
-        <div class="sub">Check these match your phone</div>
-        <div id="digitsVal"></div>
-      </div>
       <div class="err" id="quickErr"></div>
+      <div class="sub"><a href="#" id="useMail">Connect by email instead</a></div>
       <div class="sub"><a href="#" id="useCode">Use a pairing code instead</a></div>
+    </div>
+
+    <div id="mailView" class="hide">
+      <p class="sub">Type the email your phone signs into SyncAura with. That
+         phone will ask you to approve — no sign-in here.</p>
+      <input id="mail" type="email" autocomplete="email" spellcheck="false"
+             placeholder="you@example.com" aria-label="Account email">
+      <button class="primary" id="mailBtn" disabled>Ask that phone</button>
+      <div class="err" id="mailErr"></div>
+      <div class="sub"><a href="#" id="mailToAccount">Sign in here instead</a></div>
+      <div class="sub"><a href="#" id="mailToCode">Use a pairing code</a></div>
     </div>
 
     <div id="codeView" class="hide">
@@ -520,13 +527,29 @@
       <button class="primary" id="pairBtn" disabled>Connect</button>
       <div class="err" id="pairErr"></div>
       <div class="sub"><a href="#" id="useAccount">Use my account instead</a></div>
+      <div class="sub"><a href="#" id="codeToMail">Connect by email</a></div>
+    </div>
+
+    <!-- Shared by all three flows: each one ends in the same wait for the same
+         approval on the same phone. -->
+    <div class="fp hide" id="fp">
+      <svg viewBox="0 0 24 24" aria-hidden="true">
+        <path class="fpbase" d="M17.81 4.47c-.08 0-.16-.02-.23-.06C15.66 3.42 14 3 12.01 3c-1.98 0-3.86.47-5.57 1.41-.24.13-.54.04-.68-.2-.13-.24-.04-.55.2-.68C7.82 2.52 9.86 2 12.01 2c2.13 0 3.99.47 6.03 1.52.25.13.34.43.21.67-.09.18-.26.28-.44.28zM3.5 9.72c-.1 0-.2-.03-.29-.09-.23-.16-.28-.47-.12-.7.99-1.4 2.25-2.5 3.75-3.27C9.98 4.04 14 4.03 17.15 5.65c1.5.77 2.76 1.86 3.75 3.25.16.22.11.54-.12.7-.23.16-.54.11-.7-.12-.9-1.26-2.04-2.25-3.39-2.94-2.87-1.47-6.54-1.47-9.4.01-1.36.7-2.5 1.7-3.4 2.96-.08.14-.23.21-.39.21zm6.25 12.07c-.13 0-.26-.05-.35-.15-.87-.87-1.34-1.43-2.01-2.64-.69-1.23-1.05-2.73-1.05-4.34 0-2.97 2.54-5.39 5.66-5.39s5.66 2.42 5.66 5.39c0 .28-.22.5-.5.5s-.5-.22-.5-.5c0-2.42-2.09-4.39-4.66-4.39-2.57 0-4.66 1.97-4.66 4.39 0 1.44.32 2.77.93 3.85.64 1.15 1.08 1.64 1.85 2.42.19.2.19.51 0 .71-.11.1-.24.15-.37.15zm7.17-1.85c-1.19 0-2.24-.3-3.1-.89-1.49-1.01-2.38-2.65-2.38-4.39 0-.28.22-.5.5-.5s.5.22.5.5c0 1.41.72 2.74 1.94 3.56.71.48 1.54.71 2.54.71.24 0 .64-.03 1.04-.1.27-.05.53.13.58.41.05.27-.13.53-.41.58-.57.11-1.07.12-1.21.12zM14.91 22c-.04 0-.09-.01-.13-.02-1.59-.44-2.63-1.03-3.72-2.1-1.4-1.39-2.17-3.24-2.17-5.22 0-1.62 1.38-2.94 3.08-2.94 1.7 0 3.08 1.32 3.08 2.94 0 1.07.93 1.94 2.08 1.94s2.08-.87 2.08-1.94c0-3.77-3.25-6.83-7.25-6.83-2.84 0-5.44 1.58-6.61 4.03-.39.81-.59 1.76-.59 2.8 0 .78.07 2.01.67 3.61.1.26-.03.55-.29.64-.26.1-.55-.04-.64-.29-.49-1.31-.73-2.61-.73-3.96 0-1.2.23-2.29.68-3.24 1.33-2.79 4.28-4.6 7.51-4.6 4.55 0 8.25 3.51 8.25 7.83 0 1.62-1.38 2.94-3.08 2.94s-3.08-1.32-3.08-2.94c0-1.07-.93-1.94-2.08-1.94s-2.08.87-2.08 1.94c0 1.71.66 3.31 1.87 4.51.95.94 1.86 1.46 3.27 1.85.27.07.42.35.35.61-.05.23-.26.38-.47.38z"/>
+        <path class="fpscan" d="M17.81 4.47c-.08 0-.16-.02-.23-.06C15.66 3.42 14 3 12.01 3c-1.98 0-3.86.47-5.57 1.41-.24.13-.54.04-.68-.2-.13-.24-.04-.55.2-.68C7.82 2.52 9.86 2 12.01 2c2.13 0 3.99.47 6.03 1.52.25.13.34.43.21.67-.09.18-.26.28-.44.28zM3.5 9.72c-.1 0-.2-.03-.29-.09-.23-.16-.28-.47-.12-.7.99-1.4 2.25-2.5 3.75-3.27C9.98 4.04 14 4.03 17.15 5.65c1.5.77 2.76 1.86 3.75 3.25.16.22.11.54-.12.7-.23.16-.54.11-.7-.12-.9-1.26-2.04-2.25-3.39-2.94-2.87-1.47-6.54-1.47-9.4.01-1.36.7-2.5 1.7-3.4 2.96-.08.14-.23.21-.39.21zm6.25 12.07c-.13 0-.26-.05-.35-.15-.87-.87-1.34-1.43-2.01-2.64-.69-1.23-1.05-2.73-1.05-4.34 0-2.97 2.54-5.39 5.66-5.39s5.66 2.42 5.66 5.39c0 .28-.22.5-.5.5s-.5-.22-.5-.5c0-2.42-2.09-4.39-4.66-4.39-2.57 0-4.66 1.97-4.66 4.39 0 1.44.32 2.77.93 3.85.64 1.15 1.08 1.64 1.85 2.42.19.2.19.51 0 .71-.11.1-.24.15-.37.15zm7.17-1.85c-1.19 0-2.24-.3-3.1-.89-1.49-1.01-2.38-2.65-2.38-4.39 0-.28.22-.5.5-.5s.5.22.5.5c0 1.41.72 2.74 1.94 3.56.71.48 1.54.71 2.54.71.24 0 .64-.03 1.04-.1.27-.05.53.13.58.41.05.27-.13.53-.41.58-.57.11-1.07.12-1.21.12zM14.91 22c-.04 0-.09-.01-.13-.02-1.59-.44-2.63-1.03-3.72-2.1-1.4-1.39-2.17-3.24-2.17-5.22 0-1.62 1.38-2.94 3.08-2.94 1.7 0 3.08 1.32 3.08 2.94 0 1.07.93 1.94 2.08 1.94s2.08-.87 2.08-1.94c0-3.77-3.25-6.83-7.25-6.83-2.84 0-5.44 1.58-6.61 4.03-.39.81-.59 1.76-.59 2.8 0 .78.07 2.01.67 3.61.1.26-.03.55-.29.64-.26.1-.55-.04-.64-.29-.49-1.31-.73-2.61-.73-3.96 0-1.2.23-2.29.68-3.24 1.33-2.79 4.28-4.6 7.51-4.6 4.55 0 8.25 3.51 8.25 7.83 0 1.62-1.38 2.94-3.08 2.94s-3.08-1.32-3.08-2.94c0-1.07-.93-1.94-2.08-1.94s-2.08.87-2.08 1.94c0 1.71.66 3.31 1.87 4.51.95.94 1.86 1.46 3.27 1.85.27.07.42.35.35.61-.05.23-.26.38-.47.38z"/>
+      </svg>
+    </div>
+    <div id="digits" class="hide">
+      <div class="sub">Check these match your phone</div>
+      <div id="digitsVal"></div>
     </div>
   </div>
 
   <style>
     #digitsVal { font-size: 2.1rem; letter-spacing: .5rem; font-weight: 700;
                  margin: .3rem 0 .6rem; }
-    #quickView a, #codeView a { color: inherit; opacity: .7; }
+    /* Scoped to the card, not to a list of views: enumerating them meant a
+       third view's links silently fell back to browser-default blue. */
+    #pairView a { color: inherit; opacity: .7; }
   </style>
 
 </div>
@@ -574,6 +597,12 @@
 
   function quickErr(msg){ $('quickErr').textContent = msg || ''; }
 
+  // Which way in is being attempted. The three flows fail with the same server
+  // codes but not the same advice: "ask the phone for a new code" is nonsense
+  // to someone who never typed one, and telling an email requester that no
+  // account exists is exactly what the server refuses to tell them.
+  var flow = 'account';
+
   // Dimmed and inert, rather than hidden: see the .app.offline rules.
   function setOffline(off){
     document.querySelector('.app').classList.toggle('offline', off);
@@ -589,8 +618,8 @@
   function initAuth(){
     if (typeof firebase === 'undefined') {
       // The SDK failed to load (offline, blocked, CDN down). Do not strand the
-      // user on a dead button — the code flow still works.
-      showCodeView();
+      // user on a dead button — the email flow needs no SDK at all.
+      showView('email');
       return;
     }
     firebase.initializeApp(FB);
@@ -620,14 +649,18 @@
     }).catch(function(){ quickErr('Could not verify your sign-in. Try again.'); });
   }
 
-  function showCodeView(){
-    $('quickView').classList.add('hide');
-    $('codeView').classList.remove('hide');
+  function showView(name){
+    flow = name;
+    $('quickView').classList.toggle('hide', name !== 'account');
+    $('codeView').classList.toggle('hide', name !== 'code');
+    $('mailView').classList.toggle('hide', name !== 'email');
+    // Switching views abandons whatever the last one was waiting for, so its
+    // leftovers must not sit under the new one looking live.
+    showFingerprint(false);
+    $('digits').classList.add('hide');
   }
-  function showQuickView(){
-    $('codeView').classList.add('hide');
-    $('quickView').classList.remove('hide');
-  }
+  function showCodeView(){ showView('code'); }
+  function showQuickView(){ showView('account'); }
 
   function send(obj){
     if (ws && ws.readyState === 1) ws.send(JSON.stringify(obj));
@@ -845,11 +878,23 @@
         } else if (m.code === 'busy') {
           fail('Your phone is already being asked to approve another computer.');
         } else if (m.code === 'denied') {
-          fail('Declined on your phone. Ask it for a new code to try again.');
+          fail(flow === 'email' ? 'Declined on that phone.'
+             : flow === 'account' ? 'Declined on your phone.'
+             : 'Declined on your phone. Ask it for a new code to try again.');
         } else if (m.code === 'expired') {
-          fail('That request timed out. Ask the phone for a new code.');
+          // For the email flow this is ALSO what an address with no account
+          // behind it returns, after the same wait. Keep the wording identical.
+          fail(flow === 'email' ? MAIL_NO_ANSWER
+             : flow === 'account' ? 'That request timed out. Try again.'
+             : 'That request timed out. Ask the phone for a new code.');
         } else if (m.code === 'cancelled') {
-          fail('Approval was interrupted on your phone. Try the same code again.');
+          fail(flow === 'email' ? 'Approval was interrupted on that phone. Try again.'
+             : flow === 'account' ? 'Approval was interrupted on your phone. Try again.'
+             : 'Approval was interrupted on your phone. Try the same code again.');
+        } else if (m.code === 'bad_email') {
+          fail('That doesn\u2019t look like an email address.');
+        } else if (m.code === 'busy_here') {
+          fail('You already have a request waiting. Give it a moment.');
         } else if (m.code === 'no_device') {
           quickErr('No phone signed in to this account is reachable. Open SyncAura on your phone, or use a pairing code.');
           resetPairButton();
@@ -911,9 +956,11 @@
         clearPendingTimer();
         pendingTimer = setTimeout(function(){
           pendingTimer = null;
-          fail('No answer from your phone. Ask it for a new code and try again.');
+          fail(flow === 'email' ? MAIL_NO_ANSWER
+             : 'No answer from your phone. Ask it for a new code and try again.');
         }, 70000);
         $('pairBtn').textContent = 'Check your phone…';
+        $('mailBtn').textContent = 'Check that phone…';
         setStatus('waiting for approval on your phone', 'warn');
 
       } else if (m.type === 'control_closed') {
@@ -968,6 +1015,12 @@
     if (pendingTimer) { clearTimeout(pendingTimer); pendingTimer = null; }
   }
 
+  // The one message that must stay identical for "no such account", "that
+  // phone is off" and "that phone refused an hour ago" -- the server answers
+  // all three the same way on purpose, and saying more here would undo it.
+  var MAIL_NO_ANSWER = 'No answer. That phone may be off, or may not be signed ' +
+    'in to SyncAura with that address.';
+
   function fail(msg){
     clearPendingTimer();
     $('pairErr').textContent = msg;
@@ -979,9 +1032,12 @@
     // fingerprint still sweeping. Reload was the only way out, on the branch's
     // headline feature.
     if (!$('quickView').classList.contains('hide')) quickErr(msg);
-    var ask = $('askBtn');
-    ask.disabled = false;
-    ask.textContent = 'Connect to my phone';
+    // Same trap, third view: #mailErr and #mailBtn are inside #mailView, so
+    // without this a refusal left "Asking that phone…" disabled forever with
+    // the reason written somewhere hidden.
+    $('mailErr').textContent = msg;
+    $('mailBtn').disabled = $('mail').value.trim().length < 3;
+    $('mailBtn').textContent = 'Ask that phone';
     showFingerprint(false);
     $('digits').classList.add('hide');
   }
@@ -994,6 +1050,8 @@
     var a = $('askBtn');
     a.textContent = 'Connect to my phone';
     a.disabled = false;
+    $('mailBtn').textContent = 'Ask that phone';
+    $('mailBtn').disabled = $('mail').value.trim().length < 3;
     $('digits').classList.add('hide');
   }
 
@@ -1024,15 +1082,43 @@
     if (!ws || ws.readyState !== 1) { quickErr('Not connected to the server yet.'); return; }
     if (!authed) { quickErr('Still verifying your sign-in — try again in a second.'); return; }
     this.disabled = true; this.textContent = 'Asking your phone…';
+    flow = 'account';
     send({type: 'control_request'});
   });
 
-  $('useCode').addEventListener('click', function(e){ e.preventDefault(); showCodeView(); });
-  $('useAccount').addEventListener('click', function(e){ e.preventDefault(); showQuickView(); });
+  $('useCode').addEventListener('click', function(e){ e.preventDefault(); showView('code'); });
+  $('useAccount').addEventListener('click', function(e){ e.preventDefault(); showView('account'); });
+  $('useMail').addEventListener('click', function(e){ e.preventDefault(); showView('email'); });
+  $('codeToMail').addEventListener('click', function(e){ e.preventDefault(); showView('email'); });
+  $('mailToCode').addEventListener('click', function(e){ e.preventDefault(); showView('code'); });
+  $('mailToAccount').addEventListener('click', function(e){ e.preventDefault(); showView('account'); });
+
+  // ── connect by email ──
+  //
+  // No sign-in: the point of this flow is the machine you will not put a Google
+  // password into. The phone is the only thing that authorises it, which is why
+  // the digits below matter more here than anywhere else -- the requester line
+  // on the prompt cannot prove the request came from you, and comparing the two
+  // numbers is the only thing that can.
+  $('mail').addEventListener('input', function(){
+    $('mailBtn').disabled = this.value.trim().length < 3;
+    $('mailErr').textContent = '';
+  });
+  $('mail').addEventListener('keydown', function(e){
+    if (e.key === 'Enter' && !$('mailBtn').disabled) $('mailBtn').click();
+  });
+  $('mailBtn').addEventListener('click', function(){
+    $('mailErr').textContent = '';
+    $('digits').classList.add('hide');
+    if (!ws || ws.readyState !== 1) { fail('Not connected to the server yet.'); return; }
+    this.disabled = true; this.textContent = 'Asking that phone…';
+    send({type: 'control_request_email', email: $('mail').value.trim()});
+  });
 
   $('pairBtn').addEventListener('click', function(){
     if (!ws || ws.readyState !== 1) { fail('Not connected to the server yet.'); return; }
     this.disabled = true; this.textContent = 'Connecting…';
+    flow = 'code';
     send({type:'control_join', code:$('code').value});
   });
 
