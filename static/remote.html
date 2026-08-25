@@ -237,14 +237,50 @@
   }
   #pairView h1{font-size:16px;margin:0}
   #pairView .sub{margin:0;font-size:12.5px}
-  #pairView input{height:46px;font-size:17px;letter-spacing:.28em}
-  /* An address is read, not recited: the tracking that makes a six-character
-     code legible makes an email look broken, and `font: inherit` on the shared
-     input rule does not reset letter-spacing. */
-  #pairView input[type=email]{letter-spacing:normal;text-transform:none;
-    font-size:15px;text-align:center}
   #pairView .primary{margin-top:0}
   #whoami{font-size:12px}
+
+  /* The card is one column of GROUPS, not one column of controls. The gap
+     between a field and its own hint has to be tighter than the gap between
+     that field and the next thing, or everything reads as one undifferentiated
+     stack -- which is what made the input and the button look glued together. */
+  #pairView{gap:18px}
+  .field{display:flex;flex-direction:column;gap:7px}
+  .hint{font-size:11.5px;color:var(--dim);min-height:14px;line-height:1.25;
+    transition:color .15s}
+  .hint.on{color:var(--accent2)}
+
+  /* One field for two very different things. A pairing code is six characters
+     read off a screen and typed back, so it wants to be big and spaced out; an
+     address is read as a word. The field changes shape to match what is in it,
+     which is also how the user knows it understood them. */
+  #entry{height:50px;font-size:15px;letter-spacing:normal;text-transform:none;
+    text-align:center;font-weight:600;transition:letter-spacing .12s,font-size .12s}
+  #entry.iscode{font-size:20px;letter-spacing:.3em;text-indent:.3em;
+    text-transform:uppercase;font-weight:700}
+  #entry::placeholder{letter-spacing:normal;text-transform:none;font-size:14px;
+    font-weight:500}
+
+  /* Google is an alternative to the field above, not a step after it. */
+  .or{display:flex;align-items:center;gap:10px;color:var(--dim);font-size:11px;
+    text-transform:uppercase;letter-spacing:.14em}
+  .or::before,.or::after{content:'';flex:1;height:1px;background:var(--line)}
+  /* NOT .ghost -- that name is the scrubber's hover bubble, which is declared
+     later in this sheet and therefore wins at equal specificity. It carries
+     position:absolute, so the sign-in button was thrown clean out of the card
+     to full page width. */
+  .gbtn{width:100%;height:44px;border-radius:12px;cursor:pointer;
+    background:transparent;border:1px solid var(--line2);color:var(--text);
+    font-family:var(--font);font-size:13.5px;font-weight:600;
+    display:flex;align-items:center;justify-content:center;gap:9px;
+    transition:background .15s,border-color .15s}
+  .gbtn:hover{background:rgba(255,255,255,.05);border-color:var(--dim)}
+  .gbtn svg{width:17px;height:17px}
+
+  /* An empty error slot still claimed its row's gap twice over, opening a
+     ~64px hole between the button and the divider that read as a mistake. */
+  #pairErr:empty{display:none}
+  #googleBox{display:flex;flex-direction:column;gap:13px}
   #digitsVal{font-size:32px;letter-spacing:.4em;text-indent:.4em;font-weight:800;
     font-variant-numeric:tabular-nums}
   .connfoot{padding-top:12px;border-top:1px solid var(--line);font-size:12px;
@@ -498,36 +534,32 @@
   <div id="pairView">
     <h1>SyncAura Remote</h1>
 
-    <div id="quickView">
-      <p class="sub">Sign in and your phone will ask you to approve — no code needed.</p>
-      <button class="primary" id="signInBtn">Sign in with Google</button>
-      <button class="primary hide" id="askBtn">Connect to my phone</button>
-      <div id="whoami" class="sub hide"></div>
-      <div class="err" id="quickErr"></div>
-      <div class="sub"><a href="#" id="useMail">Connect by email instead</a></div>
-      <div class="sub"><a href="#" id="useCode">Use a pairing code instead</a></div>
+    <p class="sub">Enter your account email, or the six-character code on your
+       phone. Either way the phone asks you to approve.</p>
+
+    <div class="field">
+      <input id="entry" autocomplete="email" spellcheck="false"
+             autocapitalize="off" autocorrect="off"
+             placeholder="you@example.com  or  ABC123" aria-label="Account email or pairing code">
+      <div class="hint" id="entryHint"></div>
     </div>
 
-    <div id="mailView" class="hide">
-      <p class="sub">Type the email your phone signs into SyncAura with. That
-         phone will ask you to approve — no sign-in here.</p>
-      <input id="mail" type="email" autocomplete="email" spellcheck="false"
-             placeholder="you@example.com" aria-label="Account email">
-      <button class="primary" id="mailBtn" disabled>Ask that phone</button>
-      <div class="err" id="mailErr"></div>
-      <div class="sub"><a href="#" id="mailToAccount">Sign in here instead</a></div>
-      <div class="sub"><a href="#" id="mailToCode">Use a pairing code</a></div>
-    </div>
+    <button class="primary" id="goBtn" disabled>Connect</button>
+    <div class="err" id="pairErr"></div>
 
-    <div id="codeView" class="hide">
-      <p class="sub">Open SyncAura on your phone, go to <b>Remote</b>, and type the
-         six characters it shows.</p>
-      <input id="code" maxlength="6" autocomplete="off" autocapitalize="characters"
-             spellcheck="false" placeholder="······" aria-label="Pairing code">
-      <button class="primary" id="pairBtn" disabled>Connect</button>
-      <div class="err" id="pairErr"></div>
-      <div class="sub"><a href="#" id="useAccount">Use my account instead</a></div>
-      <div class="sub"><a href="#" id="codeToMail">Connect by email</a></div>
+    <div id="whoami" class="sub hide"></div>
+
+    <div id="googleBox">
+      <div class="or">or</div>
+      <button class="gbtn" id="signInBtn">
+        <svg viewBox="0 0 48 48" aria-hidden="true">
+          <path fill="#4285F4" d="M45.1 24.5c0-1.6-.1-3.1-.4-4.5H24v8.5h11.8c-.5 2.7-2 5-4.4 6.6v5.5h7.1c4.1-3.8 6.6-9.4 6.6-16.1z"/>
+          <path fill="#34A853" d="M24 46c5.9 0 10.9-2 14.5-5.4l-7.1-5.5c-2 1.3-4.5 2.1-7.4 2.1-5.7 0-10.5-3.8-12.2-9H4.5v5.7C8.1 41.1 15.4 46 24 46z"/>
+          <path fill="#FBBC05" d="M11.8 28.2c-.4-1.3-.7-2.7-.7-4.2s.2-2.9.7-4.2v-5.7H4.5C3 17 2.1 20.4 2.1 24s.9 7 2.4 9.9l7.3-5.7z"/>
+          <path fill="#EA4335" d="M24 10.8c3.2 0 6.1 1.1 8.4 3.3l6.3-6.3C34.9 4.2 29.9 2 24 2 15.4 2 8.1 6.9 4.5 14.1l7.3 5.7c1.7-5.2 6.5-9 12.2-9z"/>
+        </svg>
+        Sign in with Google
+      </button>
     </div>
 
     <!-- Shared by all three flows: each one ends in the same wait for the same
@@ -595,7 +627,12 @@
   };
   var fbAuth = null, authed = false;
 
-  function quickErr(msg){ $('quickErr').textContent = msg || ''; }
+  // One card, one error slot. This used to be three -- pairErr, quickErr and
+  // mailErr -- each hidden while another view was up, and forgetting one left
+  // the button stuck reading "Asking your phone…" with the reason invisible.
+  // That was the same defect twice, on two different views. There is now
+  // nothing left to forget.
+  function quickErr(msg){ $('pairErr').textContent = msg || ''; }
 
   // Which way in is being attempted. The three flows fail with the same server
   // codes but not the same advice: "ask the phone for a new code" is nonsense
@@ -617,23 +654,24 @@
 
   function initAuth(){
     if (typeof firebase === 'undefined') {
-      // The SDK failed to load (offline, blocked, CDN down). Do not strand the
-      // user on a dead button — the email flow needs no SDK at all.
-      showView('email');
+      // The SDK failed to load (offline, blocked, CDN down). The field needs no
+      // SDK at all, so only the Google button has to go.
+      $('googleBox').classList.add('hide');
       return;
     }
     firebase.initializeApp(FB);
     fbAuth = firebase.auth();
     fbAuth.onAuthStateChanged(function(user){
       if (user) {
-        $('signInBtn').classList.add('hide');
-        $('askBtn').classList.remove('hide');
+        $('googleBox').classList.add('hide');
         $('whoami').classList.remove('hide');
-        $('whoami').textContent = user.email || user.displayName || 'Signed in';
+        $('whoami').textContent = 'Signed in as ' + (user.email || user.displayName);
+        // Their own address, in their own field: signing in is now just a way
+        // of filling it that cannot be typo'd.
+        if (user.email) { $('entry').value = user.email; rememberEmail(user.email); paintEntry(); }
         sendAuth(user);
       } else {
-        $('signInBtn').classList.remove('hide');
-        $('askBtn').classList.add('hide');
+        $('googleBox').classList.remove('hide');
         $('whoami').classList.add('hide');
         authed = false;
       }
@@ -649,18 +687,55 @@
     }).catch(function(){ quickErr('Could not verify your sign-in. Try again.'); });
   }
 
-  function showView(name){
-    flow = name;
-    $('quickView').classList.toggle('hide', name !== 'account');
-    $('codeView').classList.toggle('hide', name !== 'code');
-    $('mailView').classList.toggle('hide', name !== 'email');
-    // Switching views abandons whatever the last one was waiting for, so its
-    // leftovers must not sit under the new one looking live.
-    showFingerprint(false);
-    $('digits').classList.add('hide');
+  // ── one field, two kinds of input ────────────────────────────────────
+  //
+  // Asking the user to first pick which KIND of thing they are about to type is
+  // a question they should never have been asked: an address and a six-
+  // character code are impossible to confuse for each other, so the page can
+  // just look. An @ means an address; six letters and digits mean a code.
+  var LOOKS_EMAIL = /^[^@\s]+@[^@\s]+\.[^@\s]{2,}$/;
+  var LOOKS_CODE  = /^[a-z0-9]{6}$/i;
+
+  function detect(v){
+    var t = (v || '').trim();
+    if (!t) return '';
+    // The @ decides it even when the rest is not valid yet, so a half-typed
+    // address is never briefly styled as a code.
+    if (t.indexOf('@') >= 0) return LOOKS_EMAIL.test(t) ? 'email' : 'part-email';
+    return LOOKS_CODE.test(t) ? 'code' : 'part-code';
   }
-  function showCodeView(){ showView('code'); }
-  function showQuickView(){ showView('account'); }
+
+  function paintEntry(){
+    var v = $('entry').value, kind = detect(v), hint = $('entryHint');
+    // Uppercase and the wide tracking are a CSS class, never a rewrite of the
+    // value: mutating it would send TUSHAR@GMAIL.COM to the server and put it
+    // in front of the user, which is exactly the bug this page already had once.
+    $('entry').classList.toggle('iscode', kind === 'code' || kind === 'part-code');
+    hint.classList.toggle('on', kind === 'email' || kind === 'code');
+    hint.textContent =
+        kind === 'email'      ? 'We’ll ask that phone to approve'
+      : kind === 'code'       ? 'Pairing code from your phone'
+      : kind === 'part-email' ? ''
+      : kind === 'part-code'  ? 'Six characters, or an email address'
+      : '';
+    $('goBtn').textContent = kind === 'email' ? 'Ask that phone' : 'Connect';
+    $('goBtn').disabled = !(kind === 'email' || kind === 'code');
+  }
+
+  // ── remembering the address ──────────────────────────────────────────
+  //
+  // Only ever an address. A pairing code is single-use and dead in 90 seconds,
+  // so keeping one would only ever prefill something guaranteed to fail.
+  var MAIL_KEY = 'syncaura.remote.email';
+
+  function rememberEmail(v){
+    try { localStorage.setItem(MAIL_KEY, v); } catch (e) { /* private mode */ }
+  }
+  function restoreEmail(){
+    var v = null;
+    try { v = localStorage.getItem(MAIL_KEY); } catch (e) { return; }
+    if (v && LOOKS_EMAIL.test(v)) { $('entry').value = v; paintEntry(); }
+  }
 
   function send(obj){
     if (ws && ws.readyState === 1) ws.send(JSON.stringify(obj));
@@ -927,7 +1002,7 @@
         } else if (m.code === 'throttled') {
           fail('Too many approval requests. Wait a minute and try again.');
         } else {
-          // Every remaining code MUST land here. pairBtn is disabled the moment
+          // Every remaining code MUST land here. goBtn is disabled the moment
           // Connect is pressed and fail() is the only thing that re-enables it,
           // so an unhandled code leaves the button stuck on "Connecting…"
           // forever — including any code added to the server after this page
@@ -959,8 +1034,8 @@
           fail(flow === 'email' ? MAIL_NO_ANSWER
              : 'No answer from your phone. Ask it for a new code and try again.');
         }, 70000);
-        $('pairBtn').textContent = 'Check your phone…';
-        $('mailBtn').textContent = 'Check that phone…';
+        $('goBtn').textContent = flow === 'email' ? 'Check that phone…'
+                                                  : 'Check your phone…';
         setStatus('waiting for approval on your phone', 'warn');
 
       } else if (m.type === 'control_closed') {
@@ -1024,45 +1099,50 @@
   function fail(msg){
     clearPendingTimer();
     $('pairErr').textContent = msg;
-    $('pairBtn').disabled = false;
-    $('pairBtn').textContent = 'Connect';
-    // pairErr and pairBtn both live inside #codeView, which is hidden while the
-    // account flow is on screen -- so a denied or expired approval left
-    // "Asking your phone…" disabled with the message nowhere visible, and the
-    // fingerprint still sweeping. Reload was the only way out, on the branch's
-    // headline feature.
-    if (!$('quickView').classList.contains('hide')) quickErr(msg);
-    // Same trap, third view: #mailErr and #mailBtn are inside #mailView, so
-    // without this a refusal left "Asking that phone…" disabled forever with
-    // the reason written somewhere hidden.
-    $('mailErr').textContent = msg;
-    $('mailBtn').disabled = $('mail').value.trim().length < 3;
-    $('mailBtn').textContent = 'Ask that phone';
     showFingerprint(false);
     $('digits').classList.add('hide');
+    paintEntry();          // restores the button's label AND its enabled state
   }
 
   function resetPairButton(){
     showFingerprint(false);
-    var b = $('pairBtn');
-    b.textContent = 'Connect';
-    b.disabled = $('code').value.length !== 6;
-    var a = $('askBtn');
-    a.textContent = 'Connect to my phone';
-    a.disabled = false;
-    $('mailBtn').textContent = 'Ask that phone';
-    $('mailBtn').disabled = $('mail').value.trim().length < 3;
     $('digits').classList.add('hide');
+    paintEntry();
   }
 
   // ── pairing ──
-  $('code').addEventListener('input', function(){
-    this.value = this.value.replace(/[^a-zA-Z0-9]/g, '').toUpperCase();
-    $('pairBtn').disabled = this.value.length !== 6;
+  $('entry').addEventListener('input', function(){
+    paintEntry();
     $('pairErr').textContent = '';
   });
-  $('code').addEventListener('keydown', function(e){
-    if (e.key === 'Enter' && this.value.length === 6) $('pairBtn').click();
+  $('entry').addEventListener('keydown', function(e){
+    if (e.key === 'Enter' && !$('goBtn').disabled) $('goBtn').click();
+  });
+
+  $('goBtn').addEventListener('click', function(){
+    var raw = $('entry').value.trim(), kind = detect(raw);
+    if (!ws || ws.readyState !== 1) { fail('Not connected to the server yet.'); return; }
+    if (kind === 'email') {
+      rememberEmail(raw);
+      this.disabled = true; this.textContent = 'Asking that phone…';
+      // A signed-in browser asking for its OWN address has already proved the
+      // account on the socket, so it takes the stronger path -- no decoy, no
+      // per-target cap, and the prompt is not labelled "by email".
+      if (authed && fbAuth && fbAuth.currentUser &&
+          (fbAuth.currentUser.email || '').toLowerCase() === raw.toLowerCase()) {
+        flow = 'account';
+        send({type: 'control_request'});
+      } else {
+        flow = 'email';
+        send({type: 'control_request_email', email: raw});
+      }
+    } else if (kind === 'code') {
+      flow = 'code';
+      this.disabled = true; this.textContent = 'Connecting…';
+      // Upper-cased only here. The field displays it upper-case via CSS, so the
+      // value itself was never touched.
+      send({type: 'control_join', code: raw.toUpperCase()});
+    }
   });
   $('signInBtn').addEventListener('click', function(){
     quickErr('');
@@ -1076,51 +1156,8 @@
     });
   });
 
-  $('askBtn').addEventListener('click', function(){
-    quickErr('');
-    $('digits').classList.add('hide');
-    if (!ws || ws.readyState !== 1) { quickErr('Not connected to the server yet.'); return; }
-    if (!authed) { quickErr('Still verifying your sign-in — try again in a second.'); return; }
-    this.disabled = true; this.textContent = 'Asking your phone…';
-    flow = 'account';
-    send({type: 'control_request'});
-  });
 
-  $('useCode').addEventListener('click', function(e){ e.preventDefault(); showView('code'); });
-  $('useAccount').addEventListener('click', function(e){ e.preventDefault(); showView('account'); });
-  $('useMail').addEventListener('click', function(e){ e.preventDefault(); showView('email'); });
-  $('codeToMail').addEventListener('click', function(e){ e.preventDefault(); showView('email'); });
-  $('mailToCode').addEventListener('click', function(e){ e.preventDefault(); showView('code'); });
-  $('mailToAccount').addEventListener('click', function(e){ e.preventDefault(); showView('account'); });
 
-  // ── connect by email ──
-  //
-  // No sign-in: the point of this flow is the machine you will not put a Google
-  // password into. The phone is the only thing that authorises it, which is why
-  // the digits below matter more here than anywhere else -- the requester line
-  // on the prompt cannot prove the request came from you, and comparing the two
-  // numbers is the only thing that can.
-  $('mail').addEventListener('input', function(){
-    $('mailBtn').disabled = this.value.trim().length < 3;
-    $('mailErr').textContent = '';
-  });
-  $('mail').addEventListener('keydown', function(e){
-    if (e.key === 'Enter' && !$('mailBtn').disabled) $('mailBtn').click();
-  });
-  $('mailBtn').addEventListener('click', function(){
-    $('mailErr').textContent = '';
-    $('digits').classList.add('hide');
-    if (!ws || ws.readyState !== 1) { fail('Not connected to the server yet.'); return; }
-    this.disabled = true; this.textContent = 'Asking that phone…';
-    send({type: 'control_request_email', email: $('mail').value.trim()});
-  });
-
-  $('pairBtn').addEventListener('click', function(){
-    if (!ws || ws.readyState !== 1) { fail('Not connected to the server yet.'); return; }
-    this.disabled = true; this.textContent = 'Connecting…';
-    flow = 'code';
-    send({type:'control_join', code:$('code').value});
-  });
 
   // ── transport ──
   $('play').addEventListener('click', function(){
@@ -1657,9 +1694,14 @@
     // reconnects for the next pairing.
     if (ws && ws.readyState === 1) { try { ws.close(); } catch (e) {} }
     setOffline(true);
-    $('code').value = ''; $('pairBtn').disabled = true; $('pairErr').textContent = '';
+    // The address is deliberately NOT cleared: disconnecting is usually a
+    // prelude to connecting again, and retyping it every time is a chore.
+    $('pairErr').textContent = '';
+    paintEntry();
   });
 
+  restoreEmail();
+  paintEntry();
   initAuth();
   setOffline(true);      // the state you actually arrive in
   showFingerprint(false);
