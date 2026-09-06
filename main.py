@@ -1533,133 +1533,297 @@ async def _lrclib_request(
     return None
 
 
+
+# ── Turning a YouTube title into something LRCLIB can match ──────────────
+#
+# LRCLIB is a track/artist database. What we hand it is a VIDEO title and a
+# CHANNEL name, and the two are not the same kind of thing:
+#
+#   "Chikni Chameli - Full Video | Agneepath | Katrina, Hrithik | Shreya
+#    Ghoshal"  by  "SonyMusicIndiaVEVO"
+#
+# The track is "Chikni Chameli" and the artist is "Shreya Ghoshal". Neither
+# string appears in the fields we were sending.
+#
+# Measured against LRCLIB over a sample of real YouTube titles:
+#
+#   raw title (pipe-split) + channel as artist ....  3/10   <- what we sent
+#   normalised title + channel as artist .........  4/10
+#   normalised title + cleaned channel ...........  4/10
+#   normalised title, NO artist filter ...........  10/10
+#
+# So the artist field was doing nearly all the damage: LRCLIB treats
+# artist_name as a FILTER, and a channel name matches no real artist, so a
+# correct track lookup gets thrown away. Every one of the songs reported
+# missing -- The Way I Am, Nanchaku and the rest of Seedhe Maut, MC Stan --
+# is present on LRCLIB with synced lyrics. None of this was a coverage gap.
+#
+# Artist is therefore a RANKING signal here and never a filter. Dropping the
+# filter means a title-only search can return the wrong song, so duration is
+# what proves the match instead -- a far better discriminator, since we know
+# it exactly and covers are rarely the same length.
+
+_LYR_NOISE = re.compile(
+    r"\s*[\(\[][^)\]]*?(official|video|audio|lyric|lyrics|hd|4k|full song|"
+    r"full video|visuali[sz]er|mv|explicit|remaster\w*|reprise)[^)\]]*[\)\]]",
+    re.I,
+)
+_LYR_TAIL = re.compile(
+    r"\s*[-\u2013\u2014|:]\s*(full video song|full video|video song|full song|"
+    r"official video|official music video|official audio|lyrical video|lyrical|"
+    r"lyrics|audio|song|mv|hd|4k)\s*$",
+    re.I,
+)
+_LYR_FEAT = re.compile(
+    r"\s*[\(\[]?\s*(feat\.?|ft\.?|featuring)\s+[^)\]]*[\)\]]?\s*$", re.I
+)
+_LYR_SEPS = (" - ", " \u2013 ", " \u2014 ", " : ", " | ")
+
+
+def _lyr_norm(x: str) -> str:
+    return re.sub(r"[^a-z0-9]+", "", (x or "").lower())
+
+
+def _track_candidates(title: str, limit: int = 6) -> list:
+    """(guess, confidence) for a video title, most trustworthy first.
+
+    Splitting "A - B" is necessary -- either side can be the track, since
+    "Levitating - Dua Lipa" and "SHAKTIMAAN - Seedhe Maut" point opposite
+    ways -- but a split half is a WEAK guess, and treating it as a strong
+    one is how "Tadipaar - MC STAN" came back with the lyrics to "Snake"
+    and "Kesariya | Brahmastra" came back with the film. A weak guess is
+    only accepted when the artist or the duration corroborates it.
+    """
+    out = []
+
+    def add(v, conf, sibling=""):
+        v = (v or "").strip(" -\u2013\u2014|:\u00b7\"'")
+        if v and len(v) > 1 and not any(v == o for o, _, _ in out):
+            out.append((v, conf, (sibling or "").strip(" -\u2013\u2014|:\u00b7")))
+
+    head = title.split("|")[0].strip()
+    for cand, base in ((head, "strong"), (title, "strong")):
+        c = cand
+        for _ in range(3):          # nested junk: "(Official Video) (HD)"
+            c = _LYR_NOISE.sub("", c)
+            c = _LYR_TAIL.sub("", c)
+            c = _LYR_FEAT.sub("", c)
+        add(c, base)
+        for sep in _LYR_SEPS:
+            if sep in c:
+                a, b = c.split(sep, 1)
+                # Each half carries the OTHER half as its sibling. In
+                # "Levitating - Dua Lipa" and "SHAKTIMAAN - Seedhe Maut" the
+                # discarded side is the artist; in "Tum Hi Ho - Aashiqui 2"
+                # it is the film, which LRCLIB files as the album. Either
+                # way it is evidence, and it is the only evidence a weak
+                # guess has -- the channel ("Azadi Records", "T-Series")
+                # never matches anything.
+                add(a, "weak", b)
+                add(b, "weak", a)
+    return out[:limit]
+
+
+def _artist_candidates(artist: str) -> list:
+    """The channel, plus the artist hiding inside it.
+
+    "X - Topic" is YouTube's auto-generated per-artist channel, so that one
+    is exact rather than a guess.
+    """
+    out = []
+    for v in (
+        re.sub(r"\s*-\s*Topic$", "", artist or "", flags=re.I),
+        re.sub(r"VEVO$", "", artist or "", flags=re.I),
+        artist or "",
+    ):
+        v = v.strip()
+        if v and v not in out:
+            out.append(v)
+    return out
+
+
+def _lrclib_score(row, want_title: str, conf: str, artists, duration_secs: int,
+                  sibling: str = ""):
+    """How much this row looks like the song we actually asked for.
+
+    Returns None to reject. Dropping the artist FILTER is what fixed
+    coverage, but it also means a title-only search happily returns a
+    different song of the same name, a cover, or a mashup -- so the artist
+    comes back here as evidence rather than as a gate, alongside length.
+    """
+    want, got = _lyr_norm(want_title), _lyr_norm(row.get("trackName", ""))
+    if not want or not got:
+        return None
+
+    if want == got:
+        score = 3.0
+    elif want in got or got in want:
+        # Partial containment is where the wrong answers come from: "Seedhe
+        # Maut" sits inside a track actually called "Seedhe Maut", and a
+        # one-word candidate sits inside half the database. Score it by how
+        # much of the longer string is actually accounted for.
+        score = 2.0 * (min(len(want), len(got)) / max(len(want), len(got)))
+    else:
+        return None
+
+    # Corroboration, against both the artist and the album: the sibling from
+    # a title split lands in one or the other depending on whether it was a
+    # performer or a film.
+    hay = _lyr_norm(row.get("artistName", "")) + "\u0000" + _lyr_norm(row.get("albumName", ""))
+    for a in list(artists) + ([sibling] if sibling else []):
+        na = _lyr_norm(a)
+        if na and len(na) > 2 and na in hay:
+            score += 2.0
+            break
+    if row.get("syncedLyrics"):
+        score += 0.5
+
+    if duration_secs > 0:
+        d = row.get("duration") or 0
+        if not d or abs(d - duration_secs) > 12:
+            return None                      # a different recording entirely
+        score += 3.0 if abs(d - duration_secs) <= 3 else 1.0
+
+    # A guess pulled out of a split has to be corroborated by something
+    # other than its own text, or it is just a word that exists.
+    floor = 2.0 if conf == "strong" else 4.0
+    return score if score >= floor else None
+
+
+def _lrclib_best(results, want_title, conf, artists, duration_secs, sibling=""):
+    best, best_score = None, 0.0
+    for r in results or []:
+        if not (r.get("syncedLyrics") or r.get("plainLyrics")):
+            continue
+        sc = _lrclib_score(r, want_title, conf, artists, duration_secs, sibling)
+        if sc is not None and sc > best_score:
+            best, best_score = r, sc
+    return best, best_score
+
+
 async def _fetch_lrclib(
     title: str, artist: str, duration_secs: int = 0
 ) -> Optional[dict]:
-    """Fetch synced lyrics from LRCLIB as fallback"""
-    # Strip parenthetical suffixes like (From "Movie") for cleaner matching
-    clean_title = re.sub(
-        r'\s*\(From\s+"[^"]*"\)', "", title, flags=re.IGNORECASE
-    ).strip()
-    # Handle pipe-separated titles like "SONG NAME | VIDEO SONG | ARTIST"
-    if "|" in clean_title:
-        clean_title = clean_title.split("|")[0].strip()
-    titles = [title, clean_title] if clean_title != title else [title]
-    lrclib_down = [False]  # mutable flag for early exit
+    """Fetch lyrics from LRCLIB. The slow, thorough ladder.
+
+    Gathers across every candidate and picks the single best-scoring row,
+    rather than returning the first thing that superficially matched -- the
+    first hit was frequently a cover, a mashup, or a different song sharing
+    one word with the title.
+    """
+    lrclib_down = [False]
     if not _lrclib_available():
         return None
 
+    tracks = _track_candidates(title)
+    artists = _artist_candidates(artist)
+    best, best_score = None, 0.0
+
+    def offer(rows, t, conf, sib):
+        nonlocal best, best_score
+        r, sc = _lrclib_best(rows, t, conf, artists, duration_secs, sib)
+        if r is not None and sc > best_score:
+            best, best_score = r, sc
+
     try:
         async with httpx.AsyncClient(timeout=8) as client:
-            # Try exact match first if we have duration
+            # 1. Exact. One request, cannot be wrong when it lands.
             if duration_secs > 0:
-                for t in titles:
-                    resp = await _lrclib_request(
-                        client,
-                        "https://lrclib.net/api/get",
-                        {
-                            "track_name": t,
-                            "artist_name": artist,
-                            "duration": duration_secs,
-                        },
-                        lrclib_down,
-                    )
-                    if resp:
-                        data = resp.json()
-                        if data.get("syncedLyrics"):
-                            return data
+                for t, conf, _sib in tracks[:2]:
+                    if conf != "strong":
+                        continue
+                    for a in artists[:2]:
+                        resp = await _lrclib_request(
+                            client, "https://lrclib.net/api/get",
+                            {"track_name": t, "artist_name": a,
+                             "duration": duration_secs},
+                            lrclib_down,
+                        )
+                        if resp:
+                            data = resp.json()
+                            if data.get("syncedLyrics") or data.get("plainLyrics"):
+                                return data
 
-            # Search with artist
-            for t in titles:
+            # 2. Title only, no artist filter. The step that finds nearly
+            #    everything; scoring is what keeps it honest.
+            for t, conf, sib in tracks:
                 resp = await _lrclib_request(
-                    client,
-                    "https://lrclib.net/api/search",
-                    {"track_name": t, "artist_name": artist},
-                    lrclib_down,
+                    client, "https://lrclib.net/api/search",
+                    {"track_name": t}, lrclib_down,
                 )
                 if resp:
-                    for r in resp.json():
-                        if r.get("syncedLyrics"):
-                            return r
+                    offer(resp.json(), t, conf, sib)
+                if best_score >= 5.0:        # title + artist + length agree
+                    return best
 
-            # Fallback: search with title only (no artist) for better matching
-            for t in titles:
+            # 3. Free-text, so LRCLIB ranks over both fields at once. Finds
+            #    rows whose trackName carries the artist inline ("Seedhe
+            #    Maut - Namastute") that a track_name lookup misses.
+            for t, conf, sib in tracks[:3]:
+                # The sibling beats the channel as a query term: "Levitating
+                # Dua Lipa" finds the song, "Levitating Vibe Music" does not.
+                q = f"{t} {sib or (artists[0] if artists else '')}".strip()
                 resp = await _lrclib_request(
-                    client,
-                    "https://lrclib.net/api/search",
-                    {"track_name": t},
-                    lrclib_down,
+                    client, "https://lrclib.net/api/search",
+                    {"q": q}, lrclib_down,
                 )
                 if resp:
-                    results = resp.json()
-                    for r in results:
-                        if r.get("syncedLyrics"):
-                            return r
-                    # Return plain lyrics as last resort
-                    if results and results[0].get("plainLyrics"):
-                        return results[0]
+                    offer(resp.json(), t, conf, sib)
+                if best_score >= 5.0:
+                    return best
     except Exception as e:
         print(f"[/lyrics] LRCLIB error: {e}")
-    return None
+    return best
 
 
 async def _fetch_lrclib_precise(
     title: str, artist: str, duration_secs: int = 0
 ) -> Optional[dict]:
-    """Fast, high-precision LRCLIB probe for when the client supplied the
-    exact track metadata: one duration-verified /get, then one artist
-    search whose results must actually match the title. Max 2 requests —
-    the fuzzy multi-step ladder stays in _fetch_lrclib for fallback use."""
-    clean_title = re.sub(
-        r'\s*\(From\s+"[^"]*"\)', "", title, flags=re.IGNORECASE
-    ).strip()
-    if "|" in clean_title:
-        clean_title = clean_title.split("|")[0].strip()
+    """Fast LRCLIB probe for when the client supplied real track metadata.
+
+    Three requests at most, because this one blocks the lyrics sheet. Same
+    scoring as the slow ladder, so it cannot return a worse answer -- only
+    fewer of them.
+    """
     lrclib_down = [False]
     if not _lrclib_available():
         return None
 
-    def _norm(x: str) -> str:
-        return re.sub(r"[^a-z0-9]+", "", (x or "").lower())
+    tracks = _track_candidates(title, limit=3)
+    artists = _artist_candidates(artist)
+    best, best_score = None, 0.0
 
     try:
         # UI-blocking path: tight timeout, no retry — a healthy LRCLIB
         # answers in well under a second; the breaker handles a dead one.
         async with httpx.AsyncClient(timeout=3) as client:
-            if duration_secs > 0:
+            if duration_secs > 0 and tracks and artists and tracks[0][1] == "strong":
                 resp = await _lrclib_request(
-                    client,
-                    "https://lrclib.net/api/get",
-                    {
-                        "track_name": clean_title,
-                        "artist_name": artist,
-                        "duration": duration_secs,
-                    },
-                    lrclib_down,
-                    attempts=1,
+                    client, "https://lrclib.net/api/get",
+                    {"track_name": tracks[0][0], "artist_name": artists[0],
+                     "duration": duration_secs},
+                    lrclib_down, attempts=1,
                 )
                 if resp:
                     data = resp.json()
                     if data.get("syncedLyrics") or data.get("plainLyrics"):
                         return data
 
-            resp = await _lrclib_request(
-                client,
-                "https://lrclib.net/api/search",
-                {"track_name": clean_title, "artist_name": artist},
-                lrclib_down,
-                attempts=1,
-            )
-            if resp:
-                want = _norm(clean_title)
-                for r in resp.json():
-                    got = _norm(r.get("trackName", ""))
-                    if want and (want in got or got in want):
-                        if r.get("syncedLyrics") or r.get("plainLyrics"):
-                            return r
+            for t, conf, sib in tracks[:2]:
+                resp = await _lrclib_request(
+                    client, "https://lrclib.net/api/search",
+                    {"track_name": t}, lrclib_down, attempts=1,
+                )
+                if resp:
+                    r, sc = _lrclib_best(resp.json(), t, conf, artists,
+                                         duration_secs, sib)
+                    if r is not None and sc > best_score:
+                        best, best_score = r, sc
+                if best_score >= 5.0:
+                    return best
     except Exception as e:
         print(f"[/lyrics] LRCLIB precise error: {e}")
-    return None
+    return best
 
 
 # ── YTM lyrics fast path ────────────────────────────────────────────────
