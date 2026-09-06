@@ -24,6 +24,7 @@ import time
 import asyncio
 import concurrent.futures
 import httpx
+import hashlib
 import os
 import threading
 import json
@@ -41,7 +42,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from auth import AuthedUser, get_current_user
-from db import get_session
+from db import get_session, try_session_factory
 import models
 from sync import router as sync_router
 import social
@@ -667,6 +668,102 @@ class LyricsLine(BaseModel):
     endMs: int
 
 
+
+# ── Lyrics timing offsets ────────────────────────────────────────────────
+#
+# Even a correctly matched set of lyrics can sit a second off the audio: the
+# YouTube upload has an intro card, or is a slightly different master. A
+# constant offset fixes that. It does NOT fix a rendition mismatch, where the
+# gap grows across the song -- that is the wrong recording, and the duration
+# scoring in _lrclib_score exists to prevent it.
+
+_LYRICS_OFFSET_CAP_MS = 30_000       # beyond this it is not a sync problem
+_TRUSTED_OFFSET_UIDS = {
+    u.strip() for u in os.getenv("LYRICS_OFFSET_TRUSTED_UIDS", "").split(",")
+    if u.strip()
+}
+
+
+def _lyrics_hash(source: str, lines: list, plain: str = "") -> str:
+    """Identity for one particular set of lyrics.
+
+    Source, line count and the first line: enough that a different LRCLIB row
+    hashes differently, cheap enough to compute on every request, and stable
+    across refetches of the same row.
+    """
+    first = ""
+    if lines:
+        first = (lines[0].get("text") if isinstance(lines[0], dict)
+                 else getattr(lines[0], "text", "")) or ""
+    elif plain:
+        first = plain.strip().split("\n")[0]
+    basis = f"{source or ''}|{len(lines)}|{first.strip()[:80]}"
+    return hashlib.sha256(basis.encode("utf-8", "replace")).hexdigest()[:32]
+
+
+async def _attach_offset(resp, video_id: str) -> None:
+    """Stamp lyricsHash and the shared offset onto a response, in place.
+
+    Deliberately NOT a FastAPI dependency: `Depends(get_session)` would make
+    a dead database break lyrics outright, and lyrics worked long before
+    there was a database. This opens its own session, and anything that goes
+    wrong costs the offset and nothing else.
+
+    Called AFTER the 24h response cache is written, and again on every cache
+    hit, so re-nudging takes effect immediately instead of a day later.
+    """
+    try:
+        resp.lyricsHash = _lyrics_hash(
+            resp.source or "", resp.lines or [], resp.plainLyrics or ""
+        )
+    except Exception:
+        return
+    factory = try_session_factory()
+    if factory is None:
+        return
+    try:
+        async with factory() as session:
+            resp.offsetMs = await _serve_offset(session, video_id, resp.lyricsHash)
+    except Exception as e:
+        print(f"[/lyrics] offset attach skipped: {e}")
+
+
+async def _serve_offset(session, video_id: str, lyrics_hash: str) -> int:
+    """The offset everyone should get for these lyrics.
+
+    A trusted submitter wins outright -- with one curator that is the honest
+    model, and it upgrades to the median below without a schema change. Left
+    to a bare last-write-wins, one sloppy drag would break a song for every
+    listener.
+    """
+    if not lyrics_hash:
+        return 0
+    try:
+        rows = (await session.execute(
+            select(models.LyricsOffset).where(
+                models.LyricsOffset.video_id == video_id,
+                models.LyricsOffset.lyrics_hash == lyrics_hash,
+            )
+        )).scalars().all()
+    except Exception as e:
+        print(f"[/lyrics] offset read failed: {e}")
+        return 0
+    if not rows:
+        return 0
+
+    if _TRUSTED_OFFSET_UIDS:
+        trusted = [r for r in rows if r.uid in _TRUSTED_OFFSET_UIDS]
+        if trusted:
+            trusted.sort(key=lambda r: r.updated_at, reverse=True)
+            return int(trusted[0].offset_ms)
+
+    # Otherwise three people have to agree before anyone else inherits it.
+    if len(rows) < 3:
+        return 0
+    vals = sorted(int(r.offset_ms) for r in rows)
+    return vals[len(vals) // 2]
+
+
 class LyricsResponse(BaseModel):
     success: bool
     videoId: str
@@ -675,6 +772,13 @@ class LyricsResponse(BaseModel):
     plainLyrics: Optional[str] = None
     source: Optional[str] = None
     error: Optional[str] = None
+    # Timing correction, milliseconds, signed. Rides along with the lyrics so
+    # applying it costs no extra round trip. lyricsHash identifies WHICH set
+    # of lines an offset was measured against -- the client sends it back when
+    # submitting, and an offset recorded against different lines is discarded
+    # rather than misapplied.
+    offsetMs: int = 0
+    lyricsHash: Optional[str] = None
 
 
 # ==================== PIPED FUNCTIONS ====================
@@ -2041,6 +2145,58 @@ async def ytm_lyrics_probe(videoId: str):
     return out
 
 
+class LyricsOffsetBody(BaseModel):
+    lyricsHash: str
+    offsetMs: int
+
+
+@api.post("/lyrics/{video_id}/offset")
+async def set_lyrics_offset(
+    video_id: str,
+    body: LyricsOffsetBody,
+    user: AuthedUser = Depends(get_current_user),
+    session: AsyncSession = Depends(get_session),
+):
+    """Record this user's timing correction for these lyrics.
+
+    Upsert per (video, lyrics, user): re-nudging replaces your own value and
+    never appends, so one person cannot outvote the median by dragging
+    repeatedly.
+    """
+    off = max(-_LYRICS_OFFSET_CAP_MS, min(_LYRICS_OFFSET_CAP_MS, int(body.offsetMs)))
+    if not body.lyricsHash:
+        return JSONResponse({"error": "lyricsHash required"}, status_code=400)
+
+    row = (await session.execute(
+        select(models.LyricsOffset).where(
+            models.LyricsOffset.video_id == video_id,
+            models.LyricsOffset.lyrics_hash == body.lyricsHash,
+            models.LyricsOffset.uid == user["uid"],
+        )
+    )).scalar_one_or_none()
+
+    if off == 0:
+        # Zero is "reset", not "an opinion of zero" -- keeping the row would
+        # drag the median toward nothing for everybody else.
+        if row is not None:
+            await session.delete(row)
+            await session.commit()
+        return {"ok": True, "offsetMs": 0, "shared": 0}
+
+    if row is None:
+        session.add(models.LyricsOffset(
+            video_id=video_id, lyrics_hash=body.lyricsHash,
+            uid=user["uid"], offset_ms=off,
+        ))
+    else:
+        row.offset_ms = off
+        row.updated_at = models.utc_now()
+    await session.commit()
+
+    shared = await _serve_offset(session, video_id, body.lyricsHash)
+    return {"ok": True, "offsetMs": off, "shared": shared}
+
+
 @api.get("/lyrics/{video_id}", response_model=LyricsResponse)
 async def get_lyrics_endpoint(
     video_id: str,
@@ -2068,6 +2224,11 @@ async def get_lyrics_endpoint(
     cached = get_browse_cached(cache_key)
     if cached is not None:
         print(f"[/lyrics] CACHE HIT ({time.time() - start:.2f}s)")
+        # Re-stamped on every hit. The cache holds the response OBJECT, so the
+        # offset written after the first fetch is sitting in it -- this is what
+        # keeps that value from going stale for 24h. If the database is down
+        # the previous value survives, which is the right way to fail.
+        await _attach_offset(cached, video_id)
         return cached
 
     lines: List[LyricsLine] = []
@@ -2209,6 +2370,7 @@ async def get_lyrics_endpoint(
         source=source,
     )
     set_browse_cache(cache_key, response, ttl=86400)  # Cache for 24 hours
+    await _attach_offset(response, video_id)
     print(
         f"[/lyrics] {len(lines)} timed lines, source={source} ({time.time() - start:.2f}s)"
     )

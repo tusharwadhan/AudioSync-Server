@@ -135,6 +135,37 @@ class MutedPeer(Base):
         return f"<MutedPeer user={self.user_uid} peer={self.peer_uid}>"
 
 
+class LyricsOffset(Base):
+    """One person's timing correction for one set of lyrics.
+
+    Keyed on the lyrics as well as the video. An offset is measured against
+    a SPECIFIC set of lines; if the match later resolves to a different
+    LRCLIB row the correction is meaningless and must not be applied, so
+    `lyrics_hash` (source + line count + first line) scopes it. Without
+    that the offset silently corrupts a different set of lyrics later.
+
+    Rows are per-submitter rather than per-song because a shared offset
+    written by whoever nudged last lets one sloppy drag break a song for
+    everyone. Reading is in `_serve_offset`: a trusted submitter wins
+    outright, otherwise a median needs three people to agree.
+
+    See alembic 0015_lyrics_offsets.
+    """
+    __tablename__ = "lyrics_offsets"
+
+    video_id: Mapped[str] = mapped_column(String(32), primary_key=True)
+    lyrics_hash: Mapped[str] = mapped_column(String(64), primary_key=True)
+    uid: Mapped[str] = mapped_column(String(128), primary_key=True)
+    # Signed: negative pulls the lines earlier, positive pushes them later.
+    offset_ms: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utc_now, onupdate=utc_now, nullable=False
+    )
+
+    def __repr__(self) -> str:
+        return f"<LyricsOffset {self.video_id} {self.offset_ms}ms by {self.uid[:8]}>"
+
+
 class ChatClear(Base):
     """Per-thread one-sided "clear chat" cutoff. The snapshot for
     `user_uid` filters out messages with sent_at <= cleared_before_ts
