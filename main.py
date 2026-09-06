@@ -222,10 +222,10 @@ class RoomListResponse(BaseModel):
 
 # App update configuration - modify these values to control updates
 APP_UPDATE_CONFIG = {
-    "latestVersion": "5.17.22",
-    "latestVersionCode": 77,
-    "apkUrl": "https://raw.githubusercontent.com/tusharwadhan/AudioSync-Server/tushar/releases/syncaura-5.17.22.apk",
-    "releaseNotes": "Background playback and the web remote. Songs you already have downloaded now keep playing when the queue moves on with the app closed — they were silently falling back to streaming and stopping. The remote at audiosync-server.onrender.com is rebuilt: sign in and your phone asks you to approve with a fingerprint, no code to type. You can scrub the progress bar, mute, use the keyboard, and add, reorder or remove songs from the queue. Volume from the remote now moves the phone's own volume instead of a hidden one it could get stuck on.",
+    "latestVersion": "5.17.23",
+    "latestVersionCode": 78,
+    "apkUrl": "https://raw.githubusercontent.com/tusharwadhan/AudioSync-Server/tushar/releases/syncaura-5.17.23.apk",
+    "releaseNotes": "Lyrics. Most songs said \"No lyrics found\" when the lyrics were there all along \u2014 the app was searching with the YouTube video title and the channel name instead of the song and the artist, so almost nothing matched. Songs that did find lyrics sometimes found the wrong ones; matches are now checked against the track\u2019s length. Lyrics also stopped flashing \"No lyrics found\" for a moment when one song ends and the next begins. And if the words run slightly early or late, long-press them to nudge the timing \u2014 it is saved, so the song stays in sync next time.",
     # 5.15.0 → 5.15.1 is a patch-level bump → the client classifier
     # routes this to the Minor tier (quiet card in Settings, red dot
     # on the home gear). `mandatoryBelow` is effectively ignored for
