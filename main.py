@@ -1024,6 +1024,133 @@ async def get_audio_ytdlp(video_id: str) -> AudioResponse:
     return await asyncio.to_thread(_extract_audio_ytdlp, video_id)
 
 
+
+# ── Related via innertube ────────────────────────────────────────────────
+#
+# yt-dlp's route to the radio mix is the WEB client's playlist API, and
+# YouTube now answers that with 403 from Render's datacenter IP:
+#
+#   RD<id> page 1: Unable to download API page: HTTP Error 403: Forbidden
+#
+# It is specifically that path. Measured while diagnosing:
+#   * the identical yt-dlp call from a residential IP: 50 entries, fine
+#   * yt-dlp 2026.8.19 (what Render installs) vs 2026.07.04: both fine
+#     locally, so it is not a version regression
+#   * /browse/charts, which goes through ytmusicapi/innertube, still works
+#     from Render right now
+#
+# So the server can still reach YouTube — just not through that client.
+# This uses the SAME transport the lyrics fast path already proves works
+# from this box: an anonymous WEB_REMIX /next with a fields mask. Passing
+# playlistId=RD<id> makes the response the radio queue.
+#
+# ytmusicapi's get_watch_playlist would have been the obvious alternative
+# and is not usable: it raises KeyError('endpoint') against current
+# YouTube. Parsing the renderer directly avoids depending on that.
+#
+# The mask matters on a 0.1 vCPU box: 1.8MB unmasked, 207KB with it.
+
+_YTM_NEXT_QUEUE_FIELDS = os.getenv(
+    "YTM_NEXT_QUEUE_FIELDS",
+    "contents.singleColumnMusicWatchNextResultsRenderer.tabbedRenderer."
+    "watchNextTabbedResultsRenderer.tabs.tabRenderer.content.musicQueueRenderer."
+    "content.playlistPanelRenderer.contents.playlistPanelVideoRenderer("
+    "videoId,title,longBylineText,lengthText,thumbnail)",
+)
+
+
+def _runs_text(node) -> str:
+    if not isinstance(node, dict):
+        return ""
+    return "".join(r.get("text", "") for r in node.get("runs", []) or [])
+
+
+def _parse_length(text: str) -> Optional[int]:
+    """'3:31' or '1:02:03' -> seconds. Returns None rather than guessing."""
+    if not text:
+        return None
+    parts = text.strip().split(":")
+    try:
+        nums = [int(x) for x in parts]
+    except ValueError:
+        return None
+    secs = 0
+    for n in nums:
+        secs = secs * 60 + n
+    return secs or None
+
+
+def _walk_queue(node):
+    """Every playlistPanelVideoRenderer, wherever YouTube moves it to.
+
+    Walking rather than indexing a fixed path: the tab layout around the
+    queue changes (a Comments tab appearing there is what breaks
+    ytmusicapi), and the renderer itself is the stable part.
+    """
+    if isinstance(node, dict):
+        if "playlistPanelVideoRenderer" in node:
+            yield node["playlistPanelVideoRenderer"]
+        for v in node.values():
+            yield from _walk_queue(v)
+    elif isinstance(node, list):
+        for v in node:
+            yield from _walk_queue(v)
+
+
+async def _fetch_related_innertube(video_id: str, limit: int = 50) -> list:
+    """The RD<id> radio queue, as SearchResult-shaped dicts. [] on failure."""
+    try:
+        resp = await _ytm_client().post(
+            "https://music.youtube.com/youtubei/v1/next"
+            f"?alt=json&fields={_YTM_NEXT_QUEUE_FIELDS}",
+            json={
+                "videoId": video_id,
+                "playlistId": f"RD{video_id}",
+                "isAudioOnly": True,
+                "context": {
+                    "client": {
+                        "clientName": "WEB_REMIX",
+                        "clientVersion": _YTM_WEB_VERSION,
+                        "hl": "en",
+                    },
+                    "user": {},
+                },
+            },
+            headers=_YTM_HEADERS,
+            timeout=httpx.Timeout(12.0, connect=4.0),
+        )
+        resp.raise_for_status()
+        data = resp.json()
+    except Exception as e:
+        print(f"[/related] innertube failed for {video_id}: {e}")
+        return []
+
+    out = []
+    for item in _walk_queue(data):
+        vid = item.get("videoId")
+        # The seed song is always first in its own radio; it is not a
+        # suggestion, and leaving it in makes the queue repeat immediately.
+        if not vid or vid == video_id:
+            continue
+        title = _runs_text(item.get("title"))
+        if not title:
+            continue
+        # longBylineText is "Artist • 3.2B views • 15M likes" — only the
+        # first run is the artist.
+        runs = (item.get("longBylineText") or {}).get("runs") or []
+        uploader = (runs[0].get("text") if runs else "") or "Unknown"
+        out.append({
+            "videoId": vid,
+            "title": title,
+            "duration": _parse_length(_runs_text(item.get("lengthText"))),
+            "thumbnail": f"https://i.ytimg.com/vi/{vid}/hqdefault.jpg",
+            "uploader": uploader,
+        })
+        if len(out) >= limit:
+            break
+    return out
+
+
 def _extract_related_ytdlp(video_id: str, limit: int = 50) -> RelatedResponse:
     """Sync yt-dlp related extraction (runs in thread pool)"""
 
@@ -3553,7 +3680,20 @@ async def get_related(video_id: str, limit: int = 50):
             source="cache",
         )
 
-    # Try Piped first (fast, includes related)
+    # Innertube first. yt-dlp's playlist client is 403 from this IP; this
+    # one is the transport the lyrics fast path already proves works here.
+    innertube = await _fetch_related_innertube(video_id, limit)
+    if innertube:
+        set_suggestions_cache(video_id, innertube)
+        print(f"[/related] {video_id} → INNERTUBE {len(innertube)} ({time.time() - start:.2f}s)")
+        return RelatedResponse(
+            success=True,
+            videoId=video_id,
+            related=[SearchResult(**r) for r in innertube],
+            source="innertube",
+        )
+
+    # Try Piped next (fast, includes related)
     piped_result = await get_from_piped(video_id)
     if piped_result and piped_result.get("related"):
         # Cache suggestions
