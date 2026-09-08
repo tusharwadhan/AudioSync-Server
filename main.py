@@ -222,10 +222,10 @@ class RoomListResponse(BaseModel):
 
 # App update configuration - modify these values to control updates
 APP_UPDATE_CONFIG = {
-    "latestVersion": "5.17.23",
-    "latestVersionCode": 78,
-    "apkUrl": "https://raw.githubusercontent.com/tusharwadhan/AudioSync-Server/tushar/releases/syncaura-5.17.23.apk",
-    "releaseNotes": "Lyrics. Most songs said \"No lyrics found\" when the lyrics were there all along \u2014 the app was searching with the YouTube video title and the channel name instead of the song and the artist, so almost nothing matched. Songs that did find lyrics sometimes found the wrong ones; matches are now checked against the track\u2019s length. Lyrics also stopped flashing \"No lyrics found\" for a moment when one song ends and the next begins. And if the words run slightly early or late, long-press them to nudge the timing \u2014 it is saved, so the song stays in sync next time.",
+    "latestVersion": "5.17.27",
+    "latestVersionCode": 82,
+    "apkUrl": "https://raw.githubusercontent.com/tusharwadhan/AudioSync-Server/tushar/releases/syncaura-5.17.27.apk",
+    "releaseNotes": "Up Next is back. Suggestions had stopped loading \u2014 YouTube began blocking the server\u2019s requests \u2014 so every song fell back to your downloaded songs. The app now fetches suggestions itself, the same way it already streams audio, which is faster and no longer depends on the server for it. This also fixes suggestions never refilling while the app was swiped away. And if lyrics run early or late, long-press them: drag the bar to line the words up with the music, and it\u2019s saved for next time.",
     # 5.15.0 → 5.15.1 is a patch-level bump → the client classifier
     # routes this to the Minor tier (quiet card in Settings, red dot
     # on the home gear). `mandatoryBelow` is effectively ignored for
