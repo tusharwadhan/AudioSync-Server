@@ -222,10 +222,10 @@ class RoomListResponse(BaseModel):
 
 # App update configuration - modify these values to control updates
 APP_UPDATE_CONFIG = {
-    "latestVersion": "5.17.27",
-    "latestVersionCode": 82,
-    "apkUrl": "https://raw.githubusercontent.com/tusharwadhan/AudioSync-Server/tushar/releases/syncaura-5.17.27.apk",
-    "releaseNotes": "Up Next is back. Suggestions had stopped loading \u2014 YouTube began blocking the server\u2019s requests \u2014 so every song fell back to your downloaded songs. The app now fetches suggestions itself, the same way it already streams audio, which is faster and no longer depends on the server for it. This also fixes suggestions never refilling while the app was swiped away. And if lyrics run early or late, long-press them: drag the bar to line the words up with the music, and it\u2019s saved for next time.",
+    "latestVersion": "5.18.0",
+    "latestVersionCode": 83,
+    "apkUrl": "https://raw.githubusercontent.com/tusharwadhan/AudioSync-Server/tushar/releases/syncaura-5.18.0.apk",
+    "releaseNotes": "Fixes song suggestions (broken on all older versions) and improves lyrics. Recommended.",
     # 5.15.0 → 5.15.1 is a patch-level bump → the client classifier
     # routes this to the Minor tier (quiet card in Settings, red dot
     # on the home gear). `mandatoryBelow` is effectively ignored for
