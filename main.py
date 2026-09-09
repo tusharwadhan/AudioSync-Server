@@ -1907,7 +1907,19 @@ def _lrclib_score(row, want_title: str, conf: str, artists, duration_secs: int,
             score += 2.0
             break
     if row.get("syncedLyrics"):
-        score += 0.5
+        # Synced normally beats plain -- but community data has troll rows,
+        # and one of them is famous: LRCLIB's duration-matched entry for
+        # Never Gonna Give You Up is a single synced line, "*Rickrolling*".
+        # A handful of lines against minutes of song is not lyrics, so a
+        # sparse synced row is demoted below plain instead of boosted; a
+        # fuller candidate (or the plain text) then outranks it. Genuinely
+        # short songs (< 90s) keep the normal bonus.
+        lines = row["syncedLyrics"].count("\n") + 1
+        dur = row.get("duration") or duration_secs or 0
+        if lines < 4 and dur > 90:
+            score -= 0.5
+        else:
+            score += 0.5
 
     if duration_secs > 0:
         d = row.get("duration") or 0
