@@ -1,6 +1,11 @@
 fastapi>=0.115.0
 uvicorn[standard]>=0.30.0
-yt-dlp>=2026.1.0
+# Pinned, not floated: every deploy reinstalls dependencies, so a floating
+# pin silently upgrades yt-dlp on deploys that had nothing to do with it.
+# It was not the culprit for the 2026-09 suggestions outage, but ruling it
+# out cost two isolated test runs that a pin would have made unnecessary.
+# 2026.8.19 is what production was running when everything was verified.
+yt-dlp==2026.8.19
 pydantic>=2.10.0
 httpx>=0.27.0
 ytmusicapi>=1.11.0
