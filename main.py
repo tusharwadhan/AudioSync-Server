@@ -1933,6 +1933,27 @@ def _lrclib_score(row, want_title: str, conf: str, artists, duration_secs: int,
     return score if score >= floor else None
 
 
+def _lrclib_direct_ok(row) -> bool:
+    """Is a duration-verified /get row good enough to accept UNSCORED?
+
+    /get returns before any scoring runs, which is how the one-line
+    "*Rickrolling*" row kept winning after the scorer learned to demote it:
+    the demotion only ever saw /search results. A sparse synced row from
+    /get now falls through to the scored searches, where a fuller candidate
+    (or the plain text) can outrank it.
+    """
+    # "Has plain lyrics" is not an escape hatch on its own: the Rickroll
+    # troll row carries plainLyrics too -- all 13 characters of it.
+    plain = row.get("plainLyrics") or ""
+    plain_ok = plain.count(chr(10)) + 1 >= 4 or len(plain) >= 200
+    synced = row.get("syncedLyrics")
+    if not synced:
+        return plain_ok
+    lines = synced.count(chr(10)) + 1
+    dur = row.get("duration") or 0
+    return lines >= 4 or dur <= 90 or plain_ok
+
+
 def _lrclib_best(results, want_title, conf, artists, duration_secs, sibling=""):
     best, best_score = None, 0.0
     for r in results or []:
@@ -1984,7 +2005,7 @@ async def _fetch_lrclib(
                         )
                         if resp:
                             data = resp.json()
-                            if data.get("syncedLyrics") or data.get("plainLyrics"):
+                            if _lrclib_direct_ok(data):
                                 return data
 
             # 2. Title only, no artist filter. The step that finds nearly
@@ -2049,7 +2070,7 @@ async def _fetch_lrclib_precise(
                 )
                 if resp:
                     data = resp.json()
-                    if data.get("syncedLyrics") or data.get("plainLyrics"):
+                    if _lrclib_direct_ok(data):
                         return data
 
             for t, conf, sib in tracks[:2]:
