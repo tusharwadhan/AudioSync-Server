@@ -48,6 +48,16 @@ class ControlSession:
     phone_secret: str
     owner_uid: Optional[str] = None
     controllers: dict = field(default_factory=dict)   # client_id -> websocket
+    # Who each controller IS, for the phone's Connected-devices list:
+    # client_id -> {"requester": str, "via": "code"|"account"|"email",
+    #               "connected_at": float}. The requester string is the same
+    # closed-set text the approval prompt showed -- never a raw header.
+    controller_meta: dict = field(default_factory=dict)
+    # The owner said no to connect-by-email. Session-scoped on purpose: the
+    # email flow can only ever reach a phone whose socket is LIVE, so a flag
+    # that lives exactly as long as the socket covers every reachable case,
+    # and a phone that reconnects re-asserts it from its own stored setting.
+    email_optout: bool = False
     last_state: Optional[dict] = None
     created_at: float = field(default_factory=time.time)
     last_seen: float = field(default_factory=time.time)
@@ -262,7 +272,8 @@ class ControlSessionManager:
         t = self._tickets.get(code.strip().upper())
         return t.expires_at if t else 0.0
 
-    def attach_controller(self, session_id: str, client_id: str, ws) -> bool:
+    def attach_controller(self, session_id: str, client_id: str, ws,
+                          meta: dict | None = None) -> bool:
         sess = self._sessions.get(session_id)
         if sess is None:
             return False
@@ -271,9 +282,29 @@ class ControlSessionManager:
         if self._by_client.get(client_id) not in (None, sess.id):
             self.end_for_client(client_id)
         sess.controllers[client_id] = ws
+        if meta:
+            sess.controller_meta[client_id] = meta
         sess.last_seen = time.time()
         self._by_client[client_id] = sess.id
         return True
+
+    def kick_controller(self, session_id: str, client_id: str):
+        """Detach ONE controller at the phone's request.
+
+        Returns its websocket so the caller can tell the browser why it just
+        went dark -- silently unmapping it would leave a live-looking page
+        whose every command answers not_paired, which is the exact wedge the
+        web client's onclose handling exists to avoid.
+        """
+        sess = self._sessions.get(session_id)
+        if sess is None:
+            return None
+        ws = sess.controllers.pop(client_id, None)
+        sess.controller_meta.pop(client_id, None)
+        if ws is not None:
+            self._by_client.pop(client_id, None)
+            self._cmd_hits.pop(client_id, None)
+        return ws
 
     # ── teardown ──────────────────────────────────────────────────────
 
@@ -322,6 +353,7 @@ class ControlSessionManager:
             return None, list(sess.controllers.values())
 
         sess.controllers.pop(client_id, None)
+        sess.controller_meta.pop(client_id, None)
         self._cmd_hits.pop(client_id, None)
         return None, []
 

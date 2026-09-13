@@ -5598,7 +5598,11 @@ async def handle_control_join(client_id: str, websocket: WebSocket, msg: dict):
     # this would kill remote control for everyone until they updated.
     if "approval" not in sess.caps:
         control_manager.burn(code)
-        control_manager.attach_controller(sess.id, client_id, websocket)
+        control_manager.attach_controller(sess.id, client_id, websocket, meta={
+            "requester": _describe_requester(websocket),
+            "via": "code",
+            "connected_at": time.time(),
+        })
         await ws_send(websocket, {
             "type": "control_joined",
             "sessionId": sess.id,
@@ -5874,6 +5878,10 @@ async def handle_control_request_email(client_id: str, websocket: WebSocket, msg
         await decoy()
         return
 
+    if target.email_optout:
+        await decoy()
+        return
+
     uid = uid_for_ws(target.phone_client_id) or target.id
     if _email_deny_until.get(uid, 0) > time.time():
         await decoy()
@@ -5910,6 +5918,78 @@ async def handle_control_request_email(client_id: str, websocket: WebSocket, msg
         "pairDigits": pair_digits,
     })
     await ws_send(websocket, {"type": "control_requested", "pairDigits": pair_digits})
+
+
+def _controllers_payload(sess) -> dict:
+    """The Connected-devices list, as the phone renders it."""
+    now = time.time()
+    return {
+        "type": "control_controllers",
+        "controllers": [
+            {
+                "clientId": cid,
+                "requester": (sess.controller_meta.get(cid) or {}).get(
+                    "requester", "Unknown browser"),
+                "via": (sess.controller_meta.get(cid) or {}).get("via", "code"),
+                "connectedSec": int(now - (sess.controller_meta.get(cid) or {}).get(
+                    "connected_at", now)),
+            }
+            for cid in sess.controllers
+        ],
+    }
+
+
+def _phone_session_or_none(client_id: str):
+    """The session this socket is the PHONE of, or None.
+
+    Every handler below mutates controller state, so the check is not
+    politeness: a browser guessing message types must find nothing here --
+    it holds a client_id in the same session map, and without this a
+    controller could list its peers or kick them.
+    """
+    sess = control_manager.for_client(client_id)
+    if sess is None or sess.phone_client_id != client_id:
+        return None
+    return sess
+
+
+async def handle_control_list_controllers(client_id: str, websocket: WebSocket):
+    sess = _phone_session_or_none(client_id)
+    if sess is None:
+        return
+    await ws_send(websocket, _controllers_payload(sess))
+
+
+async def handle_control_kick(client_id: str, websocket: WebSocket, msg: dict):
+    """Phone removes one browser. The way OUT that three ways IN never had."""
+    sess = _phone_session_or_none(client_id)
+    if sess is None:
+        return
+    target = str(msg.get("clientId", ""))
+    kicked_ws = control_manager.kick_controller(sess.id, target)
+    if kicked_ws is not None:
+        # Told, not just unmapped: the web client goes to its offline state on
+        # control_closed; silence would leave a live-looking page answering
+        # not_paired to every tap.
+        await ws_send(kicked_ws, {"type": "control_closed", "reason": "kicked"})
+        await ws_send(websocket, {
+            "type": "control_controller_left",
+            "controllers": len(sess.controllers),
+        })
+    # Fresh list either way -- a stale clientId (double-tap, or the browser
+    # left on its own a beat earlier) still deserves a truthful screen.
+    await ws_send(websocket, _controllers_payload(sess))
+
+
+async def handle_control_email_optout(client_id: str, websocket: WebSocket, msg: dict):
+    sess = _phone_session_or_none(client_id)
+    if sess is None:
+        return
+    sess.email_optout = bool(msg.get("optOut", False))
+    await ws_send(websocket, {
+        "type": "control_email_optout_ok",
+        "optOut": sess.email_optout,
+    })
 
 
 async def handle_control_approval_ack(client_id: str, msg: dict):
@@ -6003,7 +6083,11 @@ async def _resolve_pending(client_id: str, msg: dict, outcome: str):
         })
         return
     control_manager.burn(p.code)
-    control_manager.attach_controller(sess.id, p.browser_client_id, p.browser_ws)
+    control_manager.attach_controller(sess.id, p.browser_client_id, p.browser_ws, meta={
+        "requester": p.requester,
+        "via": "email" if p.via_email else ("code" if p.code else "account"),
+        "connected_at": time.time(),
+    })
     await ws_send(p.browser_ws, {
         "type": "control_joined",
         "sessionId": sess.id,
@@ -6498,6 +6582,15 @@ async def websocket_endpoint(websocket: WebSocket):
 
             elif msg_type == "control_request_email":
                 await handle_control_request_email(client_id, websocket, msg)
+
+            elif msg_type == "control_list_controllers":
+                await handle_control_list_controllers(client_id, websocket)
+
+            elif msg_type == "control_kick":
+                await handle_control_kick(client_id, websocket, msg)
+
+            elif msg_type == "control_email_optout":
+                await handle_control_email_optout(client_id, websocket, msg)
 
             elif msg_type == "control_approval_ack":
                 await handle_control_approval_ack(client_id, msg)

@@ -1080,7 +1080,8 @@
         // prevent, on the one path that does not go through fail().
         clearPendingTimer();
         resetPairButton();
-        setStatus(m.reason === 'phone_gone' ? 'phone went offline' : 'session ended', 'warn');
+        setStatus(m.reason === 'kicked' ? 'disconnected by your phone'
+                : m.reason === 'phone_gone' ? 'phone went offline' : 'session ended', 'warn');
         setTimeout(function(){
           setOffline(true);
           $('pairErr').textContent = 'The phone ended the session. Pair again to reconnect.';
