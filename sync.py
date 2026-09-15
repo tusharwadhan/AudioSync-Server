@@ -213,24 +213,27 @@ def _check_batch_size(n: int) -> None:
 # ── /sync/favorites ──────────────────────────────────────────────────────
 
 
-@router.get("/favorites", response_model=FavoritesResponse)
-async def get_favorites(
-    since: int = Query(0, ge=0, description="Unix ms; rows with updated_at > since"),
-    user: AuthedUser = Depends(get_current_user),
-    session: AsyncSession = Depends(get_session),
-):
+# ── shared query layer ───────────────────────────────────────────────────
+#
+# The GET route bodies, lifted out so the remote's WS library relay
+# (main.py handle_control_library) runs the SAME queries and item mapping
+# rather than a re-typed copy that drifts the first time a column changes.
+# The routes below are DI shells around these; their responses are
+# byte-identical to what they returned before the lift.
+
+
+async def query_favorites(session: AsyncSession, uid: str,
+                          since: int = 0) -> List[FavoriteItem]:
     since_dt = _from_ms(since) or datetime.fromtimestamp(0, tz=timezone.utc)
     rows = (
         await session.execute(
             select(models.UserFavorite)
-            .where(models.UserFavorite.user_id == user["uid"])
+            .where(models.UserFavorite.user_id == uid)
             .where(models.UserFavorite.updated_at > since_dt)
             .order_by(models.UserFavorite.updated_at.asc())
         )
     ).scalars().all()
-
-    return FavoritesResponse(
-        items=[
+    return [
             FavoriteItem(
                 videoId=r.video_id,
                 title=r.title,
@@ -242,8 +245,76 @@ async def get_favorites(
                 updatedAt=_ms(r.updated_at),
                 deletedAt=_ms(r.deleted_at),
             )
-            for r in rows
-        ],
+        for r in rows
+    ]
+
+
+async def query_playlists(session: AsyncSession, uid: str,
+                          since: int = 0) -> List[PlaylistItem]:
+    since_dt = _from_ms(since) or datetime.fromtimestamp(0, tz=timezone.utc)
+    rows = (
+        await session.execute(
+            select(models.UserPlaylist)
+            .where(models.UserPlaylist.user_id == uid)
+            .where(models.UserPlaylist.updated_at > since_dt)
+            .order_by(models.UserPlaylist.updated_at.asc())
+        )
+    ).scalars().all()
+    return [
+        PlaylistItem(
+            syncId=r.sync_id,
+            name=r.name,
+            createdAt=_ms(r.created_at) or 0,
+            autoBackupEnabled=r.auto_backup_enabled,
+            deleted=r.deleted_at is not None,
+            updatedAt=_ms(r.updated_at),
+            deletedAt=_ms(r.deleted_at),
+        )
+        for r in rows
+    ]
+
+
+async def query_playlist_songs(session: AsyncSession, uid: str, since: int = 0,
+                               playlist_sync_id: str | None = None,
+                               ) -> List[PlaylistSongItem]:
+    stmt = (
+        select(models.UserPlaylistSong)
+        .where(models.UserPlaylistSong.user_id == uid)
+        .where(models.UserPlaylistSong.updated_at
+               > (_from_ms(since) or datetime.fromtimestamp(0, tz=timezone.utc)))
+        .order_by(models.UserPlaylistSong.updated_at.asc())
+    )
+    # Sync pulls everything; the remote's playlist view wants one playlist.
+    # Same query either way — the filter is the only difference.
+    if playlist_sync_id is not None:
+        stmt = stmt.where(models.UserPlaylistSong.playlist_sync_id == playlist_sync_id)
+    rows = (await session.execute(stmt)).scalars().all()
+    return [
+        PlaylistSongItem(
+            playlistSyncId=r.playlist_sync_id,
+            videoId=r.video_id,
+            title=r.title,
+            uploader=r.uploader,
+            duration=r.duration,
+            thumbnail=r.thumbnail,
+            position=r.position,
+            addedAt=_ms(r.added_at) or 0,
+            deleted=r.deleted_at is not None,
+            updatedAt=_ms(r.updated_at),
+            deletedAt=_ms(r.deleted_at),
+        )
+        for r in rows
+    ]
+
+
+@router.get("/favorites", response_model=FavoritesResponse)
+async def get_favorites(
+    since: int = Query(0, ge=0, description="Unix ms; rows with updated_at > since"),
+    user: AuthedUser = Depends(get_current_user),
+    session: AsyncSession = Depends(get_session),
+):
+    return FavoritesResponse(
+        items=await query_favorites(session, user["uid"], since),
         serverTime=_server_time_ms(),
     )
 
@@ -310,29 +381,8 @@ async def get_playlists(
     user: AuthedUser = Depends(get_current_user),
     session: AsyncSession = Depends(get_session),
 ):
-    since_dt = _from_ms(since) or datetime.fromtimestamp(0, tz=timezone.utc)
-    rows = (
-        await session.execute(
-            select(models.UserPlaylist)
-            .where(models.UserPlaylist.user_id == user["uid"])
-            .where(models.UserPlaylist.updated_at > since_dt)
-            .order_by(models.UserPlaylist.updated_at.asc())
-        )
-    ).scalars().all()
-
     return PlaylistsResponse(
-        items=[
-            PlaylistItem(
-                syncId=r.sync_id,
-                name=r.name,
-                createdAt=_ms(r.created_at) or 0,
-                autoBackupEnabled=r.auto_backup_enabled,
-                deleted=r.deleted_at is not None,
-                updatedAt=_ms(r.updated_at),
-                deletedAt=_ms(r.deleted_at),
-            )
-            for r in rows
-        ],
+        items=await query_playlists(session, user["uid"], since),
         serverTime=_server_time_ms(),
     )
 
@@ -393,33 +443,8 @@ async def get_playlist_songs(
     user: AuthedUser = Depends(get_current_user),
     session: AsyncSession = Depends(get_session),
 ):
-    since_dt = _from_ms(since) or datetime.fromtimestamp(0, tz=timezone.utc)
-    rows = (
-        await session.execute(
-            select(models.UserPlaylistSong)
-            .where(models.UserPlaylistSong.user_id == user["uid"])
-            .where(models.UserPlaylistSong.updated_at > since_dt)
-            .order_by(models.UserPlaylistSong.updated_at.asc())
-        )
-    ).scalars().all()
-
     return PlaylistSongsResponse(
-        items=[
-            PlaylistSongItem(
-                playlistSyncId=r.playlist_sync_id,
-                videoId=r.video_id,
-                title=r.title,
-                uploader=r.uploader,
-                duration=r.duration,
-                thumbnail=r.thumbnail,
-                position=r.position,
-                addedAt=_ms(r.added_at) or 0,
-                deleted=r.deleted_at is not None,
-                updatedAt=_ms(r.updated_at),
-                deletedAt=_ms(r.deleted_at),
-            )
-            for r in rows
-        ],
+        items=await query_playlist_songs(session, user["uid"], since),
         serverTime=_server_time_ms(),
     )
 

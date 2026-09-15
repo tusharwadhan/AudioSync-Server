@@ -44,6 +44,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from auth import AuthedUser, get_current_user
 from db import get_session, try_session_factory
 import models
+import sync
 from sync import router as sync_router
 import social
 
@@ -6197,6 +6198,98 @@ async def handle_control_lyrics(client_id: str, websocket: WebSocket, msg: dict)
     asyncio.create_task(fetch_and_reply())
 
 
+async def handle_control_library(client_id: str, websocket: WebSocket, msg: dict):
+    """Browser browses ITS OWN library: favorites, playlists, one playlist.
+
+    Whose library is the load-bearing decision: the uid comes from the
+    BROWSER socket's ws_auth, never from the phone. A code-paired stranger
+    gets to drive playback — that is what approval granted — but not to read
+    the phone owner's favorites; and the signed-in owner at a friend's
+    machine sees their own library, which is the feature.
+
+    Queries are sync.py's query_* helpers — the exact functions the app's
+    /sync GET routes run — so there is one query layer. What differs here is
+    presentation only: tombstones dropped, display ordering, a 200-row cap.
+
+    Errors are IN-BAND (an `error` field on the result), never the shared
+    control_error channel: that channel's default branch drives the pairing
+    UI, and "your library is unavailable" is not a pairing problem.
+    """
+    sess = control_manager.for_client(client_id)
+    if sess is None or client_id not in sess.controllers:
+        await ws_send(websocket, {"type": "control_error", "code": "not_paired"})
+        return
+    if not control_manager.allow_cmd(client_id):
+        await ws_send(websocket, {"type": "control_error", "code": "rate_limited"})
+        return
+    kind = str(msg.get("kind", ""))
+    playlist_id = str(msg.get("playlistId", "")) or None
+    if kind not in ("favorites", "playlists", "playlist_songs"):
+        return
+
+    def reply(items=None, error=None):
+        out = {"type": "control_library_result", "kind": kind}
+        if playlist_id:
+            out["playlistId"] = playlist_id
+        if error:
+            out["error"] = error
+        else:
+            out["items"] = items or []
+            if items is not None and len(items) >= _LIBRARY_CAP:
+                out["truncated"] = True
+        return out
+
+    uid = uid_for_ws(client_id)
+    if not uid:
+        await ws_send(websocket, reply(error="not_signed_in"))
+        return
+    factory = try_session_factory()
+    if factory is None:
+        await ws_send(websocket, reply(error="unavailable"))
+        return
+
+    async def fetch_and_reply():
+        try:
+            async with factory() as session:
+                if kind == "favorites":
+                    rows = await sync.query_favorites(session, uid)
+                    live = [r for r in rows if not r.deleted]
+                    live.sort(key=lambda r: r.favoritedAt, reverse=True)
+                    items = [{
+                        "videoId": r.videoId, "title": r.title or "Unknown",
+                        "uploader": r.uploader or "", "duration": r.duration,
+                        "thumbnail": r.thumbnail,
+                    } for r in live[:_LIBRARY_CAP]]
+                elif kind == "playlists":
+                    rows = await sync.query_playlists(session, uid)
+                    live = [r for r in rows if not r.deleted]
+                    live.sort(key=lambda r: r.createdAt, reverse=True)
+                    items = [{
+                        "syncId": r.syncId, "name": r.name,
+                    } for r in live[:_LIBRARY_CAP]]
+                else:
+                    rows = await sync.query_playlist_songs(
+                        session, uid, playlist_sync_id=playlist_id)
+                    live = [r for r in rows if not r.deleted]
+                    live.sort(key=lambda r: r.position)
+                    items = [{
+                        "videoId": r.videoId, "title": r.title or "Unknown",
+                        "uploader": r.uploader or "", "duration": r.duration,
+                        "thumbnail": r.thumbnail,
+                    } for r in live[:_LIBRARY_CAP]]
+            await ws_send(websocket, reply(items=items))
+        except Exception as e:
+            print(f"[control] library relay failed ({kind}): {e}")
+            await ws_send(websocket, reply(error="unavailable"))
+
+    # create_task for the same reason as lyrics: this loop is the only reader
+    # of the browser's socket, and a cold Neon wake can take seconds.
+    asyncio.create_task(fetch_and_reply())
+
+
+_LIBRARY_CAP = 200
+
+
 async def handle_control_cmd(client_id: str, websocket: WebSocket, msg: dict):
     """Browser command -> phone. Fire and forget.
 
@@ -6633,6 +6726,9 @@ async def websocket_endpoint(websocket: WebSocket):
 
             elif msg_type == "control_lyrics":
                 await handle_control_lyrics(client_id, websocket, msg)
+
+            elif msg_type == "control_library":
+                await handle_control_library(client_id, websocket, msg)
 
             elif msg_type == "control_join":
                 await handle_control_join(client_id, websocket, msg)
