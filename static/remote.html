@@ -120,6 +120,27 @@
   /* Fades the last row instead of clipping it mid-glyph, so it reads as
      "more below" rather than as a rendering fault. */
   .listwrap{position:relative}
+
+  /* ══ lyrics panel ══════════════════════════════════════════════
+     A third occupant of .listwrap, sibling to #queue and #results — the
+     panel-count rule on .side (four grid items, always) is preserved
+     because it lives INSIDE the wrap like #results does. */
+  #lyrics{padding:6px 10px}
+  .lline{padding:9px 6px;font-size:16.5px;font-weight:600;line-height:1.4;
+    color:rgba(255,255,255,.34);border-radius:8px;cursor:default;
+    transition:color .25s,background .25s}
+  .lline.on{color:#fff;background:rgba(168,85,247,.10)}
+  .lline.past{color:rgba(255,255,255,.55)}
+  #lyrics .plain{white-space:pre-wrap;font-size:14.5px;line-height:1.8;
+    color:var(--dim);padding:8px 6px}
+  #lyrics .empty{padding:26px 8px;text-align:center;color:var(--dim);font-size:13px}
+
+  .lyrbtn{width:34px;height:34px;border-radius:9px;border:0;cursor:pointer;
+    background:transparent;color:var(--dim);display:flex;align-items:center;
+    justify-content:center;flex:0 0 auto}
+  .lyrbtn:hover{background:rgba(255,255,255,.07);color:var(--text)}
+  .lyrbtn.on{color:var(--accent2)}
+  .lyrbtn svg{width:18px;height:18px;fill:currentColor}
   /* Only when there is genuinely more below. Unconditional, it greyed out a
      one-line "Nothing queued", faded the last of a two-row list as if it
      scrolled, and — with #queue hidden during a search — smeared a band across
@@ -505,6 +526,9 @@
       </div>
 
       <div class="vol">
+        <button class="lyrbtn" id="lyrToggle" title="Lyrics (L)" aria-label="Lyrics">
+          <svg viewBox="0 0 24 24"><path d="M12 3v10.55A4 4 0 1 0 14 17V7h4V3h-6zM4 6h7v2H4V6zm0 4h7v2H4v-2zm0 4h4v2H4v-2z"/></svg>
+        </button>
         <button class="mute" id="mute" title="Mute (M)" aria-label="Mute">
           <svg id="muteIcon" viewBox="0 0 24 24"><path d="M3 9v6h4l5 5V4L7 9H3zm13.5 3c0-1.8-1-3.3-2.5-4v8c1.5-.7 2.5-2.2 2.5-4z"/></svg>
         </button>
@@ -523,6 +547,7 @@
     <div class="listwrap">
       <div id="queue" class="list"></div>
       <div id="results" class="list hide"></div>
+      <div id="lyrics" class="list hide"></div>
     </div>
 
     <div class="foot">
@@ -664,6 +689,7 @@
 
   // Dimmed and inert, rather than hidden: see the .app.offline rules.
   function setOffline(off){
+    if (off && silentAudio) silentAudio.pause();
     document.querySelector('.app').classList.toggle('offline', off);
     $('pairView').classList.toggle('hide', !off);
   }
@@ -893,6 +919,7 @@
     if (st.isPlaying && drift != null) p += (Date.now() - drift) / 1000;
     if (st.duration) p = Math.min(p, st.duration);
     $('pos').textContent = fmt(p);
+    updateLyricsLine(p);
     var pct = st.duration ? (p / st.duration * 100) : 0;
     $('prog').style.width = pct + '%';
     // The knob rides the same value, so there is one source of truth for where
@@ -943,8 +970,15 @@
         lastResults = m.results || [];
         renderResults(lastResults);
         searchHead(lastResults.length ? 'Results for' : 'Nothing found for', searchQuery);
-        $('results').classList.remove('hide');
-        $('queue').classList.add('hide');
+        showPanel('results');
+
+      } else if (m.type === 'control_lyrics_result') {
+        lyricsCache[m.videoId] = m;
+        // The guard the app's lyrics needed three fixes to learn: a late
+        // answer for the previous song must not paint over the current one.
+        if (activePanel === 'lyrics' && m.videoId === st.videoId) {
+          renderLyrics(m.videoId, m);
+        }
 
       } else if (m.type === 'control_state') {
         var incoming = m.state || {};
@@ -953,7 +987,15 @@
           incoming.isPlaying = st.isPlaying;
         }
         var wasStarting = startingId;
+        var prevVid = st.videoId;
         st = incoming; drift = Date.now();
+        if (st.videoId !== prevVid) {
+          // New song: refresh the open lyrics panel; a closed one fetches
+          // lazily on open. The cache makes revisits free either way.
+          if (activePanel === 'lyrics') ensureLyrics();
+          else lyricsFor = null;
+        }
+        mediaKeysSync();
         // The phone has said what it is playing, so the wait is over -- whether
         // it landed on the song we asked for or not.
             // Match the id, not st.isPlaying: the first settle push lands ~400ms
@@ -1194,14 +1236,16 @@
 
 
   // ── transport ──
-  $('play').addEventListener('click', function(){
-    // Optimistic: flip locally so the button feels instant, then let the
-    // phone's next state push confirm or correct it.
+  // Named because the media-key handlers invoke the SAME toggle — the
+  // hardware key and the on-screen button must be indistinguishable to the
+  // phone, or their optimistic states would fight.
+  function togglePlayLocal(){
     st.isPlaying = !st.isPlaying;
     optimisticUntil = Date.now() + 1200;
     render();
     cmd(st.isPlaying ? 'play' : 'pause');
-  });
+  }
+  $('play').addEventListener('click', togglePlayLocal);
   $('next').addEventListener('click', function(){ cmd('next'); });
   $('prev').addEventListener('click', function(){ cmd('previous'); });
 
@@ -1226,8 +1270,8 @@
     searchQuery = q;
     $('searchbar').classList.add('busy');
     searchHead('Searching for', q, '…');
-    $('queue').classList.add('hide');
-    $('results').classList.remove('hide');
+    if (activePanel !== 'results') panelBeforeSearch = activePanel;
+    showPanel('results');
     // Skeletons only when there is nothing to keep. Refining a query holds the
     // previous rows and dims them, because blanking the list on every keystroke
     // is the same flicker in a different costume.
@@ -1433,6 +1477,138 @@
     }
     return out;
   }
+
+  // ── lyrics ────────────────────────────────────────────────────────────
+  //
+  // The server resolves through the same function the app's HTTP endpoint
+  // runs, so what appears here — including the owner's saved timing offsets —
+  // is exactly what the phone would show.
+  var lyricsCache = {};          // videoId -> result (negatives included)
+  var lyricsFor = null;          // videoId the panel currently renders
+  var lyricsActiveIdx = -1;
+  var lyricsOffsetMs = 0;
+  var lyricsScrollHold = 0;      // wheel pauses auto-centering briefly
+
+  function ensureLyrics(){
+    var vid = st.videoId;
+    if (!vid) { $('lyrics').innerHTML = '<div class="empty">Nothing playing</div>'; return; }
+    if (lyricsFor === vid) return;
+    var cached = lyricsCache[vid];
+    if (cached) { renderLyrics(vid, cached); return; }
+    $('lyrics').innerHTML = skeletons(6);
+    send({type:'control_lyrics', videoId: vid,
+          title: st.title || '', artist: st.artist || '',
+          duration: Math.round(st.duration || 0)});
+  }
+
+  function renderLyrics(vid, r){
+    lyricsFor = vid;
+    lyricsActiveIdx = -1;
+    lyricsOffsetMs = r.offsetMs || 0;
+    var el = $('lyrics');
+    if (!r.success || (!(r.lines || []).length && !r.plainLyrics)) {
+      el.innerHTML = '<div class="empty">No lyrics for this song</div>';
+      return;
+    }
+    if ((r.lines || []).length) {
+      el.innerHTML = r.lines.map(function(l){
+        return '<div class="lline" data-ms="' + (l.startMs|0) + '">' + esc(l.text) + '</div>';
+      }).join('');
+    } else {
+      el.innerHTML = '<div class="plain">' + esc(r.plainLyrics) + '</div>';
+    }
+    el.scrollTop = 0;
+  }
+
+  // Driven from tick(): the SAME interpolated clock the scrubber trusts,
+  // minus the same offset the app subtracts. Two clocks would drift.
+  function updateLyricsLine(posSec){
+    if (activePanel !== 'lyrics' || lyricsFor !== st.videoId) return;
+    var rows = $('lyrics').children;
+    if (!rows.length || !rows[0].dataset || rows[0].dataset.ms === undefined) return;
+    var ms = posSec * 1000 - lyricsOffsetMs;
+    var idx = -1;
+    for (var i = 0; i < rows.length; i++) {
+      if ((rows[i].dataset.ms|0) <= ms) idx = i; else break;
+    }
+    if (idx === lyricsActiveIdx) return;
+    if (lyricsActiveIdx >= 0 && rows[lyricsActiveIdx]) {
+      rows[lyricsActiveIdx].classList.remove('on');
+      rows[lyricsActiveIdx].classList.add('past');
+    }
+    lyricsActiveIdx = idx;
+    if (idx >= 0 && rows[idx]) {
+      rows[idx].classList.remove('past');
+      rows[idx].classList.add('on');
+      if (Date.now() > lyricsScrollHold) {
+        var el = $('lyrics');
+        el.scrollTop = rows[idx].offsetTop - el.clientHeight / 2 + rows[idx].offsetHeight / 2;
+      }
+    }
+  }
+
+  $('lyrics').addEventListener('wheel', function(){
+    // Reading ahead is allowed: the auto-centering yields for a few seconds
+    // rather than yanking the scroll back mid-read.
+    lyricsScrollHold = Date.now() + 3000;
+  }, {passive: true});
+
+  $('lyrToggle').addEventListener('click', function(){
+    if (activePanel === 'lyrics') { showPanel('queue'); return; }
+    if (searchQuery) { showQueue(); }   // leaving a live search: full teardown
+    showPanel('lyrics');
+  });
+
+  // ── media keys ────────────────────────────────────────────────────────
+  //
+  // navigator.mediaSession makes the laptop's own play/pause/next keys (and
+  // the OS media overlay) drive the PHONE. Handlers call the exact same
+  // functions the on-screen buttons call — there is no second command path.
+  //
+  // The one catch: a page only holds media-session focus while it is playing
+  // audio, so a silent looped tone plays while the phone does. It is created
+  // once and resumed only inside user gestures (autoplay policy).
+  var silentAudio = null;
+
+  function mediaKeysSync(){
+    if (!('mediaSession' in navigator)) return;
+    try {
+      if (paired && st.title) {
+        navigator.mediaSession.metadata = new MediaMetadata({
+          title: st.title,
+          artist: st.artist || '',
+          artwork: st.videoId ? [{src: thumb(st.videoId), sizes: '320x180', type: 'image/jpeg'}] : []
+        });
+        navigator.mediaSession.playbackState = st.isPlaying ? 'playing' : 'paused';
+      }
+      if (silentAudio) {
+        if (paired && st.isPlaying) { silentAudio.play().catch(function(){}); }
+        else silentAudio.pause();
+      }
+    } catch (e) { /* metadata is a nicety, never worth breaking render over */ }
+  }
+
+  function armMediaKeys(){
+    if (!('mediaSession' in navigator) || silentAudio) return;
+    // 100ms of silence, looped. Small enough to inline; exists only so the
+    // browser considers this page "playing" and routes hardware keys here.
+    silentAudio = new Audio('data:audio/wav;base64,UklGRmQGAABXQVZFZm10IBAAAAABAAEAQB8AAIA+AAACABAAZGF0YUAGAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA');
+    silentAudio.loop = true;
+    silentAudio.volume = 0.0001;
+    var ms = navigator.mediaSession;
+    ms.setActionHandler('play', function(){ if (!st.isPlaying) togglePlayLocal(); });
+    ms.setActionHandler('pause', function(){ if (st.isPlaying) togglePlayLocal(); });
+    ms.setActionHandler('nexttrack', function(){ cmd('next'); });
+    ms.setActionHandler('previoustrack', function(){ cmd('previous'); });
+    ms.setActionHandler('seekto', function(d){
+      if (d && typeof d.seekTime === 'number') cmd('seek', d.seekTime);
+    });
+    mediaKeysSync();
+  }
+
+  // Armed on the first gesture after pairing — creating or resuming audio
+  // outside a user gesture is exactly what autoplay policy blocks.
+  document.addEventListener('click', function(){ if (paired) armMediaKeys(); });
 
   // ── scrubbing ─────────────────────────────────────────────────────────
   //
@@ -1677,6 +1853,7 @@
       case 'ArrowUp':   nudgeVolume(0.05);  break;
       case 'ArrowDown': nudgeVolume(-0.05); break;
       case 'm': case 'M': toggleMute(); break;
+      case 'l': case 'L': $('lyrToggle').click(); break;
       case 'n': case 'N': cmd('next');     hud('Next');     break;
       case 'p': case 'P': cmd('previous'); hud('Previous'); break;
       case '/':
@@ -1692,6 +1869,26 @@
     e.preventDefault();
   });
 
+  // ── one panel switcher ───────────────────────────────────────────────
+  //
+  // The wrap's occupants used to toggle each other in ad-hoc pairs — which
+  // was fine with two, and quadratic with three. This is now the ONLY place
+  // panel visibility changes; the search flow's subtleties (header states,
+  // stale-query guards) stay exactly where they were and just call this for
+  // the visibility part.
+  var activePanel = 'queue';
+  var panelBeforeSearch = 'queue';
+
+  function showPanel(name){
+    activePanel = name;
+    $('queue').classList.toggle('hide', name !== 'queue');
+    $('results').classList.toggle('hide', name !== 'results');
+    $('lyrics').classList.toggle('hide', name !== 'lyrics');
+    $('lyrToggle').classList.toggle('on', name === 'lyrics');
+    if (name === 'queue') $('qhead').textContent = 'Up next';
+    if (name === 'lyrics') { $('qhead').textContent = 'Lyrics'; ensureLyrics(); }
+  }
+
   function showQueue(){
     lastResults = [];
     // Cleared, not just hidden: an in-flight answer for the query the user just
@@ -1700,10 +1897,11 @@
     clearTimeout(searchTimer);
     endSearching();
     $('results').innerHTML = '';
-    $('results').classList.add('hide');
-    $('qhead').textContent = 'Up next';
     $('qhead').classList.remove('hide');
-    $('queue').classList.remove('hide');
+    // Search returns you to wherever you were, not to a hardcoded queue —
+    // closing a search you opened while reading lyrics should not eject you
+    // from the lyrics.
+    showPanel(panelBeforeSearch);
   }
 
   // One listener per list rather than one per row: rows are replaced on every

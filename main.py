@@ -6140,6 +6140,63 @@ async def sweep_pendings():
             })
 
 
+async def handle_control_lyrics(client_id: str, websocket: WebSocket, msg: dict):
+    """Browser asks for the lyrics of what is playing.
+
+    The resolution is get_lyrics_endpoint — the LITERAL endpoint function the
+    app calls over HTTP (it takes plain args, no Depends), so the browser gets
+    the identical ladder: YTM fast path, LRCLIB with the sibling matcher and
+    the troll-row guards, the 24h cache, and the owner's saved timing offsets.
+    A second "remote" lyrics path would drift from the app's the first time
+    either was touched; this one cannot.
+
+    Same gate as handle_control_cmd: an attached controller, rate-limited.
+    Read-only, so deliberately NO guest_in_room gate — a room guest may read
+    lyrics; what they cannot do is drive playback.
+
+    The fetch is a create_task, not an await: a cold lookup can take seconds,
+    and this receive loop is the only thing reading this browser's socket — an
+    inline await would freeze its own next/pause commands behind a lyrics
+    lookup (the handle_next precedent).
+    """
+    sess = control_manager.for_client(client_id)
+    if sess is None or client_id not in sess.controllers:
+        await ws_send(websocket, {"type": "control_error", "code": "not_paired"})
+        return
+    if not control_manager.allow_cmd(client_id):
+        await ws_send(websocket, {"type": "control_error", "code": "rate_limited"})
+        return
+    video_id = str(msg.get("videoId", ""))[:20]
+    if not video_id:
+        return
+    title = str(msg.get("title", ""))[:300]
+    artist = str(msg.get("artist", ""))[:200]
+    try:
+        duration = max(0, int(msg.get("duration") or 0))
+    except (TypeError, ValueError):
+        duration = 0
+
+    async def fetch_and_reply():
+        try:
+            resp = await get_lyrics_endpoint(video_id, title=title,
+                                             artist=artist, duration=duration)
+            out = resp.model_dump()
+            # A seatbelt, not a feature: no real song needs more, and the
+            # browser renders one node per line.
+            out["lines"] = (out.get("lines") or [])[:400]
+            out["type"] = "control_lyrics_result"
+            out["videoId"] = video_id
+            await ws_send(websocket, out)
+        except Exception as e:
+            print(f"[control] lyrics relay failed for {video_id}: {e}")
+            await ws_send(websocket, {
+                "type": "control_lyrics_result", "videoId": video_id,
+                "success": False, "lines": [],
+            })
+
+    asyncio.create_task(fetch_and_reply())
+
+
 async def handle_control_cmd(client_id: str, websocket: WebSocket, msg: dict):
     """Browser command -> phone. Fire and forget.
 
@@ -6573,6 +6630,9 @@ async def websocket_endpoint(websocket: WebSocket):
 
             elif msg_type == "control_search":
                 await handle_control_search(client_id, msg)
+
+            elif msg_type == "control_lyrics":
+                await handle_control_lyrics(client_id, websocket, msg)
 
             elif msg_type == "control_join":
                 await handle_control_join(client_id, websocket, msg)
