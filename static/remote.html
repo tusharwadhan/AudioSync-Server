@@ -125,15 +125,50 @@
      A third occupant of .listwrap, sibling to #queue and #results — the
      panel-count rule on .side (four grid items, always) is preserved
      because it lives INSIDE the wrap like #results does. */
-  #lyrics{padding:6px 10px}
-  .lline{padding:9px 6px;font-size:16.5px;font-weight:600;line-height:1.4;
-    color:rgba(255,255,255,.34);border-radius:8px;cursor:default;
-    transition:color .25s,background .25s}
-  .lline.on{color:#fff;background:rgba(168,85,247,.10)}
-  .lline.past{color:rgba(255,255,255,.55)}
-  #lyrics .plain{white-space:pre-wrap;font-size:14.5px;line-height:1.8;
-    color:var(--dim);padding:8px 6px}
-  #lyrics .empty{padding:26px 8px;text-align:center;color:var(--dim);font-size:13px}
+  /* The active line is FILLED, not just coloured: a gradient hard-stop rides
+     --p across the text in time with the line's own duration, so the words
+     light up as they are sung. Everything else falls back -- neighbours dim,
+     distant lines blur -- so the eye lands on the right line without hunting. */
+  #lyrics{
+    padding:2px 2px 40% 2px;scroll-behavior:smooth;
+    -webkit-mask-image:linear-gradient(180deg,transparent 0,#000 10%,#000 84%,transparent 100%);
+    mask-image:linear-gradient(180deg,transparent 0,#000 10%,#000 84%,transparent 100%);
+  }
+  .lline{
+    /* fit-content, not a full-width block: the gradient that fills the sung
+       words is positioned against the ELEMENT box, so on a wide pane a
+       block-width line put the 60% hard-stop far past the last glyph and the
+       whole line read as already-sung. Hugging the text makes --p mean what
+       it says. */
+    width:fit-content;max-width:100%;
+    padding:10px 12px;margin:2px 0;border-radius:14px;
+    font-size:21px;font-weight:750;line-height:1.35;letter-spacing:-.015em;
+    color:rgba(255,255,255,.19);transform-origin:left center;
+    transition:color .45s ease,transform .5s cubic-bezier(.34,1.22,.5,1),
+               filter .45s ease,opacity .45s ease;
+  }
+  .lline.past{color:rgba(255,255,255,.24)}
+  .lline.near{color:rgba(255,255,255,.42)}
+  .lline.far{opacity:.5;filter:blur(1.6px)}
+  .lline.on{
+    color:transparent;
+    background-image:linear-gradient(90deg,#fff 0%,#fff var(--p,0%),
+      rgba(255,255,255,.24) var(--p,0%),rgba(255,255,255,.24) 100%);
+    -webkit-background-clip:text;background-clip:text;
+    transform:scale(1.045);
+    filter:drop-shadow(0 6px 26px rgba(168,85,247,.38));
+  }
+  #lyrics .plain{white-space:pre-wrap;font-size:15px;line-height:1.85;
+    color:rgba(255,255,255,.62);padding:8px 10px}
+  #lyrics .empty,#library .empty{padding:30px 10px;text-align:center;
+    color:var(--dim);font-size:13px}
+
+  @media (prefers-reduced-motion:reduce){
+    .lline{transition:color .2s ease}
+    .lline.on{transform:none;filter:none}
+    .lline.far{filter:none}
+    #lyrics{scroll-behavior:auto}
+  }
 
   .lyrbtn{width:34px;height:34px;border-radius:9px;border:0;cursor:pointer;
     background:transparent;color:var(--dim);display:flex;align-items:center;
@@ -285,6 +320,7 @@
      Floats rather than fills: a sign-in form stretched to full height leaves
      most of the panel dead with the content marooned in the middle. */
   #pairView{
+    grid-column:2;grid-row:1;
     align-self:start;justify-self:center;width:min(100%,318px);
     background:var(--panel);border:1px solid var(--line);border-radius:18px;
     padding:20px;box-shadow:0 26px 64px rgba(0,0,0,.55);
@@ -367,8 +403,19 @@
       var(--bg);
   }
   .app{
+    /* Explicit width: body is a centring grid (place-items:center from the
+       base rule), so without this .app shrink-wraps its columns and the
+       player drifts around the screen depending on what is open. It now
+       fills, with a cap so an ultrawide does not stretch lyrics to absurd
+       line lengths. */
+    width:100%;max-width:1500px;margin-inline:auto;
     height:100%;display:grid;
-    grid-template-columns:minmax(0,560px) 1fr;
+    /* Explicit placement, not auto-flow: .main, #pane and #pairView are all
+       grid items (thanks to #playerView{display:contents}), and the pane and
+       the pairing card deliberately share ONE cell -- they are the two states
+       of the same column, never both visible. Without explicit columns the
+       third item would open a third column and squeeze the player. */
+    grid-template-columns:minmax(0,560px) minmax(0,1fr);
     gap:20px;
     padding:max(18px,env(safe-area-inset-top)) max(18px,env(safe-area-inset-right))
             max(18px,env(safe-area-inset-bottom)) max(18px,env(safe-area-inset-left));
@@ -380,7 +427,42 @@
      viewport and the footer, Shortcuts and Disconnect went off-screen with
      overflow:hidden making them unreachable. */
   #playerView{display:contents}
-  .main{display:grid;grid-template-rows:auto minmax(0,1fr);gap:16px;min-height:0;min-width:0}
+  .main{display:grid;grid-template-rows:auto minmax(0,1fr);gap:16px;min-height:0;min-width:0;
+    grid-column:1;grid-row:1}
+
+  /* ══ right pane: lyrics + library ═══════════════════════════════
+     Shares its cell with #pairView; .app.offline hides it, and setOffline
+     hides the card, so exactly one of the two occupies the column. */
+  #pane{
+    grid-column:2;grid-row:1;
+    min-width:0;min-height:0;background:var(--panel);border:1px solid var(--line);
+    border-radius:18px;padding:16px;display:grid;
+    /* The same lesson .side learned: an implicit column is max-content, and
+       one long lyric line would push the pane past its own edge. */
+    grid-template-columns:minmax(0,1fr);
+    grid-template-rows:auto minmax(0,1fr);gap:12px;
+    box-shadow:0 20px 50px rgba(0,0,0,.45);
+  }
+  .app.offline #pane{display:none}
+
+  .panetabs{display:flex;gap:8px;align-items:center;min-width:0}
+  .panetab{
+    border:1px solid var(--line2);background:transparent;color:var(--dim);
+    border-radius:99px;padding:7px 15px;font-size:12.5px;font-weight:650;
+    font-family:var(--font);cursor:pointer;transition:.15s;
+  }
+  .panetab:hover{color:var(--text)}
+  .panetab.on{color:var(--text);border-color:var(--accent);
+    background:rgba(168,85,247,.13)}
+  #paneClose{display:none;margin-left:auto;background:none;border:0;
+    color:var(--dim);font-size:20px;cursor:pointer;padding:2px 8px;
+    font-family:var(--font);line-height:1}
+  .panebody{min-width:0;min-height:0;overflow-y:auto;overflow-x:hidden;
+    scrollbar-width:thin;scrollbar-color:rgba(255,255,255,.16) transparent}
+  .panebody::-webkit-scrollbar{width:6px}
+  .panebody::-webkit-scrollbar-track{background:transparent}
+  .panebody::-webkit-scrollbar-thumb{background:rgba(255,255,255,.14);border-radius:3px}
+  .panebody::-webkit-scrollbar-thumb:hover{background:rgba(255,255,255,.26)}
 
 
   .stage{
@@ -452,7 +534,17 @@
        screen and pushed #pairView to ~1215px, unreachable behind
        overflow:hidden -- so re-pairing on a phone needed a page reload. */
     .app{grid-template-columns:1fr;grid-template-rows:auto minmax(0,1fr)}
-    #pairView{order:-1;justify-self:stretch;width:auto}
+    #pairView{order:-1;justify-self:stretch;width:auto;grid-column:1;grid-row:auto}
+    .main{grid-column:1;grid-row:auto}
+    /* A full-height sheet: at this width the right column does not exist, so
+       the pane is summoned by the transport buttons and dismissed by its own
+       close button rather than living beside the queue. */
+    #pane{
+      position:fixed;inset:0;z-index:55;display:none;border-radius:0;
+      border:0;padding:max(16px,env(safe-area-inset-top)) 16px 16px;
+    }
+    .app.pane-open #pane{display:grid}
+    #paneClose{display:block}
     .stage{padding:14px;gap:12px}
     .art{width:56px;height:56px}
   }
@@ -542,10 +634,10 @@
       </div>
 
       <div class="vol">
-        <button class="lyrbtn" id="libToggle" title="Your library" aria-label="Your library">
+        <button class="lyrbtn" id="libToggle" title="Library (B)" aria-label="Library">
           <svg viewBox="0 0 24 24"><path d="M4 6H2v14c0 1.1.9 2 2 2h14v-2H4V6zm16-4H8c-1.1 0-2 .9-2 2v12c0 1.1.9 2 2 2h12c1.1 0 2-.9 2-2V4c0-1.1-.9-2-2-2zm-1 9h-4v4h-2v-4H9V9h4V5h2v4h4v2z"/></svg>
         </button>
-        <button class="lyrbtn" id="lyrToggle" title="Lyrics (L)" aria-label="Lyrics">
+        <button class="lyrbtn" id="lyrToggle" title="Lyrics (Y)" aria-label="Lyrics">
           <svg viewBox="0 0 24 24"><path d="M12 3v10.55A4 4 0 1 0 14 17V7h4V3h-6zM4 6h7v2H4V6zm0 4h7v2H4v-2zm0 4h4v2H4v-2z"/></svg>
         </button>
         <button class="mute" id="mute" title="Mute (M)" aria-label="Mute">
@@ -566,8 +658,6 @@
     <div class="listwrap">
       <div id="queue" class="list"></div>
       <div id="results" class="list hide"></div>
-      <div id="lyrics" class="list hide"></div>
-      <div id="library" class="list hide"></div>
     </div>
 
     <div class="foot">
@@ -591,11 +681,22 @@
         <dt><kbd>0</kbd>&ndash;<kbd>9</kbd></dt><dd>Jump to 0&ndash;90%</dd>
         <dt><kbd>/</kbd></dt><dd>Search</dd>
         <dt><kbd>Esc</kbd></dt><dd>Leave search</dd>
+        <dt><kbd>Y</kbd><kbd>B</kbd></dt><dd>Lyrics / library</dd>
         <dt><kbd>?</kbd></dt><dd>This list</dd>
       </dl>
     </div>
     </div>
     </div>
+
+    <aside id="pane">
+      <div class="panetabs">
+        <button class="panetab on" data-pane="lyrics">Lyrics</button>
+        <button class="panetab" data-pane="library">Library</button>
+        <button id="paneClose" aria-label="Close">&times;</button>
+      </div>
+      <div id="lyrics" class="panebody"></div>
+      <div id="library" class="panebody hide"></div>
+    </aside>
   </div>
 
   <div id="pairView">
@@ -710,7 +811,13 @@
   // Dimmed and inert, rather than hidden: see the .app.offline rules.
   function setOffline(off){
     if (off && silentAudio) silentAudio.pause();
-    if (off) { libCache = {}; }   // a fresh pairing re-reads a fresh library
+    if (off) {
+      libCache = {};              // a fresh pairing re-reads a fresh library
+      stopWipe();
+      document.querySelector('.app').classList.remove('pane-open');
+    } else {
+      showPane(activePane);       // loads whichever tab is selected
+    }
     document.querySelector('.app').classList.toggle('offline', off);
     $('pairView').classList.toggle('hide', !off);
   }
@@ -932,13 +1039,21 @@
 
   // The phone pushes state every few seconds; advance the playhead locally
   // between pushes so the bar moves smoothly instead of stepping.
+  // The interpolated playhead, in seconds. Extracted because the lyric wipe
+  // needs it between ticks -- two copies of this arithmetic would drift, and
+  // drifting is the one thing a karaoke fill cannot do.
+  function livePosSec(){
+    var p = st.position || 0;
+    if (st.isPlaying && drift != null) p += (Date.now() - drift) / 1000;
+    if (st.duration) p = Math.min(p, st.duration);
+    return p;
+  }
+
   function tick(){
     // A heartbeat every 5s, plus one on every state change, would otherwise
     // yank the playhead back to the phone's position mid-gesture.
     if (scrubbing) return;
-    var p = st.position || 0;
-    if (st.isPlaying && drift != null) p += (Date.now() - drift) / 1000;
-    if (st.duration) p = Math.min(p, st.duration);
+    var p = livePosSec();
     $('pos').textContent = fmt(p);
     updateLyricsLine(p);
     var pct = st.duration ? (p / st.duration * 100) : 0;
@@ -1000,13 +1115,13 @@
           ? 'songs' + (m.playlistId ? ':' + m.playlistId : '')
           : m.kind + (m.playlistId ? ':' + m.playlistId : '');
         if (!m.error) libCache[key] = m;
-        if (activePanel === 'library' && key === libKey()) libRender(m);
+        if (activePane === 'library' && key === libKey()) libRender(m);
 
       } else if (m.type === 'control_lyrics_result') {
         lyricsCache[m.videoId] = m;
         // The guard the app's lyrics needed three fixes to learn: a late
         // answer for the previous song must not paint over the current one.
-        if (activePanel === 'lyrics' && m.videoId === st.videoId) {
+        if (activePane === 'lyrics' && m.videoId === st.videoId) {
           renderLyrics(m.videoId, m);
         }
 
@@ -1022,7 +1137,7 @@
         if (st.videoId !== prevVid) {
           // New song: refresh the open lyrics panel; a closed one fetches
           // lazily on open. The cache makes revisits free either way.
-          if (activePanel === 'lyrics') ensureLyrics();
+          if (activePane === 'lyrics') ensureLyrics();
           else lyricsFor = null;
         }
         mediaKeysSync();
@@ -1120,7 +1235,7 @@
         // Signing in FROM the library panel lands here: reload it so the
         // empty-state turns into the list without another click.
         libCache = {};
-        if (activePanel === 'library') libLoad();
+        if (activePane === 'library') libLoad();
 
       } else if (m.type === 'ws_auth_error') {
         authed = false;
@@ -1312,7 +1427,6 @@
     searchQuery = q;
     $('searchbar').classList.add('busy');
     searchHead('Searching for', q, '…');
-    if (activePanel !== 'results') panelBeforeSearch = activePanel;
     showPanel('results');
     // Skeletons only when there is nothing to keep. Refining a query holds the
     // previous rows and dims them, because blanking the list on every keystroke
@@ -1553,8 +1667,14 @@
       return;
     }
     if ((r.lines || []).length) {
-      el.innerHTML = r.lines.map(function(l){
-        return '<div class="lline" data-ms="' + (l.startMs|0) + '">' + esc(l.text) + '</div>';
+      el.innerHTML = r.lines.map(function(l, i){
+        // endMs is what the fill races against. LRCLIB often leaves it 0, so
+        // the next line's start is the honest substitute; the last line gets
+        // a plausible 4s rather than filling instantly.
+        var nxt = r.lines[i + 1];
+        var end = (l.endMs|0) || (nxt ? (nxt.startMs|0) : (l.startMs|0) + 4000);
+        return '<div class="lline" data-ms="' + (l.startMs|0) +
+               '" data-end="' + end + '">' + esc(l.text) + '</div>';
       }).join('');
     } else {
       el.innerHTML = '<div class="plain">' + esc(r.plainLyrics) + '</div>';
@@ -1562,10 +1682,29 @@
     el.scrollTop = 0;
   }
 
+  // rAF, not the 500ms tick: the fill has to move continuously or it reads as
+  // a stutter. Runs only while the lyrics pane is the visible one.
+  var wipeRaf = null;
+  function startWipe(){ if (!wipeRaf) wipeRaf = requestAnimationFrame(lyricsWipe); }
+  function stopWipe(){ if (wipeRaf) { cancelAnimationFrame(wipeRaf); wipeRaf = null; } }
+  function lyricsWipe(){
+    wipeRaf = null;
+    if (activePane !== 'lyrics') return;
+    var rows = $('lyrics').children;
+    var row = lyricsActiveIdx >= 0 ? rows[lyricsActiveIdx] : null;
+    if (row && row.dataset.end !== undefined) {
+      var ms = livePosSec() * 1000 - lyricsOffsetMs;
+      var a = +row.dataset.ms, b = +row.dataset.end;
+      var pct = b > a ? Math.max(0, Math.min(1, (ms - a) / (b - a))) : 1;
+      row.style.setProperty('--p', (pct * 100).toFixed(1) + '%');
+    }
+    wipeRaf = requestAnimationFrame(lyricsWipe);
+  }
+
   // Driven from tick(): the SAME interpolated clock the scrubber trusts,
   // minus the same offset the app subtracts. Two clocks would drift.
   function updateLyricsLine(posSec){
-    if (activePanel !== 'lyrics' || lyricsFor !== st.videoId) return;
+    if (activePane !== 'lyrics' || lyricsFor !== st.videoId) return;
     var rows = $('lyrics').children;
     if (!rows.length || !rows[0].dataset || rows[0].dataset.ms === undefined) return;
     var ms = posSec * 1000 - lyricsOffsetMs;
@@ -1574,18 +1713,21 @@
       if ((rows[i].dataset.ms|0) <= ms) idx = i; else break;
     }
     if (idx === lyricsActiveIdx) return;
-    if (lyricsActiveIdx >= 0 && rows[lyricsActiveIdx]) {
-      rows[lyricsActiveIdx].classList.remove('on');
-      rows[lyricsActiveIdx].classList.add('past');
-    }
     lyricsActiveIdx = idx;
-    if (idx >= 0 && rows[idx]) {
-      rows[idx].classList.remove('past');
-      rows[idx].classList.add('on');
-      if (Date.now() > lyricsScrollHold) {
-        var el = $('lyrics');
-        el.scrollTop = rows[idx].offsetTop - el.clientHeight / 2 + rows[idx].offsetHeight / 2;
-      }
+    // Depth of field: sung, next-up, and the rest receding. Recomputed as a
+    // whole rather than patching two rows, so a seek that jumps ten lines
+    // leaves no stragglers still glowing.
+    for (var j = 0; j < rows.length; j++) {
+      var d = Math.abs(j - idx), c = rows[j].classList;
+      c.toggle('on', j === idx);
+      c.toggle('past', idx >= 0 && j < idx);
+      c.toggle('near', d === 1);
+      c.toggle('far', d > 2);
+      if (j !== idx) rows[j].style.removeProperty('--p');
+    }
+    if (idx >= 0 && rows[idx] && Date.now() > lyricsScrollHold) {
+      var el = $('lyrics');
+      el.scrollTop = rows[idx].offsetTop - el.clientHeight / 2 + rows[idx].offsetHeight / 2;
     }
   }
 
@@ -1595,10 +1737,13 @@
     lyricsScrollHold = Date.now() + 3000;
   }, {passive: true});
 
-  $('lyrToggle').addEventListener('click', function(){
-    if (activePanel === 'lyrics') { showPanel('queue'); return; }
-    if (searchQuery) { showQueue(); }   // leaving a live search: full teardown
-    showPanel('lyrics');
+  $('lyrToggle').addEventListener('click', function(){ openPane('lyrics'); });
+  document.querySelector('.panetabs').addEventListener('click', function(e){
+    var t = e.target.closest('.panetab');
+    if (t) showPane(t.dataset.pane);
+  });
+  $('paneClose').addEventListener('click', function(){
+    document.querySelector('.app').classList.remove('pane-open');
   });
 
   // ── library ───────────────────────────────────────────────────────────
@@ -1701,11 +1846,7 @@
     songRowAction(e, libSongs);
   });
 
-  $('libToggle').addEventListener('click', function(){
-    if (activePanel === 'library') { showPanel('queue'); return; }
-    if (searchQuery) { showQueue(); }
-    showPanel('library');
-  });
+  $('libToggle').addEventListener('click', function(){ openPane('library'); });
 
   // ── media keys ────────────────────────────────────────────────────────
   //
@@ -2001,7 +2142,8 @@
       case 'ArrowUp':   nudgeVolume(0.05);  break;
       case 'ArrowDown': nudgeVolume(-0.05); break;
       case 'm': case 'M': toggleMute(); break;
-      case 'l': case 'L': $('lyrToggle').click(); break;
+      case 'y': case 'Y': openPane('lyrics');  break;
+      case 'b': case 'B': openPane('library'); break;
       case 'n': case 'N': cmd('next');     hud('Next');     break;
       case 'p': case 'P': cmd('previous'); hud('Previous'); break;
       case '/':
@@ -2024,20 +2166,34 @@
   // panel visibility changes; the search flow's subtleties (header states,
   // stale-query guards) stay exactly where they were and just call this for
   // the visibility part.
-  var activePanel = 'queue';
-  var panelBeforeSearch = 'queue';
+  var activePanel = 'queue';        // the LEFT list: queue | results
+  var activePane = 'lyrics';        // the RIGHT pane: lyrics | library
 
   function showPanel(name){
     activePanel = name;
     $('queue').classList.toggle('hide', name !== 'queue');
     $('results').classList.toggle('hide', name !== 'results');
+    if (name === 'queue') $('qhead').textContent = 'Up next';
+  }
+
+  function showPane(name){
+    activePane = name;
     $('lyrics').classList.toggle('hide', name !== 'lyrics');
     $('library').classList.toggle('hide', name !== 'library');
+    Array.prototype.forEach.call(document.querySelectorAll('.panetab'), function(t){
+      t.classList.toggle('on', t.dataset.pane === name);
+    });
     $('lyrToggle').classList.toggle('on', name === 'lyrics');
     $('libToggle').classList.toggle('on', name === 'library');
-    if (name === 'queue') $('qhead').textContent = 'Up next';
-    if (name === 'lyrics') { $('qhead').textContent = 'Lyrics'; ensureLyrics(); }
-    if (name === 'library') { $('qhead').textContent = 'Your library'; libLoad(); }
+    if (name === 'lyrics') { ensureLyrics(); startWipe(); }
+    else { stopWipe(); libLoad(); }
+  }
+
+  function openPane(which){
+    showPane(which);
+    // No-op on desktop, where the pane is always on screen; on a phone this
+    // is what raises the sheet.
+    document.querySelector('.app').classList.add('pane-open');
   }
 
   function showQueue(){
@@ -2049,10 +2205,7 @@
     endSearching();
     $('results').innerHTML = '';
     $('qhead').classList.remove('hide');
-    // Search returns you to wherever you were, not to a hardcoded queue —
-    // closing a search you opened while reading lyrics should not eject you
-    // from the lyrics.
-    showPanel(panelBeforeSearch);
+    showPanel('queue');
   }
 
   // One listener per list rather than one per row: rows are replaced on every
