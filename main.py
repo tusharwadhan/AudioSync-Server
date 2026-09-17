@@ -6263,6 +6263,8 @@ async def handle_control_library(client_id: str, websocket: WebSocket, msg: dict
         return
     kind = str(msg.get("kind", ""))
     playlist_id = str(msg.get("playlistId", "")) or None
+    if kind == "playlist_songs" and playlist_id == _FAVOURITES_ID:
+        kind = "favorites"
     if kind not in ("favorites", "playlists", "playlist_songs"):
         return
 
@@ -6303,8 +6305,37 @@ async def handle_control_library(client_id: str, websocket: WebSocket, msg: dict
                     rows = await sync.query_playlists(session, uid)
                     live = [r for r in rows if not r.deleted]
                     live.sort(key=lambda r: r.createdAt, reverse=True)
+                    # Cover + count per playlist, from ONE songs query rather
+                    # than one per card: the app shows the first song's art
+                    # (PlaylistAdapter's firstThumbnail) and a count badge, and
+                    # a list this size would otherwise be N+1 round trips.
+                    meta = {}
+                    for sg in await sync.query_playlist_songs(session, uid):
+                        if sg.deleted:
+                            continue
+                        m = meta.setdefault(sg.playlistSyncId,
+                                            {"count": 0, "pos": None, "cover": None})
+                        m["count"] += 1
+                        if m["pos"] is None or sg.position < m["pos"]:
+                            m["pos"] = sg.position
+                            m["cover"] = sg.thumbnail or _yt_thumb(sg.videoId)
+                    favs = [f for f in await sync.query_favorites(session, uid)
+                            if not f.deleted]
+                    favs.sort(key=lambda r: r.favoritedAt, reverse=True)
+                    # Favourites rides in the same grid as a system row rather
+                    # than behind its own filter: it is the shelf people open
+                    # most, and a separate control for one item is a control
+                    # nobody needs.
                     items = [{
+                        "syncId": _FAVOURITES_ID, "name": "Favourites",
+                        "system": True, "count": len(favs),
+                        "cover": (favs[0].thumbnail or _yt_thumb(favs[0].videoId))
+                                 if favs else None,
+                    }]
+                    items += [{
                         "syncId": r.syncId, "name": r.name,
+                        "count": meta.get(r.syncId, {}).get("count", 0),
+                        "cover": meta.get(r.syncId, {}).get("cover"),
                     } for r in live[:_LIBRARY_CAP]]
                 else:
                     rows = await sync.query_playlist_songs(
@@ -6327,6 +6358,16 @@ async def handle_control_library(client_id: str, websocket: WebSocket, msg: dict
 
 
 _LIBRARY_CAP = 200
+# The id the grid's system row carries. The browser sends it back as a
+# normal selection and the relay routes it to favourites; no playlist can
+# collide with it because real ids are uuids.
+_FAVOURITES_ID = "__favourites__"
+
+
+def _yt_thumb(video_id: str) -> str:
+    """Same URL the page builds for queue rows, so a cover the sync rows
+    happen to be missing still resolves instead of showing a blank tile."""
+    return f"https://i.ytimg.com/vi/{video_id}/mqdefault.jpg"
 
 
 async def handle_control_cmd(client_id: str, websocket: WebSocket, msg: dict):
