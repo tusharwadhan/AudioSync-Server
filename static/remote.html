@@ -542,7 +542,7 @@
       </div>
 
       <div class="vol">
-        <button class="lyrbtn hide" id="libToggle" title="Your library" aria-label="Your library">
+        <button class="lyrbtn" id="libToggle" title="Your library" aria-label="Your library">
           <svg viewBox="0 0 24 24"><path d="M4 6H2v14c0 1.1.9 2 2 2h14v-2H4V6zm16-4H8c-1.1 0-2 .9-2 2v12c0 1.1.9 2 2 2h12c1.1 0 2-.9 2-2V4c0-1.1-.9-2-2-2zm-1 9h-4v4h-2v-4H9V9h4V5h2v4h4v2z"/></svg>
         </button>
         <button class="lyrbtn" id="lyrToggle" title="Lyrics (L)" aria-label="Lyrics">
@@ -1117,9 +1117,10 @@
 
       } else if (m.type === 'ws_auth_ok') {
         authed = true;
-        // The library is the browser account's own data, so the button
-        // exists exactly when there is an account on this socket.
-        $('libToggle').classList.remove('hide');
+        // Signing in FROM the library panel lands here: reload it so the
+        // empty-state turns into the list without another click.
+        libCache = {};
+        if (activePanel === 'library') libLoad();
 
       } else if (m.type === 'ws_auth_error') {
         authed = false;
@@ -1253,16 +1254,24 @@
       send({type: 'control_join', code: raw.toUpperCase()});
     }
   });
-  $('signInBtn').addEventListener('click', function(){
-    quickErr('');
-    if (!fbAuth) { quickErr('Sign-in unavailable. Use a pairing code.'); return; }
+  // One sign-in flow, two entry points (the pairing card and the library
+   // panel's empty state). onError receives the message rather than the
+   // function writing into quickErr, which lives in the pairing card and is
+   // off-screen once paired.
+  function startGoogleSignIn(onError){
+    if (!fbAuth) { onError('Sign-in unavailable. Use a pairing code.'); return; }
     var provider = new firebase.auth.GoogleAuthProvider();
     fbAuth.signInWithPopup(provider).catch(function(e){
       // Popups are blocked often enough that a bare failure looks like a bug.
-      quickErr(e && e.code === 'auth/popup-blocked'
+      onError(e && e.code === 'auth/popup-blocked'
         ? 'Your browser blocked the sign-in popup.'
         : 'Sign-in failed. You can use a pairing code instead.');
     });
+  }
+
+  $('signInBtn').addEventListener('click', function(){
+    quickErr('');
+    startGoogleSignIn(quickErr);
   });
 
 
@@ -1633,11 +1642,17 @@
   function libRender(r){
     var el = $('library');
     if (r.error) {
-      el.innerHTML = libNavHtml() + '<div class="empty">' +
-        (r.error === 'not_signed_in' ? 'Sign in on this page to see your library'
-                                     : 'Your library isn\u2019t available right now') +
-        '</div>';
       libSongs = [];
+      if (r.error === 'not_signed_in') {
+        el.innerHTML = libNavHtml() +
+          '<div class="empty">Sign in to see your favourites and playlists here.' +
+          '<div style="margin-top:14px"><button class="gbtn" id="libSignIn" ' +
+          'style="max-width:260px;margin:0 auto">Sign in with Google</button></div>' +
+          '<div class="err" id="libSignInErr" style="margin-top:10px"></div></div>';
+      } else {
+        el.innerHTML = libNavHtml() +
+          '<div class="empty">Your library isn\u2019t available right now</div>';
+      }
       return;
     }
     var items = r.items || [];
@@ -1661,6 +1676,13 @@
   }
 
   $('library').addEventListener('click', function(e){
+    if (e.target.closest('#libSignIn')) {
+      startGoogleSignIn(function(msg){
+        var box = document.getElementById('libSignInErr');
+        if (box) box.textContent = msg;
+      });
+      return;
+    }
     if (e.target.closest('#libBack')) {
       libView = { mode: 'playlists', playlistId: null, playlistName: '' };
       libLoad(); return;
