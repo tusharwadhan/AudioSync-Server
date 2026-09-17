@@ -729,6 +729,35 @@ async def _attach_offset(resp, video_id: str) -> None:
         print(f"[/lyrics] offset attach skipped: {e}")
 
 
+async def _offset_for_uid(video_id: str, lyrics_hash: str, uid: str):
+    """One account's OWN saved offset for these lyrics, or None.
+
+    The shared rule below deliberately refuses to serve a single person's
+    nudge to strangers. But the remote is not a stranger: it is showing what
+    THIS phone is playing, and the phone's owner is the person who dragged
+    the bar. Serving their own value is what makes the browser agree with the
+    phone, which applies its local copy unconditionally.
+    """
+    if not (uid and lyrics_hash):
+        return None
+    factory = try_session_factory()
+    if factory is None:
+        return None
+    try:
+        async with factory() as session:
+            row = (await session.execute(
+                select(models.LyricsOffset).where(
+                    models.LyricsOffset.video_id == video_id,
+                    models.LyricsOffset.lyrics_hash == lyrics_hash,
+                    models.LyricsOffset.uid == uid,
+                )
+            )).scalar_one_or_none()
+            return int(row.offset_ms) if row is not None else None
+    except Exception as e:
+        print(f"[/lyrics] personal offset read failed: {e}")
+        return None
+
+
 async def _serve_offset(session, video_id: str, lyrics_hash: str) -> int:
     """The offset everyone should get for these lyrics.
 
@@ -6185,6 +6214,16 @@ async def handle_control_lyrics(client_id: str, websocket: WebSocket, msg: dict)
             # A seatbelt, not a feature: no real song needs more, and the
             # browser renders one node per line.
             out["lines"] = (out.get("lines") or [])[:400]
+            # The timing nudge the PHONE'S OWNER saved, not the crowd's: the
+            # shared rule needs three submitters agreeing (or a trusted uid)
+            # before it serves anything, so a solo owner's own correction --
+            # which their phone applies unconditionally -- would otherwise be
+            # missing here and the two screens would disagree.
+            own = await _offset_for_uid(
+                video_id, out.get("lyricsHash") or "",
+                uid_for_ws(sess.phone_client_id) or "")
+            if own is not None:
+                out["offsetMs"] = own
             out["type"] = "control_lyrics_result"
             out["videoId"] = video_id
             await ws_send(websocket, out)

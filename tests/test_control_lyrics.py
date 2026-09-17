@@ -39,6 +39,12 @@ class FakeResp:
 
 
 CALLS = []
+_UIDS = {}
+OWN_OFFSETS = {}          # uid -> offset the owner personally saved
+
+
+async def fake_offset_for_uid(video_id, lyrics_hash, uid):
+    return OWN_OFFSETS.get(uid)
 
 
 async def fake_endpoint(video_id, title="", artist="", duration=0):
@@ -62,6 +68,8 @@ def load():
     ns = {'asyncio': asyncio, 'time': time,
           'ws_send': fake_ws_send, 'control_manager': None,
           'get_lyrics_endpoint': fake_endpoint,
+          'uid_for_ws': lambda cid: _UIDS.get(cid),
+          '_offset_for_uid': fake_offset_for_uid,
           'WebSocket': object, 'print': print,
           'WebSocketState': types.SimpleNamespace(CONNECTED='CONNECTED')}
     exec('\n\n'.join(chunks), ns)
@@ -84,7 +92,7 @@ async def main():
     def fresh():
         cm = control_session.ControlSessionManager()
         ns['control_manager'] = cm
-        sent.clear(); CALLS.clear()
+        sent.clear(); CALLS.clear(); _UIDS.clear(); OWN_OFFSETS.clear()
         phone = FakeWS("phone")
         sess, _, _ = cm.create("phoneC", phone, caps={"approval"})
         browser = FakeWS("browser")
@@ -105,6 +113,28 @@ async def main():
     check("metadata forwarded to the resolver",
           CALLS[0] == {"video_id": "abc123", "title": "T", "artist": "A",
                        "duration": 213})
+
+    print("\n-- the phone owner's own timing nudge wins --")
+    cm, sess, phone, b = fresh()
+    _UIDS["phoneC"] = "uid-owner"
+    OWN_OFFSETS["uid-owner"] = -900
+    await h("bc1", b, {"videoId": "abc123"})
+    await settle()
+    check("owner's saved offset replaces the shared one",
+          sent[-1][1]["offsetMs"] == -900)
+
+    cm, sess, phone, b = fresh()
+    _UIDS["phoneC"] = "uid-owner"          # signed in, but never nudged
+    await h("bc1", b, {"videoId": "abc123"})
+    await settle()
+    check("no personal row falls back to the shared value",
+          sent[-1][1]["offsetMs"] == 250)
+
+    cm, sess, phone, b = fresh()           # phone signed out entirely
+    await h("bc1", b, {"videoId": "abc123"})
+    await settle()
+    check("no account still serves the shared value",
+          sent[-1][1]["offsetMs"] == 250)
 
     print("\n-- gates --")
     cm, sess, phone, b = fresh()
