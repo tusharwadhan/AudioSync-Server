@@ -51,6 +51,66 @@
   .a{font-size:12.5px;color:var(--accent2);margin-top:4px;
     white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 
+  /* ══ battery ═══════════════════════════════════════════════════
+     Semantic colour, set on the element as --bat and used by both the fill
+     and the readout, so the cell and its number can never disagree about
+     how urgent the charge is. Kept separate from the app's accent: purple
+     means SyncAura, amber and red mean the battery. */
+  .bat{position:relative;flex:0 0 auto;align-self:flex-start;
+    display:flex;align-items:center;gap:8px;cursor:default;
+    padding:5px 9px 5px 7px;border-radius:99px;border:1px solid var(--line2);
+    background:rgba(255,255,255,.035);--bat:#6be675}
+  .bat.warn{--bat:#ffb86b}
+  .bat.crit{--bat:#ff6b6b}
+  .bat.hide{display:none}
+
+  /* The cell: a rounded body plus the little terminal nub, drawn rather
+     than iconified so the fill can be a real width. */
+  .batcell{position:relative;width:26px;height:13px;border-radius:3.5px;
+    border:1.5px solid rgba(255,255,255,.55);padding:1.5px;flex:0 0 auto}
+  .batcell::after{content:'';position:absolute;right:-3.5px;top:3.5px;
+    width:2px;height:4px;border-radius:0 1px 1px 0;
+    background:rgba(255,255,255,.55)}
+  .batfill{height:100%;border-radius:2px;background:var(--bat);
+    transition:width .6s cubic-bezier(.4,0,.2,1),background .4s ease}
+
+  /* Charging: light sweeps across the fill in the direction of travel. The
+     animation runs ONLY in this state, so a discharging phone costs nothing. */
+  .bat.chg .batfill{position:relative;overflow:hidden}
+  .bat.chg .batfill::after{content:'';position:absolute;inset:0;
+    background:linear-gradient(100deg,transparent 10%,rgba(255,255,255,.85) 50%,transparent 90%);
+    animation:batsweep 1.6s linear infinite}
+  @keyframes batsweep{from{transform:translateX(-110%)}to{transform:translateX(110%)}}
+  .bat.chg{border-color:rgba(107,230,117,.45)}
+
+  .batnum{font-size:12.5px;font-weight:700;color:var(--bat);
+    font-variant-numeric:tabular-nums;letter-spacing:-.01em}
+  .batbolt{width:11px;height:11px;fill:var(--bat);margin-left:-3px}
+  .bat.chg .batbolt{animation:batpulse 1.6s ease-in-out infinite}
+  @keyframes batpulse{0%,100%{opacity:.55}50%{opacity:1}}
+
+  /* The detail popover. Hover on a pointer device, tap elsewhere -- the
+     numbers are a bonus, never the only way to read the charge. */
+  /* Anchored RIGHT, opening inward: the pill sits at the stage's right edge
+     and .stage clips its overflow, so a left-anchored popover had its value
+     column cut clean off. */
+  .batpop{position:absolute;top:calc(100% + 8px);right:0;z-index:40;
+    min-width:190px;padding:10px 12px;border-radius:12px;
+    background:#191c24;border:1px solid var(--line2);
+    box-shadow:0 18px 44px rgba(0,0,0,.6);
+    opacity:0;transform:translateY(-4px);pointer-events:none;transition:.16s}
+  .bat:hover .batpop,.bat.open .batpop{opacity:1;transform:translateY(0)}
+  .batpop dl{margin:0;display:grid;grid-template-columns:auto 1fr;gap:5px 12px;
+    font-size:11.5px}
+  .batpop dt{color:var(--dim)}
+  .batpop dd{margin:0;text-align:right;font-variant-numeric:tabular-nums}
+  .batpop .hdr{font-size:12px;font-weight:700;margin-bottom:7px;color:var(--bat)}
+
+  @media (prefers-reduced-motion:reduce){
+    .bat.chg .batfill::after,.bat.chg .batbolt{animation:none}
+    .batfill{transition:none}
+  }
+
   .bar{height:5px;background:rgba(255,255,255,.10);border-radius:4px;overflow:hidden}
   .bar i{display:block;height:100%;width:0;border-radius:4px;
     background:linear-gradient(90deg,var(--accent),var(--accent2));
@@ -633,6 +693,14 @@
         <div class="t" id="title">—</div>
         <div class="a" id="artist"></div>
       </div>
+      <div class="bat hide" id="bat" tabindex="0" aria-label="Phone battery">
+        <div class="batcell"><div class="batfill" id="batFill"></div></div>
+        <svg class="batbolt hide" id="batBolt" viewBox="0 0 24 24" aria-hidden="true">
+          <path d="M11 21h-1l1-7H7.5c-.88 0-.33-.75-.31-.78C8.48 10.94 10.42 7.54 13 3h1l-1 7h3.5c.4 0 .62.19.4.66C13.77 14.9 11 21 11 21z"/>
+        </svg>
+        <span class="batnum" id="batNum">—</span>
+        <div class="batpop" id="batPop" role="tooltip"></div>
+      </div>
     </div>
 
     <div class="scrub" id="scrub" role="slider" tabindex="0" aria-label="Seek"
@@ -832,6 +900,7 @@
 
   // Dimmed and inert, rather than hidden: see the .app.offline rules.
   function setOffline(off){
+    if (off) $('bat').classList.add('hide');
     if (off && silentAudio) silentAudio.pause();
     if (off) {
       libCache = {};              // a fresh pairing re-reads a fresh library
@@ -1029,11 +1098,79 @@
     $('results').innerHTML = results.map(function(it){ return rowHtml(it, '', true); }).join('');
   }
 
+  // ── battery ───────────────────────────────────────────────────────────
+  //
+  // Reads the SAME state object every other control renders from: the phone
+  // folds battery into its existing push, so there is no request here, no
+  // poll, and no second cadence. Absent fields mean an older phone build --
+  // the pill simply does not exist, rather than showing zeroes.
+  function renderBattery(b){
+    var el = $('bat');
+    if (!b || typeof b.pct !== 'number') { el.classList.add('hide'); return; }
+    el.classList.remove('hide');
+
+    var charging = b.state === 'charging';
+    var pct = Math.max(0, Math.min(100, b.pct));
+    // pctFine is the charge counter divided by the learned full charge --
+    // real decimals, unlike the integer percentage Android exposes. The
+    // phone omits it until that calibration is trustworthy, so its absence
+    // is the normal case, not an error.
+    var shown = (typeof b.pctFine === 'number') ? b.pctFine.toFixed(1) : String(pct);
+
+    el.classList.toggle('chg', charging);
+    el.classList.toggle('warn', !charging && pct <= 20 && pct > 10);
+    el.classList.toggle('crit', !charging && pct <= 10);
+    $('batFill').style.width = Math.max(6, pct) + '%';
+    $('batBolt').classList.toggle('hide', !charging);
+    $('batNum').textContent = shown + '%';
+
+    var rows = '';
+    function row(k, v){ rows += '<dt>' + k + '</dt><dd>' + esc(v) + '</dd>'; }
+    var label = b.state === 'full' ? 'Fully charged'
+      : charging ? 'Charging'
+      // Plugged in and NOT charging is a real state -- a thermal pause, or a
+      // battery-protection hold. Calling it "charging" would be a lie the
+      // bolt alone would have told.
+      : b.state === 'plugged_idle' ? 'Plugged in, on hold'
+      : 'On battery';
+    if (b.source) {
+      label += ' \u00b7 ' + (b.source === 'ac' ? 'AC'
+        : b.source === 'usb' ? 'USB' : 'Wireless');
+    }
+    if (typeof b.currentMa === 'number' && Math.abs(b.currentMa) >= 1) {
+      var a = Math.abs(b.currentMa);
+      var mag = a >= 1000 ? (a / 1000).toFixed(2) + ' A' : a.toFixed(0) + ' mA';
+      // Labelled from the STATE, not the sign: a phone on a thermal hold can
+      // report a small positive trickle while not charging, and "Charging at"
+      // would contradict the header directly above it.
+      row(charging ? 'Charging at' : 'Drawing', mag);
+    }
+    if (typeof b.toFullSec === 'number' && charging) {
+      var mins = Math.round(b.toFullSec / 60);
+      row('Full in', mins >= 60
+        ? Math.floor(mins / 60) + 'h ' + (mins % 60) + 'm' : mins + ' min');
+    }
+    if (typeof b.voltV === 'number') row('Voltage', b.voltV.toFixed(3) + ' V');
+    if (typeof b.tempC === 'number') row('Temperature', b.tempC.toFixed(1) + ' \u00b0C');
+    if (typeof b.chargeUah === 'number') {
+      row('Charge', (b.chargeUah / 1000).toFixed(0) + ' mAh');
+    }
+    if (b.health && b.health !== 'good') row('Health', b.health.replace(/_/g, ' '));
+
+    $('batPop').innerHTML = '<div class="hdr">' + esc(label) + '</div>' +
+      (rows ? '<dl>' + rows + '</dl>' : '');
+    el.setAttribute('aria-label', 'Phone battery ' + shown + '%, ' + label);
+  }
+
+  // Touch has no hover, so the pill toggles its detail on tap there.
+  $('bat').addEventListener('click', function(){ this.classList.toggle('open'); });
+
   function render(){
     $('title').textContent  = st.title  || '—';
     $('artist').textContent = st.artist || '';
     // Built from the id, not sent: the phone holds artwork as a bitmap it
     // cannot forward, and a URL would eat the state budget.
+    renderBattery(st.battery);
     if (st.videoId) {
       $('art').style.backgroundImage = 'url(' + thumb(st.videoId) + ')';
       $('art').textContent = '';
