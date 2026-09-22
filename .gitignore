@@ -9,3 +9,6 @@ analytics.db
 # YouTube cookies (contains auth tokens)
 cookies.txt
 compile.log
+
+# Render API key (local only, never commit)
+.render-key

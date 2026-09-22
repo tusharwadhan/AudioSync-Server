@@ -6615,7 +6615,7 @@ async def handle_rejoin_room(client_id: str, websocket: WebSocket, msg: dict):
         await ws_send(websocket, {"type": "error", "message": "Room code required"})
         return
 
-    room, was_host = room_manager.rejoin_room(
+    room, was_host, displaced_id, displaced_was_live = room_manager.rejoin_room(
         client_id, websocket, code, name,
         previous_client_id=previous_client_id,
         member_secret=member_secret,
@@ -6654,20 +6654,42 @@ async def handle_rejoin_room(client_id: str, websocket: WebSocket, msg: dict):
         state["memberSecret"] = _m.secret
     await ws_send(websocket, {"type": "room_joined", "state": state})
 
-    # If this rejoin landed within the disconnect grace window, cancel the
-    # pending "left" broadcast and stay SILENT — the room never saw them leave,
-    # so it must not see them "join" either. That silent pair IS the flap we're
-    # removing. Otherwise (grace expired → they were announced as left, or a
-    # genuinely fresh join) announce the join normally.
+    # Stay SILENT unless the room actually saw this member leave:
+    #  - a rejoin within the disconnect grace window cancels the pending
+    #    "left" broadcast, so the room never saw them leave and must not see
+    #    them "join" either;
+    #  - a rejoin that displaced a LIVE roster entry (displaced_was_live) is
+    #    the same person swapping sockets — the roster never changed for
+    #    anyone else, and announcing it is what every other phone renders as
+    #    an "X left / X joined" pair (the 2026-09 flap storm).
+    # Only a genuinely fresh join, or a return after the grace expired (they
+    # WERE announced as left), gets a member_joined broadcast.
     # They're back — stop paging the old identity immediately rather than
-    # waiting for the next retry tick to notice.
-    if previous_client_id:
-        cancel_wake(previous_client_id)
+    # waiting for the next retry tick to notice. displaced_id is what the
+    # server actually matched, which can be several socket generations newer
+    # than the client's own previousClientId.
+    grace_cancelled = False
+    for old_id in {previous_client_id, displaced_id} - {None}:
+        cancel_wake(old_id)
+        t = _disconnect_grace_tasks.pop(old_id, None)
+        # cancel() is False for a task that already ran: their member_left
+        # was announced, so this rejoin must be announced too. (The pop is
+        # keyed by client id alone — a previousClientId graced in a
+        # DIFFERENT room is cancelled here too, a pre-existing quirk this
+        # rewrite keeps rather than widens.)
+        if t is not None and t.cancel():
+            grace_cancelled = True
     cancel_wake(client_id)
-    grace_task = _disconnect_grace_tasks.pop(previous_client_id, None) if previous_client_id else None
-    if grace_task is not None:
-        grace_task.cancel()
+    # Both silent branches leave OTHER members' cached rosters holding the
+    # displaced clientId until the next roster-carrying broadcast — the same
+    # bounded staleness the within-grace path has always had (a kick aimed at
+    # the stale id no-ops until then). The alternative, broadcasting a
+    # refresh, IS the flap: old clients render any roster delta as
+    # "X left / X joined" rows.
+    if grace_cancelled:
         print(f"[WS] {client_id[:8]} rejoined room {code} within grace — silent (no flap)")
+    elif displaced_was_live:
+        print(f"[WS] {client_id[:8]} rejoined room {code} replacing a live socket — silent (no flap)")
     else:
         await room_manager.broadcast(
             room,

@@ -286,15 +286,35 @@ class RoomManager:
 
     def rejoin_room(self, client_id: str, websocket, code: str, name: str = "Unknown",
                     previous_client_id: str = None,
-                    member_secret: str = None) -> tuple[Optional[RoomState], bool]:
-        """Attempt to rejoin a room after disconnect. Returns (room, was_host) or (None, False).
-        previous_client_id: the client's old ID from before reconnection, used to clean up stale entries."""
+                    member_secret: str = None
+                    ) -> tuple[Optional[RoomState], bool, Optional[str], bool]:
+        """Attempt to rejoin a room after disconnect.
+
+        Returns (room, was_host, displaced_id, displaced_was_live), or
+        (None, False, None, False) when the room is gone.
+
+        displaced_id is the roster entry this rejoin replaced (the caller
+        must cancel any grace task / wake retries keyed by it — the client's
+        previousClientId can lag several socket generations behind what the
+        server actually matched). displaced_was_live is True ONLY when the
+        SECRET-VERIFIED path replaced an entry that was not flagged
+        reconnecting: the server proved the rejoiner is that member and
+        never saw their old socket die, so the roster never changed for
+        anyone else and the caller must stay silent. The legacy
+        previousClientId path never sets it — that displacement can be
+        someone else's doing and must stay visible.
+        Announcing verified swaps produced the 2026-09 "X left / X
+        joined" storm: a client-side reconnect loop swapped sockets every
+        few seconds and every swap was broadcast as a fresh member_joined,
+        which every other phone's roster diff rendered as a leave/join pair."""
         room = self.rooms.get(code.upper())
         if room is None:
-            return None, False
+            return None, False, None, False
 
         was_host = False
         carried_secret = ""
+        displaced_id: Optional[str] = None
+        displaced_was_live = False
 
         # Method 0 (preferred): a secret we minted and handed only to that
         # member. Unlike previous_client_id this cannot be lifted from a
@@ -311,6 +331,11 @@ class RoomManager:
                                                    member_secret.encode("utf-8"))):
                     was_host = (mid == room.host_id) or (room.host_id is None and m.was_host)
                     carried_secret = m.secret
+                    displaced_id = mid
+                    # Not-reconnecting means the old socket is (as far as the
+                    # server knows) still alive: this is the same person
+                    # swapping sockets, not a return from a seen disconnect.
+                    displaced_was_live = not m.reconnecting
                     if mid != client_id:
                         room.members.pop(mid, None)
                         self._client_to_room.pop(mid, None)
@@ -350,6 +375,14 @@ class RoomManager:
         # by startup_room_cleanup's "host not in members" sweep. Method 0
         # already removed the caller's own stale entry.
         if not carried_secret and previous_client_id and previous_client_id in room.members:
+            displaced_id = previous_client_id
+            # Deliberately NOT displaced_was_live: previousClientId is raw
+            # client input (every member's id is broadcast in
+            # get_member_list), so this path can displace someone else. That
+            # abuse was always possible here — but it was VISIBLE, because
+            # the displacement got announced. Silence is reserved for the
+            # secret-verified path above, where the server knows the
+            # rejoiner IS the displaced member.
             room.members.pop(previous_client_id)
             self._client_to_room.pop(previous_client_id, None)
 
@@ -366,7 +399,7 @@ class RoomManager:
         room.members[client_id] = member
         self._client_to_room[client_id] = code.upper()
         room.peak_members = max(room.peak_members, len(room.members))
-        return room, was_host
+        return room, was_host, displaced_id, displaced_was_live
 
     def cleanup_stale_disconnects(self, max_age: float = 60.0) -> list:
         """Remove pending disconnects older than max_age seconds. Returns stale client_ids."""
