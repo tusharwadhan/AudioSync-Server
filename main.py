@@ -223,10 +223,10 @@ class RoomListResponse(BaseModel):
 
 # App update configuration - modify these values to control updates
 APP_UPDATE_CONFIG = {
-    "latestVersion": "5.18.1",
-    "latestVersionCode": 84,
-    "apkUrl": "https://raw.githubusercontent.com/tusharwadhan/AudioSync-Server/tushar/releases/syncaura-5.18.1.apk",
-    "releaseNotes": "The web remote can now see your phone\u2019s battery, show your favourites and playlists, and scroll synced lyrics while you listen. Your keyboard\u2019s media keys control the phone too. On the phone, Remote settings now list every connected computer so you can remove one, and you can turn off connecting by email. Also fixes repeat-all when skipping from a headset or the remote.",
+    "latestVersion": "5.18.2",
+    "latestVersionCode": 85,
+    "apkUrl": "https://raw.githubusercontent.com/tusharwadhan/AudioSync-Server/tushar/releases/syncaura-5.18.2.apk",
+    "releaseNotes": "Fixes Listen Together rooms repeatedly showing members leaving and rejoining on their own. Room and remote connections are now much more stable, especially with the app in the background.",
     # 5.15.0 → 5.15.1 is a patch-level bump → the client classifier
     # routes this to the Minor tier (quiet card in Settings, red dot
     # on the home gear). `mandatoryBelow` is effectively ignored for
