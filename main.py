@@ -13,7 +13,7 @@ from fastapi import (
 import dataclasses
 import secrets
 from starlette.websockets import WebSocketState
-from fastapi.responses import HTMLResponse, JSONResponse, FileResponse
+from fastapi.responses import HTMLResponse, JSONResponse, FileResponse, RedirectResponse
 import tempfile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
@@ -102,6 +102,14 @@ ADMIN_SECRET = os.getenv("SYNCAURA_ADMIN_SECRET", "")
 PUBLIC_API_V1_PATHS = (
     "/api/v1/update/check",
     "/api/v1/announcement",
+    # Share links. Every app build to date constructs them from
+    # ApiConfig.baseUrl, which ends in /api/v1, while the share pages live
+    # at the ROOT — so every shared link died here with "Invalid or missing
+    # API key" before routing could even 404. The alias route redirects to
+    # the real page; this entry lets the redirect be reached at all. The
+    # app builds links from the origin from 5.18.3 on, but links already
+    # sent (and old installs) keep this shape forever.
+    "/api/v1/share/",
 )
 
 
@@ -3118,6 +3126,38 @@ async def list_rooms():
 
 
 # ==================== SHARE ENDPOINTS ====================
+
+
+@app.get("/.well-known/assetlinks.json", include_in_schema=False)
+async def assetlinks():
+    """Digital Asset Links: lets Android verify the app's https intent
+    filters (autoVerify) so tapping a share link opens SyncAura directly
+    instead of the browser. Fingerprint = syncaura-release.jks signing
+    cert; regenerate with `keytool -list -v` if the keystore ever changes."""
+    return JSONResponse([{
+        "relation": ["delegate_permission/common.handle_all_urls"],
+        "target": {
+            "namespace": "android_app",
+            "package_name": "com.syncaura.music",
+            "sha256_cert_fingerprints": [
+                "54:35:21:6E:63:21:8D:4B:08:E1:3E:BE:31:FE:84:64:A9:E1:8D:52:9C:D2:D1:A2:3A:11:9E:BF:12:DA:7C:E9"
+            ],
+        },
+    }])
+
+
+@app.get("/api/v1/share/{rest:path}", include_in_schema=False)
+async def share_link_alias(rest: str, request: Request):
+    """Redirect /api/v1/share/* to the real root share pages.
+
+    The app has always built share links from ApiConfig.baseUrl (which ends
+    in /api/v1); those links are in chat histories on other people's phones
+    and cannot be fixed retroactively, so this alias is permanent. 302, not
+    308: the target is a browser, and the page itself is what's shareable."""
+    url = f"/share/{rest}"
+    if request.url.query:
+        url += f"?{request.url.query}"
+    return RedirectResponse(url, status_code=302)
 
 
 @app.get("/share/song/{video_id}", response_class=HTMLResponse)
