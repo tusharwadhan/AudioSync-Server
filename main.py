@@ -231,22 +231,19 @@ class RoomListResponse(BaseModel):
 
 # App update configuration - modify these values to control updates
 APP_UPDATE_CONFIG = {
-    "latestVersion": "5.18.2",
-    "latestVersionCode": 85,
-    "apkUrl": "https://raw.githubusercontent.com/tusharwadhan/AudioSync-Server/tushar/releases/syncaura-5.18.2.apk",
-    "releaseNotes": "Fixes Listen Together rooms repeatedly showing members leaving and rejoining on their own. Room and remote connections are now much more stable, especially with the app in the background.",
-    # 5.15.0 → 5.15.1 is a patch-level bump → the client classifier
-    # routes this to the Minor tier (quiet card in Settings, red dot
-    # on the home gear). `mandatoryBelow` is effectively ignored for
-    # Minor — leaving it at 41 simply means anyone still on <5.15.0
-    # would get the standard mandatory treatment for THIS version
-    # too if they somehow reached this far without 5.15.0.
+    "latestVersion": "5.18.3",
+    "latestVersionCode": 86,
+    "apkUrl": "https://raw.githubusercontent.com/tusharwadhan/AudioSync-Server/tushar/releases/syncaura-5.18.3.apk",
+    "releaseNotes": "New: Video mode. A live mini preview of the music video appears on the album art - tap it to watch the video right in the player. Pick quality on the fly, go fullscreen with the expand button or by rotating your phone, and see synced lyrics over fullscreen video. Video stays on across songs until you turn it off.",
+    # Patch-level bump (5.18.2 → 5.18.3) → the client classifier routes
+    # this to the Minor tier (quiet card in Settings, red dot on the
+    # home gear). `mandatoryBelow` is effectively ignored for Minor.
     "mandatoryBelow": 41,
     "isEmergency": False,
-    # 5.17.1 is a public release — empty list = offered to EVERYONE
-    # (all users, including signed-out). Repopulate (or call
-    # /admin/set-target-emails) only for a future cohort/TestFlight build.
-    "targetEmails": [],
+    # 5.18.3 is a COHORT build (video-suite test): offered only to these
+    # two accounts. Empty the list (or call /admin/set-target-emails)
+    # when this goes public.
+    "targetEmails": ["tushar.code05@gmail.com", "sushil3994kumar@gmail.com"],
 }
 
 
