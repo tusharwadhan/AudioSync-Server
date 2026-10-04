@@ -3251,7 +3251,8 @@ async def app_landing_page():
     )
 
 
-@app.get("/app/icon.png")
+# GET + HEAD: link-preview scrapers often HEAD og:image before fetching.
+@app.api_route("/app/icon.png", methods=["GET", "HEAD"])
 async def app_landing_icon():
     """The launcher icon for the landing page + link previews (og:image
     needs an absolute URL, so this must be a real route, not an asset
