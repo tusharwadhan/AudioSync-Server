@@ -8026,6 +8026,16 @@ async def startup_morning_push():
     # switch in app_config keeps it inert until flipped on by the admin.
     asyncio.create_task(morning_push.scheduler_loop())
 
+
+@app.get("/admin/morning", response_class=HTMLResponse)
+async def morning_push_console():
+    """Admin cockpit for the morning push. The page itself is public (root
+    paths skip the API-key middleware, same as /share and /app) but every
+    data call it makes requires X-Admin-Secret, entered in the page."""
+    path = os.path.join(os.path.dirname(__file__), "static", "admin_morning.html")
+    with open(path, encoding="utf-8") as f:
+        return HTMLResponse(f.read())
+
 # Register the versioned API router
 app.include_router(api)
 

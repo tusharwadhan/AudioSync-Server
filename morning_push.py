@@ -956,6 +956,31 @@ async def mp_send(request: Request, session=Depends(get_session)):
     return {"ok": True, "mode": "draft", "draftId": int(draft_id), **summary}
 
 
+@router.get("/admin/morning-push/log")
+async def mp_log(request: Request, limit: int = 60,
+                 session=Depends(get_session)):
+    _require_admin(request)
+    limit = max(1, min(limit, 300))
+    rows = (
+        await session.execute(
+            sql_text(
+                "SELECT l.user_id, u.email, l.sent_date, l.video_id, "
+                "       l.title, l.body, l.status, l.created_at "
+                "FROM morning_push_log l LEFT JOIN users u ON u.id = l.user_id "
+                "ORDER BY l.id DESC LIMIT :lim"
+            ),
+            {"lim": limit},
+        )
+    ).all()
+    return {"items": [
+        {"userId": r.user_id, "email": r.email or "", "sentDate": r.sent_date,
+         "videoId": r.video_id or "", "title": r.title or "",
+         "body": r.body or "", "status": r.status or "",
+         "createdAt": r.created_at.isoformat()}
+        for r in rows
+    ]}
+
+
 @router.post("/admin/morning-push/discard")
 async def mp_discard(request: Request, session=Depends(get_session)):
     _require_admin(request)

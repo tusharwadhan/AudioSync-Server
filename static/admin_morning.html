@@ -1,0 +1,415 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Morning Push Console</title>
+<style>
+  :root{
+    --bg:#0a0506; --card:#150e0b; --card2:#1c1310; --line:#2b1d16;
+    --txt:#f3e9e2; --dim:#9c8a7f; --accent:#ff8a3d; --accent2:#ff5a1f;
+    --ok:#4caf7d; --warn:#e6b03d; --err:#e6553d;
+  }
+  *{box-sizing:border-box}
+  body{margin:0;background:var(--bg);color:var(--txt);
+       font:14px/1.5 system-ui,Segoe UI,Roboto,sans-serif;padding:16px}
+  h1{font-size:19px;margin:0}
+  h2{font-size:13px;letter-spacing:.08em;text-transform:uppercase;
+     color:var(--accent);margin:0 0 12px}
+  .wrap{max-width:1060px;margin:0 auto;display:flex;flex-direction:column;gap:14px}
+  .topbar{display:flex;gap:10px;align-items:center;flex-wrap:wrap}
+  .topbar .grow{flex:1}
+  .card{background:var(--card);border:1px solid var(--line);
+        border-radius:14px;padding:16px}
+  .row{display:flex;gap:10px;flex-wrap:wrap;align-items:center}
+  .chips{display:flex;gap:8px;flex-wrap:wrap}
+  .chip{background:var(--card2);border:1px solid var(--line);border-radius:999px;
+        padding:4px 12px;font-size:12.5px;color:var(--dim)}
+  .chip b{color:var(--txt);font-weight:600}
+  .chip.on b{color:var(--ok)} .chip.off b{color:var(--err)}
+  label{font-size:12px;color:var(--dim);display:block;margin-bottom:3px}
+  input[type=text],input[type=password],input[type=time],input[type=number],
+  textarea,select{
+    background:#0f0908;border:1px solid var(--line);border-radius:8px;
+    color:var(--txt);padding:7px 10px;font:inherit;width:100%}
+  input:focus,textarea:focus,select:focus{outline:1px solid var(--accent);border-color:var(--accent)}
+  textarea{resize:vertical;min-height:70px;font-family:ui-monospace,Consolas,monospace;font-size:12.5px}
+  .field{display:flex;flex-direction:column;min-width:130px;flex:1}
+  button{background:linear-gradient(135deg,var(--accent),var(--accent2));
+         color:#1a0d05;font-weight:700;border:0;border-radius:9px;
+         padding:8px 16px;cursor:pointer;font:inherit;font-weight:700}
+  button.ghost{background:var(--card2);color:var(--txt);border:1px solid var(--line);font-weight:500}
+  button.danger{background:#3a1410;color:#ff9c8a;border:1px solid #5a2018}
+  button:disabled{opacity:.4;cursor:default}
+  .switch{display:inline-flex;align-items:center;gap:8px;cursor:pointer;user-select:none}
+  .switch .tr{width:40px;height:22px;border-radius:999px;background:#2a1a12;
+              border:1px solid var(--line);position:relative;transition:.15s}
+  .switch .tr::after{content:"";position:absolute;top:2px;left:2px;width:16px;height:16px;
+              border-radius:50%;background:var(--dim);transition:.15s}
+  .switch.on .tr{background:var(--accent2)}
+  .switch.on .tr::after{left:20px;background:#fff}
+  .grid-days{display:grid;grid-template-columns:repeat(auto-fill,minmax(92px,1fr));gap:8px}
+  .day{background:var(--card2);border:1px solid var(--line);border-radius:10px;
+       padding:7px 8px;text-align:center}
+  .day.off{opacity:.38}
+  .day .n{font-weight:700;cursor:pointer}
+  .day input{margin-top:5px;padding:3px 4px;font-size:11.5px;text-align:center}
+  table{width:100%;border-collapse:collapse;font-size:12.5px}
+  th{color:var(--dim);text-align:left;font-weight:500;padding:6px 8px;border-bottom:1px solid var(--line)}
+  td{padding:7px 8px;border-bottom:1px solid #1d130e;vertical-align:top}
+  td img{width:42px;height:32px;object-fit:cover;border-radius:5px}
+  .pill{display:inline-block;background:#241711;border-radius:999px;padding:1px 8px;
+        font-size:11px;color:var(--accent)}
+  .pill.llm{color:#7fc8ff}
+  .msg-t{font-weight:600} .msg-b{color:var(--dim)}
+  #toast{position:fixed;bottom:18px;left:50%;transform:translateX(-50%);
+         background:#241711;border:1px solid var(--accent);color:var(--txt);
+         padding:9px 18px;border-radius:10px;display:none;z-index:9;max-width:84vw}
+  .hint{font-size:12px;color:var(--dim)}
+  .warnbox{background:#241a08;border:1px solid #4a3410;color:#e6b03d;
+           border-radius:9px;padding:8px 12px;font-size:12.5px}
+  details summary{cursor:pointer;color:var(--accent);font-size:13px}
+</style>
+</head>
+<body>
+<div class="wrap">
+
+  <div class="topbar">
+    <h1>🌅 Morning Push Console</h1>
+    <div class="grow"></div>
+    <div style="min-width:260px">
+      <input type="password" id="secret" placeholder="Admin secret">
+    </div>
+    <button onclick="connect()">Connect</button>
+  </div>
+
+  <div class="card" id="statusCard">
+    <h2>Status</h2>
+    <div class="chips" id="chips"><span class="chip">Enter the admin secret and press Connect</span></div>
+  </div>
+
+  <div class="card" id="cfgCard" style="display:none">
+    <h2>Controls</h2>
+    <div class="row" style="margin-bottom:14px">
+      <span class="switch" id="swEnabled" onclick="toggle(this)"><span class="tr"></span> Daily send enabled</span>
+      <span class="switch" id="swApproval" onclick="toggle(this)"><span class="tr"></span> Require my approval (draft first)</span>
+      <span class="switch" id="swLlm" onclick="toggle(this)"><span class="tr"></span> Groq lines on scheduled sends</span>
+    </div>
+    <div class="row">
+      <div class="field" style="max-width:120px"><label>Default time (IST)</label>
+        <input type="time" id="defaultTime" value="08:00"></div>
+      <div class="field" style="max-width:120px"><label>Grace (min)</label>
+        <input type="number" id="graceMinutes" value="120"></div>
+      <div class="field" style="max-width:120px"><label>Window (days)</label>
+        <input type="number" id="windowDays" value="30"></div>
+      <div class="field" style="max-width:170px"><label>Audience</label>
+        <select id="audMode"><option value="all">Everyone with a token</option>
+        <option value="emails">Only listed emails</option></select></div>
+    </div>
+    <div class="row" style="margin-top:10px">
+      <div class="field"><label>Audience emails (comma separated — used when "Only listed")</label>
+        <input type="text" id="audEmails" placeholder="tushar.code05@gmail.com, …"></div>
+      <div class="field"><label>Exclude emails (never send)</label>
+        <input type="text" id="audExclude" placeholder=""></div>
+    </div>
+    <div class="row" style="margin-top:10px">
+      <div class="field"><label>Groq style context (seeds every generated line)</label>
+        <textarea id="llmContext" placeholder="e.g. Friendly desi tone, light humor, max one emoji, never cheesy…"></textarea></div>
+    </div>
+    <div class="row" style="margin-top:10px;align-items:flex-end">
+      <div class="field" style="max-width:220px"><label>Notification channel id</label>
+        <input type="text" id="channelId" placeholder="(empty = safe default)"></div>
+      <div class="warnbox" style="flex:1">Leave the channel empty until an app release creates it —
+        Android silently drops notifications aimed at a channel the app never made.</div>
+    </div>
+    <div class="row" style="margin-top:14px">
+      <button onclick="saveConfig()">Save controls + calendar</button>
+      <span class="hint" id="cfgSaved"></span>
+    </div>
+  </div>
+
+  <div class="card" id="daysCard" style="display:none">
+    <h2>Monthly calendar <span class="hint" style="text-transform:none;letter-spacing:0">— click a date to skip it; set a time to override 'default time' for that date</span></h2>
+    <div class="grid-days" id="dayGrid"></div>
+  </div>
+
+  <div class="card" id="prevCard" style="display:none">
+    <h2>Preview &amp; send</h2>
+    <div class="row">
+      <button class="ghost" onclick="dryRun(false)">Dry-run (templates)</button>
+      <button class="ghost" onclick="dryRun(true)">Dry-run (Groq)</button>
+      <button onclick="generateDraft(true)">Generate Groq draft</button>
+      <button onclick="generateDraft(false)">Generate template draft</button>
+      <button class="danger" onclick="sendDirect()">Send now (no draft)</button>
+    </div>
+    <div id="prevMeta" class="hint" style="margin-top:10px"></div>
+    <div id="prevTable" style="overflow-x:auto"></div>
+    <div class="row" id="draftActions" style="margin-top:12px;display:none">
+      <button onclick="sendDraft()">✅ Send this draft</button>
+      <button class="danger" onclick="discardDraft()">Discard</button>
+      <span class="hint" id="draftLabel"></span>
+    </div>
+  </div>
+
+  <div class="card" id="draftsCard" style="display:none">
+    <h2>Pending drafts</h2>
+    <div id="draftsList" class="hint">—</div>
+  </div>
+
+  <div class="card" id="linesCard" style="display:none">
+    <h2>Line pool</h2>
+    <details><summary>Edit the template JSON</summary>
+      <textarea id="linesJson" style="min-height:260px;margin-top:10px"></textarea>
+      <div class="row" style="margin-top:10px">
+        <button onclick="saveLines()">Save lines</button>
+        <span class="hint">Buckets: morning_ritual / overall_top / generic · tones: regular / devotional / trending / plain · slots: {song} {artist} {name}</span>
+      </div>
+    </details>
+  </div>
+
+  <div class="card" id="logCard" style="display:none">
+    <h2>Recent sends</h2>
+    <div id="logTable" class="hint">—</div>
+  </div>
+
+</div>
+<div id="toast"></div>
+
+<script>
+const API_KEY = "sk_syncaura_v1_8f3k9x2m7q4w1p6y";
+const BASE = "/api/v1/admin/morning-push";
+let currentDraftId = null;
+
+function $(id){return document.getElementById(id)}
+function toast(m, bad){const t=$("toast");t.textContent=m;
+  t.style.borderColor = bad ? "var(--err)" : "var(--accent)";
+  t.style.display="block";clearTimeout(t._h);t._h=setTimeout(()=>t.style.display="none",3500)}
+function toggle(el){el.classList.toggle("on")}
+function isOn(id){return $(id).classList.contains("on")}
+function setOn(id,v){$(id).classList.toggle("on",!!v)}
+
+async function api(path, opts={}){
+  const secret = localStorage.getItem("mp_secret") || $("secret").value.trim();
+  const r = await fetch(BASE+path, {...opts, headers:{
+    "X-API-Key": API_KEY, "X-Admin-Secret": secret,
+    ...(opts.body ? {"Content-Type":"application/json"} : {}),
+  }});
+  if(r.status===403) throw new Error("Forbidden — wrong admin secret?");
+  if(!r.ok) throw new Error((await r.text()).slice(0,200));
+  return r.json();
+}
+
+async function connect(){
+  const s = $("secret").value.trim();
+  if(s) localStorage.setItem("mp_secret", s);
+  try{ await refreshAll(); toast("Connected"); }
+  catch(e){ toast(e.message, true); }
+}
+
+async function refreshAll(){
+  const st = await api("/status");
+  renderStatus(st);
+  fillConfig(st.config);
+  renderDays(st.config);
+  ["cfgCard","daysCard","prevCard","draftsCard","linesCard","logCard"]
+    .forEach(id=>$(id).style.display="block");
+  loadLines(); loadDrafts(); loadLog();
+}
+
+function chip(label, val, cls){return `<span class="chip ${cls||""}">${label} <b>${val}</b></span>`}
+function renderStatus(st){
+  $("chips").innerHTML =
+    chip("Daily send", st.config.enabled ? "ON" : "OFF", st.config.enabled?"on":"off") +
+    chip("Reachable users", st.reachableUsers ?? "–") +
+    chip("Social tokens", st.legacySocialTokens ?? "–") +
+    chip("App tokens", st.enabledTokens ?? "–") +
+    chip("Sent today", st.sentToday ?? 0) +
+    chip("Pending drafts", st.pendingDrafts ?? 0) +
+    chip("Groq", st.groqConfigured ? "ready" : "no key", st.groqConfigured?"on":"off") +
+    chip("IST", (st.istNow||"").slice(11,16)) +
+    (st.lastError ? chip("Last error", st.lastError, "off") : "");
+}
+
+function fillConfig(c){
+  setOn("swEnabled", c.enabled);
+  setOn("swApproval", c.requireApproval);
+  setOn("swLlm", (c.llm||{}).enabled);
+  $("defaultTime").value = c.defaultTime || "08:00";
+  $("graceMinutes").value = c.graceMinutes ?? 120;
+  $("windowDays").value = c.windowDays ?? 30;
+  $("audMode").value = (c.audience||{}).mode || "all";
+  $("audEmails").value = ((c.audience||{}).emails||[]).join(", ");
+  $("audExclude").value = ((c.audience||{}).exclude||[]).join(", ");
+  $("llmContext").value = (c.llm||{}).context || "";
+  $("channelId").value = c.channelId || "";
+}
+
+function renderDays(c){
+  const days = c.days || {};
+  let html = "";
+  for(let d=1; d<=31; d++){
+    const o = days[String(d)] || {};
+    const off = o.enabled === false;
+    html += `<div class="day ${off?"off":""}" id="day${d}">
+      <div class="n" onclick="dayToggle(${d})">${d}</div>
+      <input type="time" id="dayT${d}" value="${o.time||""}"
+             title="time override" ${off?"disabled":""}>
+    </div>`;
+  }
+  $("dayGrid").innerHTML = html;
+}
+function dayToggle(d){
+  const el = $("day"+d); el.classList.toggle("off");
+  $("dayT"+d).disabled = el.classList.contains("off");
+}
+function collectDays(){
+  const out = {};
+  for(let d=1; d<=31; d++){
+    const off = $("day"+d).classList.contains("off");
+    const t = $("dayT"+d).value;
+    if(off) out[String(d)] = {enabled:false};
+    else if(t && t !== $("defaultTime").value) out[String(d)] = {time:t};
+  }
+  return out;
+}
+const csv = s => s.split(",").map(x=>x.trim()).filter(Boolean);
+
+async function saveConfig(){
+  try{
+    const body = {
+      enabled: isOn("swEnabled"),
+      requireApproval: isOn("swApproval"),
+      defaultTime: $("defaultTime").value || "08:00",
+      graceMinutes: +$("graceMinutes").value || 120,
+      windowDays: +$("windowDays").value || 30,
+      channelId: $("channelId").value.trim(),
+      days: collectDays(),
+      audience: {mode: $("audMode").value,
+                 emails: csv($("audEmails").value),
+                 exclude: csv($("audExclude").value)},
+      llm: {enabled: isOn("swLlm"), context: $("llmContext").value.trim()},
+    };
+    await api("/config", {method:"POST", body: JSON.stringify(body)});
+    $("cfgSaved").textContent = "Saved ✓ " + new Date().toLocaleTimeString();
+    toast("Config saved");
+    const st = await api("/status"); renderStatus(st);
+  }catch(e){ toast(e.message, true); }
+}
+
+function itemsTable(items){
+  if(!items.length) return "<p class='hint'>No reachable users in the current audience.</p>";
+  return `<table><tr><th></th><th>User</th><th>Pick</th><th>Notification</th><th></th></tr>` +
+    items.map(i=>`<tr>
+      <td>${i.image?`<img src="${i.image}" loading="lazy">`:""}</td>
+      <td>${i.name}<br><span class="hint">${i.email||i.uid.slice(0,8)}</span></td>
+      <td>${i.song?`${i.song}<br><span class="hint">${i.artist}</span>`:"<span class='hint'>—</span>"}</td>
+      <td><div class="msg-t">${i.title}</div><div class="msg-b">${i.body}</div></td>
+      <td><span class="pill">${i.bucket}·${i.tone}</span>${i.llm?' <span class="pill llm">groq</span>':""}</td>
+    </tr>`).join("") + "</table>";
+}
+
+async function dryRun(llm){
+  try{
+    $("prevMeta").textContent = llm ? "Asking Groq to write today's lines…" : "Rendering…";
+    const r = await api("/dry-run?llm="+llm);
+    currentDraftId = null; $("draftActions").style.display="none";
+    $("prevMeta").textContent = `Dry-run for ${r.date} — ${r.count} user(s), ${llm?"Groq":"template"} lines. Nothing was sent or saved.`;
+    $("prevTable").innerHTML = itemsTable(r.items);
+  }catch(e){ toast(e.message, true); $("prevMeta").textContent=""; }
+}
+
+async function generateDraft(llm){
+  try{
+    $("prevMeta").textContent = llm ? "Generating Groq draft…" : "Generating draft…";
+    const r = await api("/generate", {method:"POST", body: JSON.stringify({llm})});
+    currentDraftId = r.draftId;
+    $("prevMeta").textContent = `Draft #${r.draftId} — ${r.count} user(s), ${llm?"Groq":"template"} lines. Review below, then send or discard.`;
+    $("prevTable").innerHTML = itemsTable(r.items);
+    $("draftActions").style.display="flex";
+    $("draftLabel").textContent = `Draft #${r.draftId}`;
+    loadDrafts();
+  }catch(e){ toast(e.message, true); $("prevMeta").textContent=""; }
+}
+
+async function sendDraft(id){
+  const draftId = id ?? currentDraftId;
+  if(!draftId) return;
+  if(!confirm(`Send draft #${draftId} to everyone in it?`)) return;
+  try{
+    const r = await api("/send", {method:"POST", body: JSON.stringify({draftId})});
+    toast(`Sent ${r.sent} · failed ${r.failed} · skipped ${r.skipped}`);
+    $("draftActions").style.display="none"; currentDraftId=null;
+    loadDrafts(); loadLog(); refreshStatusOnly();
+  }catch(e){ toast(e.message, true); }
+}
+async function discardDraft(id){
+  const draftId = id ?? currentDraftId;
+  if(!draftId) return;
+  try{
+    await api("/discard", {method:"POST", body: JSON.stringify({draftId})});
+    toast(`Draft #${draftId} discarded`);
+    $("draftActions").style.display="none"; currentDraftId=null;
+    $("prevTable").innerHTML=""; $("prevMeta").textContent="";
+    loadDrafts();
+  }catch(e){ toast(e.message, true); }
+}
+async function sendDirect(){
+  if(!confirm("Send the morning push RIGHT NOW to the whole audience (template lines)?")) return;
+  try{
+    const r = await api("/send", {method:"POST", body: JSON.stringify({direct:true})});
+    toast(`Sent ${r.sent} · failed ${r.failed} · skipped ${r.skipped}`);
+    loadLog(); refreshStatusOnly();
+  }catch(e){ toast(e.message, true); }
+}
+async function refreshStatusOnly(){ try{ renderStatus(await api("/status")); }catch(_){} }
+
+async function loadDrafts(){
+  try{
+    const r = await api("/drafts");
+    const pend = r.drafts.filter(d=>d.status==="pending");
+    $("draftsList").innerHTML = pend.length ? pend.map(d=>`
+      <div style="margin-bottom:14px">
+        <div class="row" style="margin-bottom:6px">
+          <b>Draft #${d.draftId}</b>
+          <span class="hint">${new Date(d.createdAt).toLocaleString()} · ${d.count} user(s)</span>
+          <button onclick="sendDraft(${d.draftId})">Send</button>
+          <button class="danger" onclick="discardDraft(${d.draftId})">Discard</button>
+        </div>
+        <details><summary>Preview</summary>${itemsTable(d.items)}</details>
+      </div>`).join("") : "<span class='hint'>No drafts awaiting approval.</span>";
+  }catch(e){ $("draftsList").textContent = e.message; }
+}
+
+async function loadLines(){
+  try{ $("linesJson").value = JSON.stringify(await api("/lines"), null, 2); }
+  catch(e){ $("linesJson").value = "// "+e.message; }
+}
+async function saveLines(){
+  try{
+    const lines = JSON.parse($("linesJson").value);
+    await api("/lines", {method:"POST", body: JSON.stringify({lines})});
+    toast("Line pool saved");
+  }catch(e){ toast(e.message, true); }
+}
+
+async function loadLog(){
+  try{
+    const r = await api("/log");
+    $("logTable").innerHTML = r.items.length ? `<table>
+      <tr><th>Date</th><th>User</th><th>Song</th><th>Notification</th><th>Status</th></tr>`+
+      r.items.map(i=>`<tr><td>${i.sentDate}</td><td>${i.email||i.userId.slice(0,8)}</td>
+        <td>${i.videoId||"—"}</td>
+        <td><div class="msg-t">${i.title||""}</div><div class="msg-b">${i.body||""}</div></td>
+        <td>${i.status==="sent"?"✅":"⚠️ "+i.status}</td></tr>`).join("")+"</table>"
+      : "<span class='hint'>Nothing sent yet.</span>";
+  }catch(e){ $("logTable").textContent = e.message; }
+}
+
+// auto-connect if a secret is remembered
+if(localStorage.getItem("mp_secret")){
+  $("secret").value = localStorage.getItem("mp_secret");
+  connect();
+}
+</script>
+</body>
+</html>
