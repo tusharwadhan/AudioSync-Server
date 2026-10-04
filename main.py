@@ -3231,6 +3231,47 @@ async def share_link_alias(rest: str, request: Request):
     return RedirectResponse(url, status_code=302)
 
 
+@app.get("/app", response_class=HTMLResponse)
+async def app_landing_page():
+    """Public 'get the app' landing — the stable link behind the in-app
+    share button. Root-level (never key-gated, like /share/*). The
+    Download button reads APP_UPDATE_CONFIG at request time, so a link
+    forwarded months ago always serves the newest APK. All interpolated
+    values are server-owned constants — nothing user-controlled."""
+    ver = APP_UPDATE_CONFIG["latestVersion"]
+    apk = APP_UPDATE_CONFIG["apkUrl"]
+    return HTMLResponse(f"""<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>SyncAura — music, together</title>
+<meta property="og:title" content="SyncAura — music, together">
+<meta property="og:description" content="Free music streaming with videos, synced lyrics, and real-time listening rooms. Get the app.">
+<meta property="og:type" content="website">
+<style>
+  body {{ margin:0; min-height:100vh; display:flex; align-items:center; justify-content:center;
+         background:#0b0c10; color:#eef0f4; font-family:-apple-system,Roboto,'Segoe UI',sans-serif; }}
+  .card {{ text-align:center; padding:48px 28px; max-width:360px; }}
+  h1 {{ font-size:28px; margin:0 0 6px; }}
+  h1 span {{ color:#A855F7; }}
+  p {{ color:#8b909c; line-height:1.5; margin:0 0 28px; }}
+  a.btn {{ display:inline-block; background:#A855F7; color:#fff; text-decoration:none;
+           padding:14px 36px; border-radius:14px; font-weight:600; font-size:16px; }}
+  .ver {{ margin-top:14px; font-size:12px; color:#555a66; }}
+</style>
+</head>
+<body>
+<div class="card">
+  <h1>Sync<span>Aura</span></h1>
+  <p>Free music streaming with videos, synced lyrics, and listening together with friends in real time.</p>
+  <a class="btn" href="{apk}">Download for Android</a>
+  <div class="ver">Version {ver} · free APK</div>
+</div>
+</body>
+</html>""")
+
+
 @app.get("/share/song/{video_id}", response_class=HTMLResponse)
 async def share_song_page(video_id: str, request: Request):
     """HTML page with Open Graph tags for song link previews."""
