@@ -232,9 +232,9 @@ class RoomListResponse(BaseModel):
 
 # App update configuration - modify these values to control updates
 APP_UPDATE_CONFIG = {
-    "latestVersion": "5.19.1",
-    "latestVersionCode": 88,
-    "apkUrl": "https://raw.githubusercontent.com/tusharwadhan/AudioSync-Server/tushar/releases/syncaura-5.19.1.apk",
+    "latestVersion": "5.19.2",
+    "latestVersionCode": 89,
+    "apkUrl": "https://raw.githubusercontent.com/tusharwadhan/AudioSync-Server/tushar/releases/syncaura-5.19.2.apk",
     "releaseNotes": "Watch your music 🎬 Live previews in the album art, video mode on tap, fullscreen on rotate — with synced lyrics floating on top.",
     # Minor-version jump (5.18.x → 5.19.0) → the client classifier routes
     # this to the MAJOR tier (full update sheet) — the video suite's
