@@ -670,3 +670,88 @@ class PlaybackErrorLog(Base):
         Index("ix_playback_error_logs_device_received", "device_id", "received_at"),
         Index("ix_playback_error_logs_type_received", "error_type", "received_at"),
     )
+
+
+class AppConfigKV(Base):
+    """Tiny key→JSON config store for runtime-editable server settings
+    (morning-push schedule, line pools, …). Unlike the in-memory
+    ANNOUNCEMENT_CONFIG pattern this survives redeploys, which is the whole
+    point: copy and schedule tweaks must not need a deploy."""
+
+    __tablename__ = "app_config"
+
+    key: Mapped[str] = mapped_column(String(64), primary_key=True)
+    # JSON blob as text — values are small (a few KB of line templates).
+    value: Mapped[str | None] = mapped_column(Text, nullable=True)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utc_now, nullable=False
+    )
+
+
+class UserFcmToken(Base):
+    """Per-ACCOUNT FCM tokens for engagement pushes (morning push).
+
+    Distinct from the room-scoped register_fcm_token store, which is keyed
+    by room client id and unauthenticated. One row per device token; a uid
+    may hold several (phone + tablet). `enabled` mirrors the in-app
+    "Daily morning song" toggle — a disabled row keeps the token (so the
+    toggle can flip back without a re-register) but the picker skips it."""
+
+    __tablename__ = "user_fcm_tokens"
+
+    token: Mapped[str] = mapped_column(String(512), primary_key=True)
+    user_id: Mapped[str] = mapped_column(
+        String(128), ForeignKey("users.id", ondelete="CASCADE"), nullable=False
+    )
+    device: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    enabled: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, server_default=sql_text("true")
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utc_now, nullable=False
+    )
+
+    __table_args__ = (Index("ix_user_fcm_tokens_user", "user_id"),)
+
+
+class MorningPushLog(Base):
+    """One row per morning-push notification actually handed to FCM.
+    Doubles as the per-day dedupe (user_id + sent_date) and the
+    "don't repeat yesterday's song" lookup."""
+
+    __tablename__ = "morning_push_log"
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
+    user_id: Mapped[str] = mapped_column(
+        String(128), ForeignKey("users.id", ondelete="CASCADE"), nullable=False
+    )
+    sent_date: Mapped[str] = mapped_column(String(10), nullable=False)  # IST yyyy-mm-dd
+    video_id: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    title: Mapped[str | None] = mapped_column(String(256), nullable=True)
+    body: Mapped[str | None] = mapped_column(String(512), nullable=True)
+    status: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utc_now, nullable=False
+    )
+
+    __table_args__ = (
+        Index("ix_morning_push_log_user_date", "user_id", "sent_date"),
+        Index("ix_morning_push_log_date", "sent_date"),
+    )
+
+
+class MorningPushDraft(Base):
+    """A generated-but-not-sent morning batch awaiting admin approval.
+    `payload` is the full JSON list of rendered per-user messages, so what
+    was previewed is byte-for-byte what gets sent on approval."""
+
+    __tablename__ = "morning_push_drafts"
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
+    status: Mapped[str] = mapped_column(
+        String(16), nullable=False, server_default=sql_text("'pending'")
+    )
+    payload: Mapped[str | None] = mapped_column(Text, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utc_now, nullable=False
+    )

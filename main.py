@@ -8014,6 +8014,18 @@ api.include_router(sync_router)
 # WebSocket dispatch lives inside websocket_endpoint above.
 api.include_router(social.router)
 
+# Morning push — daily personalized notification. Admin cockpit under
+# /api/v1/admin/morning-push/*, token registration at /api/v1/user/fcm-token.
+import morning_push
+api.include_router(morning_push.router)
+
+
+@app.on_event("startup")
+async def startup_morning_push():
+    # Fire-and-forget; every tick is exception-contained, and the master
+    # switch in app_config keeps it inert until flipped on by the admin.
+    asyncio.create_task(morning_push.scheduler_loop())
+
 # Register the versioned API router
 app.include_router(api)
 
