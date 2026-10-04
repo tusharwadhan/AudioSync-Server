@@ -40,6 +40,10 @@ COPY social.py .
 # this COPY is not a degraded feature, it is an ImportError at boot that
 # takes the whole API down, extraction included.
 COPY control_session.py .
+# Morning push — daily personalized notification (imported by main.py).
+# Same failure class as above: no COPY = ModuleNotFoundError = crash-loop
+# (took down the 2026-10-04 deploys until added).
+COPY morning_push.py .
 # The /remote page is read from disk at request time, so without this the
 # route 404s in production while working perfectly in local dev.
 COPY static ./static
