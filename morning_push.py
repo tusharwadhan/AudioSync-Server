@@ -55,8 +55,15 @@ from auth import AuthedUser, get_current_user
 from db import get_session, try_session_factory
 
 router = APIRouter(tags=["morning-push"])
+# Mounted at app root (NOT /api/v1): FCM's image fetcher can't send the
+# X-API-Key header, so banner URLs must be public like /share and /app.
+public_router = APIRouter(tags=["morning-push-public"])
 
 IST = ZoneInfo("Asia/Kolkata")
+# Public origin for banner URLs baked into FCM messages. Render sets
+# RENDER_EXTERNAL_URL automatically.
+PUBLIC_ORIGIN = (os.getenv("RENDER_EXTERNAL_URL", "")
+                 or "https://audiosync-server.onrender.com").rstrip("/")
 # Same env var main.py uses — NOT "ADMIN_SECRET"; that name is unset on
 # Render, and `if not ADMIN_SECRET` would then 403 every admin call even
 # with the correct header (exactly what happened on first deploy).
@@ -179,26 +186,70 @@ def clean_artist(uploader: str | None) -> str:
     return a.strip() or "your artist"
 
 
+_TITLE_JUNK_SEG = re.compile(
+    r"latest|new (punjabi|hindi|haryanvi|song)|official|full (video|song|album)"
+    r"|\b20\d\d\b|lyrical|whatsapp status|trending",
+    re.IGNORECASE,
+)
+
+_TAIL_JUNK_WORD = re.compile(
+    r"\s*\b(latest|new|official|full|video|song|songs|hit|hits|punjabi|hindi"
+    r"|haryanvi|lyrical|hd|4k|audio|music|20\d\d|no\.? ?\d+)\s*$",
+    re.IGNORECASE,
+)
+
+
 def clean_title(raw: str | None, uploader: str | None) -> str:
-    t = (raw or "").strip()
-    original = t
-    t = _BRACKET_JUNK.sub(" ", t)
-    # First pipe-segment is almost always the song name on Indian uploads.
-    t = t.split("|")[0]
-    # "Artist - Song" → keep the song half when the left half is the artist.
-    if " - " in t:
-        left, right = t.split(" - ", 1)
-        up = (uploader or "").lower()
-        if left.strip().lower() in up or up in left.strip().lower():
-            t = right
-    # Drop the artist name embedded in the title ("BOYFRIEND KARAN AUJLA")
-    # and "By <uploader>" tails — templates append {artist} themselves.
+    """Dig the song name out of a YouTube title. Walks the pipe-separated
+    segments, strips bracket junk + artist halves of 'Artist - Song' /
+    'Song : Artist' shapes, and takes the first segment that survives and
+    isn't marketing junk ('Latest Punjabi Songs 2025')."""
+    original = (raw or "").strip()
+    t = _BRACKET_JUNK.sub(" ", original)
+    up = (uploader or "").lower()
     artist = clean_artist(uploader)
-    if len(artist) >= 4 and artist.lower() != "your artist":
-        t = re.sub(r"(\bby\s+)?" + re.escape(artist), " ", t,
-                   flags=re.IGNORECASE)
-    t = re.sub(r"\bby\s*$", "", t, flags=re.IGNORECASE)
-    t = re.sub(r"\s{2,}", " ", t).strip(" -–—:|,")
+
+    def strip_artist(seg: str) -> str:
+        if len(artist) >= 4 and artist.lower() != "your artist":
+            seg = re.sub(r"(\bby\s+)?" + re.escape(artist), " ", seg,
+                         flags=re.IGNORECASE)
+        seg = re.sub(r"\bby\s*$", "", seg, flags=re.IGNORECASE)
+        return re.sub(r"\s{2,}", " ", seg).strip(" -–—:|,")
+
+    def trim_tail(seg: str) -> str:
+        # Peel marketing words off the END ('… Full Video Song' → '…').
+        prev = None
+        while prev != seg:
+            prev = seg
+            seg = _TAIL_JUNK_WORD.sub("", seg).strip(" -–—:|,")
+        return seg
+
+    candidates = []
+    for seg in t.split("|"):
+        seg = seg.strip()
+        if not seg:
+            continue
+        # 'Artist - Song' / 'Artist : Song' → song half; and the mirror,
+        # 'Song : Artist' → song half.
+        for sep in (" - ", " : "):
+            if sep in seg:
+                left, right = seg.split(sep, 1)
+                l, r = left.strip().lower(), right.strip().lower()
+                if up and (l in up or up in l):
+                    seg = right
+                elif up and (r in up or up in r):
+                    seg = left
+                elif sep == " : " and len(left.split()) <= 3:
+                    # 'Babbu Maan : Song…' — a short colon-prefix is almost
+                    # always the artist even when the uploader is a label.
+                    seg = right
+                break
+        seg = trim_tail(strip_artist(seg))
+        if len(seg) >= 2:
+            candidates.append(seg)
+
+    best = next((c for c in candidates if not _TITLE_JUNK_SEG.search(c)), None)
+    t = best or (candidates[0] if candidates else "")
     if len(t) < 2:
         t = original[:60]
     return t[:60].strip()
@@ -213,6 +264,109 @@ def _stable_idx(seed: str, n: int) -> int:
         return 0
     h = hashlib.md5(seed.encode("utf-8")).hexdigest()
     return int(h[:8], 16) % n
+
+
+# ── notification banner (Zomato-style wide card) ─────────────────────────
+# The raw YouTube thumbnail looks like a video frame in the tray. This
+# composes a 1200x600 banner: the album art blur-filled across the whole
+# card, with the sharp art floating on it — rendered once per videoId and
+# cached in tmp. On any failure the endpoint redirects to the raw
+# thumbnail so a notification never ships without an image.
+
+_BANNER_ID_RE = re.compile(r"^[A-Za-z0-9_-]{6,20}$")
+
+
+def _compose_banner(art_bytes: bytes) -> bytes:
+    from io import BytesIO
+
+    from PIL import Image, ImageDraw, ImageEnhance, ImageFilter
+
+    W, H = 1200, 600
+    art = Image.open(BytesIO(art_bytes)).convert("RGB")
+
+    # YouTube pads square album art to 16:9 with black bars — trim any
+    # near-black margins so the blur + foreground use the real artwork.
+    gray = art.convert("L")
+    bbox = gray.point(lambda p: 255 if p > 16 else 0).getbbox()
+    if bbox:
+        art = art.crop(bbox)
+
+    # Background: cover-fill, heavy blur, dimmed.
+    scale = max(W / art.width, H / art.height)
+    bg = art.resize((int(art.width * scale) + 1, int(art.height * scale) + 1))
+    bg = bg.crop(((bg.width - W) // 2, (bg.height - H) // 2,
+                  (bg.width - W) // 2 + W, (bg.height - H) // 2 + H))
+    bg = bg.filter(ImageFilter.GaussianBlur(36))
+    bg = ImageEnhance.Brightness(bg).enhance(0.55)
+
+    # Foreground: sharp art, rounded corners, centered.
+    fh = int(H * 0.82)
+    fw = int(art.width * (fh / art.height))
+    if fw > int(W * 0.9):
+        fw = int(W * 0.9)
+        fh = int(art.height * (fw / art.width))
+    fg = art.resize((fw, fh))
+    mask = Image.new("L", (fw, fh), 0)
+    ImageDraw.Draw(mask).rounded_rectangle((0, 0, fw, fh), radius=28, fill=255)
+    bg.paste(fg, ((W - fw) // 2, (H - fh) // 2), mask)
+
+    out = BytesIO()
+    bg.save(out, "JPEG", quality=82)
+    return out.getvalue()
+
+
+async def _banner_bytes(video_id: str) -> bytes | None:
+    import tempfile
+
+    cache = os.path.join(tempfile.gettempdir(), f"mpb_{video_id}.jpg")
+    if os.path.exists(cache):
+        with open(cache, "rb") as f:
+            return f.read()
+    art = None
+    async with httpx.AsyncClient(timeout=15, follow_redirects=True) as client:
+        for variant in ("maxresdefault", "hq720", "hqdefault"):
+            try:
+                r = await client.get(
+                    f"https://i.ytimg.com/vi/{video_id}/{variant}.jpg")
+                if r.status_code == 200 and len(r.content) > 2000:
+                    art = r.content
+                    break
+            except Exception:
+                continue
+    if art is None:
+        return None
+    loop = asyncio.get_running_loop()
+    try:
+        data = await loop.run_in_executor(None, _compose_banner, art)
+    except Exception as e:
+        _log(f"banner compose failed for {video_id}: {type(e).__name__}: {e}")
+        return None
+    try:
+        with open(cache, "wb") as f:
+            f.write(data)
+    except Exception:
+        pass
+    return data
+
+
+@public_router.get("/mp-banner/{video_id}.jpg")
+async def mp_banner(video_id: str):
+    from fastapi.responses import RedirectResponse, Response
+
+    if not _BANNER_ID_RE.match(video_id):
+        raise HTTPException(status_code=400, detail="bad id")
+    data = await _banner_bytes(video_id)
+    if data is None:
+        return RedirectResponse(
+            f"https://i.ytimg.com/vi/{video_id}/hqdefault.jpg")
+    return Response(content=data, media_type="image/jpeg",
+                    headers={"Cache-Control": "public, max-age=86400"})
+
+
+def banner_url(video_id: str | None) -> str:
+    if video_id and _BANNER_ID_RE.match(video_id):
+        return f"{PUBLIC_ORIGIN}/mp-banner/{video_id}.jpg"
+    return ""
 
 
 # ── app_config storage ───────────────────────────────────────────────────
@@ -293,8 +447,12 @@ async def _audience(session, cfg: dict) -> list[dict]:
             continue
         if aud.get("mode") == "emails" and em not in emails:
             continue
+        # First name, normalized ("SRISHTY BHALLA" → "Srishty",
+        # "priya rani" → "Priya") so greetings read naturally.
+        first = (r.display_name or "").split(" ")[0]
         out.append({"uid": r.id, "email": r.email or "",
-                    "name": (r.display_name or "").split(" ")[0] or "friend"})
+                    "name": (first.capitalize() if first.isupper() or first.islower()
+                             else first) or "friend"})
     return out
 
 
@@ -455,8 +613,9 @@ async def _groq_line(cfg_llm: dict, name: str, song: str, artist: str,
         "You write ONE short morning push notification for SyncAura, an Indian "
         "music app. Reply with ONLY a JSON object: "
         '{"title": "...", "body": "..."}. Title max 38 characters, body max 90. '
-        "Warm, playful; light Hinglish or simple English. Mention the song "
-        "naturally. No hashtags, no quotes around the song name."
+        "Warm, playful; light Hinglish or simple English. Greet the user by "
+        "their first name in the title (e.g. 'Good morning, Tushar ☀️'). "
+        "Mention the song naturally. No hashtags, no quotes around the song name."
         + (f" Extra context from the admin: {context}" if context else "")
     )
     user = (
@@ -509,11 +668,15 @@ async def _groq_line(cfg_llm: dict, name: str, song: str, artist: str,
 
 # ── batch building + sending ─────────────────────────────────────────────
 
-async def build_batch(session, cfg: dict, use_llm: bool) -> list[dict]:
+async def build_batch(session, cfg: dict, use_llm: bool,
+                      only_email: str | None = None) -> list[dict]:
     days = int(cfg.get("windowDays") or 30)
     date_str = datetime.now(IST).strftime("%Y-%m-%d")
     lines = await load_lines(session)
     audience = await _audience(session, cfg)
+    if only_email:
+        audience = [u for u in audience
+                    if (u["email"] or "").lower() == only_email.lower()]
     stats = await _track_stats(session, days)
     trending = await _trending(session, days)
 
@@ -562,12 +725,16 @@ async def build_batch(session, cfg: dict, use_llm: bool) -> list[dict]:
             render_bucket = "morning_ritual" if bucket == "custom" else bucket
             line = _render_line(lines, render_bucket, tone, u["uid"], date_str, slots)
 
+        vid = track["videoId"] if track else ""
         items.append({
             "uid": u["uid"], "email": u["email"], "name": u["name"],
             "bucket": bucket, "tone": tone, "llm": llm_used,
-            "videoId": track["videoId"] if track else "",
+            "videoId": vid,
             "song": slots["song"], "artist": slots["artist"],
-            "image": (track.get("thumbnail") or "") if track else "",
+            # Composed wide banner (Zomato-style card); raw thumbnail only
+            # when there's no videoId to compose from.
+            "image": banner_url(vid)
+                     or ((track.get("thumbnail") or "") if track else ""),
             "title": line["title"], "body": line["body"],
             "date": date_str,
         })
@@ -607,6 +774,10 @@ async def send_batch(session, items: list[dict], force: bool = False) -> dict:
     loop = asyncio.get_running_loop()
     cfg = await load_config(session)
     channel_id = (cfg.get("channelId") or "").strip() or None
+    # Guard + log on the date the send actually HAPPENS, not the date the
+    # draft was generated — a stale draft sent this morning must count as
+    # today's push, or the 8am scheduler would double-ping everyone.
+    send_date = datetime.now(IST).strftime("%Y-%m-%d")
     sent = failed = skipped = 0
     for item in items:
         # Per-day dedupe at send time too (draft may be approved late).
@@ -618,7 +789,7 @@ async def send_batch(session, items: list[dict], force: bool = False) -> dict:
                         "WHERE user_id = :u AND sent_date = :d AND status = 'sent' "
                         "LIMIT 1"
                     ),
-                    {"u": item["uid"], "d": item["date"]},
+                    {"u": item["uid"], "d": send_date},
                 )
             ).scalar()
             if already:
@@ -683,7 +854,7 @@ async def send_batch(session, items: list[dict], force: bool = False) -> dict:
                 "(user_id, sent_date, video_id, title, body, status, created_at) "
                 "VALUES (:u, :d, :v, :t, :b, :s, now())"
             ),
-            {"u": item["uid"], "d": item["date"],
+            {"u": item["uid"], "d": send_date,
              "v": item.get("videoId") or None,
              "t": item["title"], "b": item["body"], "s": status},
         )
@@ -1033,6 +1204,27 @@ async def mp_create_draft(request: Request, session=Depends(get_session)):
     ).scalar()
     await session.commit()
     return {"ok": True, "draftId": draft_id, "count": len(items)}
+
+
+@router.post("/admin/morning-push/render-one")
+async def mp_render_one(request: Request, session=Depends(get_session)):
+    """Re-render a single user's pick + line (fresh Groq roll when llm=true)
+    without touching the rest of the batch — the console swaps the row in."""
+    _require_admin(request)
+    try:
+        body = await request.json()
+    except Exception:
+        raise HTTPException(status_code=400, detail="bad json")
+    email = (body.get("email") or "").strip()
+    if not email:
+        raise HTTPException(status_code=400, detail="missing email")
+    cfg = await load_config(session)
+    items = await build_batch(session, cfg, use_llm=bool(body.get("llm")),
+                              only_email=email)
+    if not items:
+        raise HTTPException(status_code=404,
+                            detail="user not in the current audience")
+    return {"ok": True, "item": items[0]}
 
 
 @router.get("/admin/morning-push/drafts")

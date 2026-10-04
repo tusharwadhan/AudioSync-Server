@@ -30,6 +30,10 @@ PySocks>=1.7.1
 # params so clients never see the API secret.
 cloudinary>=1.39.0
 
+# Pillow — composes the morning-push notification banner (blurred album
+# art card) served at /mp-banner/{videoId}.jpg.
+Pillow>=10.4.0
+
 # ── Postgres data layer (Phase 1: auth + users) ──
 sqlalchemy[asyncio]>=2.0.30
 asyncpg>=0.29.0

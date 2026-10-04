@@ -80,6 +80,40 @@
   .urow .who .hint{display:block;font-size:11.5px}
   button.mini{background:var(--card2);border:1px solid var(--line);color:var(--txt);
               padding:3px 9px;border-radius:7px;font-weight:500;font-size:13px}
+  .secretbox{min-width:260px}
+
+  /* ── Mobile: this console is used mostly from a phone ── */
+  @media (max-width:680px){
+    body{padding:10px}
+    .wrap{gap:10px}
+    .card{padding:13px;border-radius:12px}
+    h1{font-size:16px}
+    .topbar{gap:8px}
+    .secretbox{flex:1;min-width:0}
+    .field{min-width:46%}
+    /* action buttons become a tappable 2-col grid */
+    .row.actions button{flex:1 1 46%;padding:11px 8px}
+    button{padding:10px 14px}
+    button.mini{padding:9px 13px;font-size:15px}
+    /* tables → stacked cards; the banner goes full-width and shines */
+    table{display:block}
+    table tr{display:block;padding:12px 2px;border-bottom:1px solid #1d130e}
+    table th{display:none}
+    table td{display:block;border:0;padding:2px 0}
+    td img{width:100%;max-width:420px;height:auto;border-radius:10px;
+           margin-bottom:6px}
+    td:last-child{padding-top:6px}
+    /* day grid: 4 tidy columns */
+    .grid-days{grid-template-columns:repeat(4,1fr);gap:6px}
+    .day{padding:6px 4px}
+    /* user rows wrap their pills onto a second line */
+    .urow{flex-wrap:wrap;padding:8px}
+    .urow .who{flex:1 1 150px}
+    .userlist{max-height:260px}
+    /* picker modal fills the phone nicely */
+    #picker > div{width:94vw;max-height:88vh}
+    #picker .row input{min-width:0;flex:1 1 140px}
+  }
 </style>
 </head>
 <body>
@@ -88,7 +122,7 @@
   <div class="topbar">
     <h1>🌅 Morning Push Console</h1>
     <div class="grow"></div>
-    <div style="min-width:260px">
+    <div class="secretbox">
       <input type="password" id="secret" placeholder="Admin secret">
     </div>
     <button onclick="connect()">Connect</button>
@@ -141,13 +175,17 @@
   </div>
 
   <div class="card" id="daysCard" style="display:none">
-    <h2>Monthly calendar <span class="hint" style="text-transform:none;letter-spacing:0">— click a date to skip it; set a time to override 'default time' for that date</span></h2>
-    <div class="grid-days" id="dayGrid"></div>
+    <h2>Monthly calendar</h2>
+    <details id="daysDetails">
+      <summary>Per-date overrides <span class="hint" id="daysSummary"></span></summary>
+      <div class="hint" style="margin:8px 0 10px">Click a date to skip it; set a time to override 'default time' for that date.</div>
+      <div class="grid-days" id="dayGrid"></div>
+    </details>
   </div>
 
   <div class="card" id="prevCard" style="display:none">
     <h2>Preview &amp; send</h2>
-    <div class="row">
+    <div class="row actions">
       <button class="ghost" onclick="dryRun(false)">Dry-run (templates)</button>
       <button class="ghost" onclick="dryRun(true)">Dry-run (Groq)</button>
       <button onclick="generateDraft(true)">Generate Groq draft</button>
@@ -267,8 +305,6 @@ function renderUsers(){
     const em = (u.email||"").toLowerCase();
     const checked = mode==="emails" ? inc.has(em) : !exc.has(em);
     const noMail = !em;
-    const ov = (lastCfg.overrides||{})[em];
-    const ctx = (lastCfg.userContext||{})[em];
     return `<label class="urow">
       <input type="checkbox" data-em="${em}" ${checked&&!noMail?"checked":""} ${noMail?"disabled":""}>
       <span class="who">${u.name||"(no name)"}
@@ -276,18 +312,35 @@ function renderUsers(){
       <span class="pill">${u.events} plays</span>
       ${u.socialToken?'<span class="pill">social</span>':""}
       ${u.appTokens?'<span class="pill llm">app×'+u.appTokens+"</span>":""}
-      ${ov?`<span class="pill" title="Custom song">🎵 ${ov.song}</span>
-        <button type="button" class="mini" title="Clear custom song"
-          onclick="event.preventDefault();event.stopPropagation();clearOverride('${em}')">✕</button>`
-        :(noMail?"":`<button type="button" class="mini" title="Pick a custom song"
-          onclick="event.preventDefault();event.stopPropagation();openPicker('${em}')">🎵</button>`)}
-      ${noMail?"":`<button type="button" class="mini" title="Groq note for this user"
-          onclick="event.preventDefault();event.stopPropagation();editUserCtx('${em}')">${ctx?"📝✓":"📝"}</button>`}
     </label>`;
   }).join("");
 }
 
-let pickEmail = null, lastDryItems = null;
+let pickEmail = null, lastBatch = null; // {items, llm} currently on screen
+
+function redrawBatch(){
+  if(!lastBatch) return;
+  $("prevTable").innerHTML = itemsTable(lastBatch.items, true);
+}
+// Any single-row change invalidates a stored draft: the screen is now an
+// unsaved batch again — save it to make it sendable.
+function batchEdited(){
+  currentDraftId = null;
+  $("draftActions").style.display = "none";
+  $("dryActions").style.display = lastBatch && lastBatch.items.length ? "flex" : "none";
+}
+async function regenRow(em){
+  if(!lastBatch) return;
+  try{
+    toast(`Re-generating for ${em}…`);
+    const r = await api("/render-one", {method:"POST",
+      body: JSON.stringify({email: em, llm: lastBatch.llm})});
+    const i = lastBatch.items.findIndex(x=>(x.email||"").toLowerCase()===em);
+    if(i >= 0) lastBatch.items[i] = r.item; else lastBatch.items.push(r.item);
+    redrawBatch(); batchEdited();
+    toast(`New line for ${em} — save as draft when happy`);
+  }catch(e){ toast(e.message, true); }
+}
 async function openPicker(em){
   pickEmail = em;
   $("pickWho").textContent = em;
@@ -331,8 +384,9 @@ async function chooseSong(s){
     await api("/config", {method:"POST",
       body: JSON.stringify({overrides: {[pickEmail]: s}})});
     (lastCfg.overrides = lastCfg.overrides || {})[pickEmail] = s;
-    closePicker(); renderUsers();
+    closePicker();
     toast(`Custom song set for ${pickEmail}`);
+    if(lastBatch) regenRow(pickEmail); // refresh their row immediately
   }catch(e){ toast(e.message, true); }
 }
 async function clearOverride(em){
@@ -340,7 +394,8 @@ async function clearOverride(em){
     await api("/config", {method:"POST",
       body: JSON.stringify({overrides: {[em]: null}})});
     if(lastCfg.overrides) delete lastCfg.overrides[em];
-    renderUsers(); toast("Custom song cleared");
+    toast("Custom song cleared");
+    if(lastBatch) regenRow(em);
   }catch(e){ toast(e.message, true); }
 }
 async function editUserCtx(em){
@@ -353,14 +408,15 @@ async function editUserCtx(em){
     lastCfg.userContext = lastCfg.userContext || {};
     if(v.trim()) lastCfg.userContext[em] = v.trim();
     else delete lastCfg.userContext[em];
-    renderUsers(); toast(v.trim() ? "Note saved" : "Note cleared");
+    toast(v.trim() ? "Note saved" : "Note cleared");
+    if(lastBatch && lastBatch.llm) regenRow(em); // notes only affect Groq lines
   }catch(e){ toast(e.message, true); }
 }
 async function saveDryAsDraft(){
-  if(!lastDryItems || !lastDryItems.length) return;
+  if(!lastBatch || !lastBatch.items.length) return;
   try{
     const r = await api("/draft", {method:"POST",
-      body: JSON.stringify({items: lastDryItems})});
+      body: JSON.stringify({items: lastBatch.items})});
     currentDraftId = r.draftId;
     $("dryActions").style.display = "none";
     $("draftActions").style.display = "flex";
@@ -413,6 +469,9 @@ document.addEventListener("change", e=>{
 
 function renderDays(c){
   const days = c.days || {};
+  const n = Object.keys(days).length;
+  $("daysSummary").textContent = n ? `— ${n} date(s) customized` : "— none set, every day at default time";
+  if(n) $("daysDetails").open = true;
   let html = "";
   for(let d=1; d<=31; d++){
     const o = days[String(d)] || {};
@@ -463,16 +522,30 @@ async function saveConfig(){
   }catch(e){ toast(e.message, true); }
 }
 
-function itemsTable(items){
+function itemsTable(items, editable){
   if(!items.length) return "<p class='hint'>No reachable users in the current audience.</p>";
-  return `<table><tr><th></th><th>User</th><th>Pick</th><th>Notification</th><th></th></tr>` +
-    items.map(i=>`<tr>
+  return `<table><tr><th></th><th>User</th><th>Pick</th><th>Notification</th><th></th>${editable?"<th></th>":""}</tr>` +
+    items.map(i=>{
+      const em = (i.email||"").toLowerCase();
+      const ov = (lastCfg.overrides||{})[em];
+      const ctx = (lastCfg.userContext||{})[em];
+      return `<tr>
       <td>${i.image?`<img src="${i.image}" loading="lazy">`:""}</td>
       <td>${i.name}<br><span class="hint">${i.email||i.uid.slice(0,8)}</span></td>
       <td>${i.song?`${i.song}<br><span class="hint">${i.artist}</span>`:"<span class='hint'>—</span>"}</td>
       <td><div class="msg-t">${i.title}</div><div class="msg-b">${i.body}</div></td>
       <td><span class="pill">${i.bucket}·${i.tone}</span>${i.llm?' <span class="pill llm">groq</span>':""}</td>
-    </tr>`).join("") + "</table>";
+      ${editable && em ? `<td style="white-space:nowrap">
+        <button type="button" class="mini" title="Re-generate this user's line only"
+          onclick="regenRow('${em}')">🔄</button>
+        <button type="button" class="mini" title="Pick a custom song for this user"
+          onclick="openPicker('${em}')">🎵</button>
+        ${ov?`<button type="button" class="mini" title="Clear custom song"
+          onclick="clearOverride('${em}')">✕</button>`:""}
+        <button type="button" class="mini" title="Groq note for this user"
+          onclick="editUserCtx('${em}')">${ctx?"📝✓":"📝"}</button>
+      </td>` : (editable?"<td></td>":"")}
+    </tr>`}).join("") + "</table>";
 }
 
 async function dryRun(llm){
@@ -480,10 +553,10 @@ async function dryRun(llm){
     $("prevMeta").textContent = llm ? "Asking Groq to write today's lines…" : "Rendering…";
     const r = await api("/dry-run?llm="+llm);
     currentDraftId = null; $("draftActions").style.display="none";
-    lastDryItems = r.items;
+    lastBatch = {items: r.items, llm};
     $("dryActions").style.display = r.items.length ? "flex" : "none";
-    $("prevMeta").textContent = `Dry-run for ${r.date} — ${r.count} user(s), ${llm?"Groq":"template"} lines. Nothing sent — save it as a draft below to make it sendable.`;
-    $("prevTable").innerHTML = itemsTable(r.items);
+    $("prevMeta").textContent = `Dry-run for ${r.date} — ${r.count} user(s), ${llm?"Groq":"template"} lines. Nothing sent — tweak rows (🔄 🎵 📝), then save as a draft to send.`;
+    redrawBatch();
   }catch(e){ toast(e.message, true); $("prevMeta").textContent=""; }
 }
 
@@ -492,9 +565,10 @@ async function generateDraft(llm){
     $("prevMeta").textContent = llm ? "Generating Groq draft…" : "Generating draft…";
     const r = await api("/generate", {method:"POST", body: JSON.stringify({llm})});
     currentDraftId = r.draftId;
-    lastDryItems = null; $("dryActions").style.display="none";
-    $("prevMeta").textContent = `Draft #${r.draftId} — ${r.count} user(s), ${llm?"Groq":"template"} lines. Review below, then send or discard.`;
-    $("prevTable").innerHTML = itemsTable(r.items);
+    lastBatch = {items: r.items, llm};
+    $("dryActions").style.display="none";
+    $("prevMeta").textContent = `Draft #${r.draftId} — ${r.count} user(s), ${llm?"Groq":"template"} lines. Tweak rows (🔄 🎵 📝) — any change unsaves the draft — then send or discard.`;
+    redrawBatch();
     $("draftActions").style.display="flex";
     $("draftLabel").textContent = `Draft #${r.draftId}`;
     loadDrafts();

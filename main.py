@@ -8030,6 +8030,8 @@ import morning_push
 if not morning_push.GROQ_API_KEY:
     morning_push.GROQ_API_KEY = GROQ_API_KEY
 api.include_router(morning_push.router)
+# Root-level (ungated) banner images — FCM's fetcher can't send API keys.
+app.include_router(morning_push.public_router)
 
 
 @app.on_event("startup")
