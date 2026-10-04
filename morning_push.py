@@ -77,6 +77,12 @@ DEFAULT_CONFIG: dict = {
     "llm": {"enabled": False, "context": "",
             "model": "openai/gpt-oss-120b"},
     "requireApproval": False,
+    # Per-user hand-picked song: {email(lower): {song, artist, videoId,
+    # image}}. Set/cleared from the console; null clears on merge.
+    "overrides": {},
+    # Per-user note fed to Groq alongside the global style context
+    # ("she loves bhajans, keep it respectful"). {email(lower): "text"}.
+    "userContext": {},
     "windowDays": 30,
     "graceMinutes": 120,       # late-boot catch-up window after send time
     # Android notification channel. MUST stay "" until an app release has
@@ -441,7 +447,7 @@ def _parse_line_json(content: str) -> dict | None:
 
 
 async def _groq_line(cfg_llm: dict, name: str, song: str, artist: str,
-                     bucket: str) -> dict | None:
+                     bucket: str, user_ctx: str = "") -> dict | None:
     if not GROQ_API_KEY:
         return None
     context = (cfg_llm.get("context") or "").strip()
@@ -456,7 +462,10 @@ async def _groq_line(cfg_llm: dict, name: str, song: str, artist: str,
     user = (
         f"User first name: {name}. This morning's pick: '{song}' by {artist}. "
         f"Bucket: {bucket} (morning_ritual = they play this most mornings; "
-        f"overall_top = their recent favourite; generic = trending today)."
+        f"overall_top = their recent favourite; generic = trending today; "
+        f"custom = hand-picked specially for them today)."
+        + (f" Note about this user from the admin: {user_ctx.strip()}"
+           if user_ctx.strip() else "")
     )
     model = cfg_llm.get("model") or DEFAULT_GROQ_MODEL
     for attempt_model in dict.fromkeys([model, DEFAULT_GROQ_MODEL]):
@@ -508,17 +517,31 @@ async def build_batch(session, cfg: dict, use_llm: bool) -> list[dict]:
     stats = await _track_stats(session, days)
     trending = await _trending(session, days)
 
+    overrides = {k.lower(): v for k, v in (cfg.get("overrides") or {}).items() if v}
+
     items = []
     for u in audience:
-        tracks = _merge_tracks(stats.get(u["uid"], []))
-        yday = await _yesterday_video(session, u["uid"], date_str)
-        bucket, track = _pick_for_user(tracks, yday, u["uid"], date_str)
-
-        if bucket == "generic":
-            track = trending
-            tone = "trending" if track else "plain"
+        ov = overrides.get((u["email"] or "").lower())
+        if ov and (ov.get("song") or ov.get("videoId")):
+            # Admin hand-picked this user's song in the console. The stored
+            # title is the raw search result — clean it like any other pick.
+            track = {"song": clean_title(ov.get("song"), ov.get("artist")),
+                     "artist": clean_artist(ov.get("artist")),
+                     "videoId": ov.get("videoId") or "",
+                     "thumbnail": ov.get("image") or "",
+                     "devotional": is_devotional(ov.get("song"), ov.get("artist"))}
+            bucket = "custom"
+            tone = "devotional" if track["devotional"] else "regular"
         else:
-            tone = "devotional" if track and track["devotional"] else "regular"
+            tracks = _merge_tracks(stats.get(u["uid"], []))
+            yday = await _yesterday_video(session, u["uid"], date_str)
+            bucket, track = _pick_for_user(tracks, yday, u["uid"], date_str)
+
+            if bucket == "generic":
+                track = trending
+                tone = "trending" if track else "plain"
+            else:
+                tone = "devotional" if track and track["devotional"] else "regular"
 
         slots = {"name": u["name"],
                  "song": track["song"] if track else "",
@@ -528,11 +551,16 @@ async def build_batch(session, cfg: dict, use_llm: bool) -> list[dict]:
         llm_used = False
         # Devotional picks never go through the LLM — curated pool only.
         if use_llm and track and tone not in ("devotional",):
+            user_ctx = ((cfg.get("userContext") or {})
+                        .get((u["email"] or "").lower()) or "")
             line = await _groq_line(cfg.get("llm") or {}, u["name"],
-                                    track["song"], track["artist"], bucket)
+                                    track["song"], track["artist"], bucket,
+                                    user_ctx)
             llm_used = line is not None
         if line is None:
-            line = _render_line(lines, bucket, tone, u["uid"], date_str, slots)
+            # Custom picks render from the most personal pool.
+            render_bucket = "morning_ritual" if bucket == "custom" else bucket
+            line = _render_line(lines, render_bucket, tone, u["uid"], date_str, slots)
 
         items.append({
             "uid": u["uid"], "email": u["email"], "name": u["name"],
@@ -573,26 +601,29 @@ def _fcm_message(token: str, item: dict, channel_id: str | None) -> messaging.Me
     )
 
 
-async def send_batch(session, items: list[dict]) -> dict:
+async def send_batch(session, items: list[dict], force: bool = False) -> dict:
+    """`force` skips the once-per-user-per-day guard — admin testing only;
+    the scheduler never passes it."""
     loop = asyncio.get_running_loop()
     cfg = await load_config(session)
     channel_id = (cfg.get("channelId") or "").strip() or None
     sent = failed = skipped = 0
     for item in items:
         # Per-day dedupe at send time too (draft may be approved late).
-        already = (
-            await session.execute(
-                sql_text(
-                    "SELECT 1 FROM morning_push_log "
-                    "WHERE user_id = :u AND sent_date = :d AND status = 'sent' "
-                    "LIMIT 1"
-                ),
-                {"u": item["uid"], "d": item["date"]},
-            )
-        ).scalar()
-        if already:
-            skipped += 1
-            continue
+        if not force:
+            already = (
+                await session.execute(
+                    sql_text(
+                        "SELECT 1 FROM morning_push_log "
+                        "WHERE user_id = :u AND sent_date = :d AND status = 'sent' "
+                        "LIMIT 1"
+                    ),
+                    {"u": item["uid"], "d": item["date"]},
+                )
+            ).scalar()
+            if already:
+                skipped += 1
+                continue
 
         # New authed store (5.18.4+, carries opt-out) ∪ the social-path
         # token every signed-in install already registers (users.fcm_token).
@@ -856,6 +887,11 @@ async def mp_set_config(request: Request, session=Depends(get_session)):
         raise HTTPException(status_code=400, detail="expected object")
     current = await load_config(session)
     merged = _merge_config(current, body)
+    # A null override/note means "clear it for this user".
+    if isinstance(merged.get("overrides"), dict):
+        merged["overrides"] = {k: v for k, v in merged["overrides"].items() if v}
+    if isinstance(merged.get("userContext"), dict):
+        merged["userContext"] = {k: v for k, v in merged["userContext"].items() if v}
     await _kv_set(session, CONFIG_KEY, merged)
     return {"ok": True, "config": merged}
 
@@ -928,6 +964,77 @@ async def mp_generate(request: Request, session=Depends(get_session)):
             "count": len(items), "items": items}
 
 
+@router.get("/admin/morning-push/user-songs")
+async def mp_user_songs(request: Request, email: str, days: int = 365,
+                        session=Depends(get_session)):
+    """One user's listening library, merged by cleaned title+artist and
+    sorted by play count — feeds the console's custom-song picker."""
+    _require_admin(request)
+    days = max(1, min(days, 730))
+    rows = (
+        await session.execute(
+            sql_text(
+                """
+                SELECT e.video_id,
+                       MAX(e.title) AS title, MAX(e.uploader) AS uploader,
+                       MAX(e.thumbnail) AS thumbnail, COUNT(*) AS plays,
+                       COUNT(*) FILTER (
+                           WHERE EXTRACT(HOUR FROM e.played_at AT TIME ZONE 'Asia/Kolkata')
+                                 BETWEEN 6 AND 10
+                       ) AS morning_plays
+                FROM user_listen_events e
+                JOIN users u ON u.id = e.user_id
+                WHERE lower(u.email) = lower(:email)
+                  AND e.played_at >= now() - make_interval(days => :days)
+                GROUP BY e.video_id
+                """
+            ),
+            {"email": email, "days": days},
+        )
+    ).all()
+    merged = _merge_tracks(rows)
+    merged.sort(key=lambda t: -t["plays"])
+    return {"items": [
+        {"song": t["song"], "artist": t["artist"], "videoId": t["videoId"],
+         "image": t["thumbnail"], "plays": t["plays"], "morning": t["morning"]}
+        for t in merged[:60]
+    ]}
+
+
+@router.post("/admin/morning-push/draft")
+async def mp_create_draft(request: Request, session=Depends(get_session)):
+    """Store an already-rendered batch (e.g. a dry-run the admin liked) as a
+    sendable draft — what was previewed is exactly what goes out."""
+    _require_admin(request)
+    try:
+        body = await request.json()
+    except Exception:
+        raise HTTPException(status_code=400, detail="bad json")
+    items = body.get("items")
+    if not isinstance(items, list) or not items:
+        raise HTTPException(status_code=400, detail="expected {\"items\": [...]}")
+    date_str = datetime.now(IST).strftime("%Y-%m-%d")
+    for it in items:
+        if not (isinstance(it, dict) and it.get("uid")
+                and it.get("title") and it.get("body")):
+            raise HTTPException(
+                status_code=400,
+                detail="each item needs at least uid, title, body",
+            )
+        it.setdefault("date", date_str)
+    draft_id = (
+        await session.execute(
+            sql_text(
+                "INSERT INTO morning_push_drafts (status, payload, created_at) "
+                "VALUES ('pending', :p, now()) RETURNING id"
+            ),
+            {"p": json.dumps(items, ensure_ascii=False)},
+        )
+    ).scalar()
+    await session.commit()
+    return {"ok": True, "draftId": draft_id, "count": len(items)}
+
+
 @router.get("/admin/morning-push/drafts")
 async def mp_drafts(request: Request, session=Depends(get_session)):
     _require_admin(request)
@@ -959,11 +1066,12 @@ async def mp_send(request: Request, session=Depends(get_session)):
     except Exception:
         raise HTTPException(status_code=400, detail="bad json")
 
+    force = bool(body.get("force"))
     if body.get("direct"):
         cfg = await load_config(session)
         items = await build_batch(session, cfg, use_llm=bool(body.get("llm")))
-        summary = await send_batch(session, items)
-        return {"ok": True, "mode": "direct", **summary}
+        summary = await send_batch(session, items, force=force)
+        return {"ok": True, "mode": "direct", "force": force, **summary}
 
     draft_id = body.get("draftId")
     if not draft_id:
@@ -982,7 +1090,7 @@ async def mp_send(request: Request, session=Depends(get_session)):
     if row.status != "pending":
         raise HTTPException(status_code=409, detail=f"draft is '{row.status}'")
     items = json.loads(row.payload or "[]")
-    summary = await send_batch(session, items)
+    summary = await send_batch(session, items, force=force)
     await session.execute(
         sql_text("UPDATE morning_push_drafts SET status = 'sent' WHERE id = :i"),
         {"i": int(draft_id)},
