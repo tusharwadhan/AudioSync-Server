@@ -232,19 +232,18 @@ class RoomListResponse(BaseModel):
 
 # App update configuration - modify these values to control updates
 APP_UPDATE_CONFIG = {
-    "latestVersion": "5.18.3",
-    "latestVersionCode": 86,
-    "apkUrl": "https://raw.githubusercontent.com/tusharwadhan/AudioSync-Server/tushar/releases/syncaura-5.18.3.apk",
-    "releaseNotes": "New: Video mode. A live mini preview of the music video appears on the album art - tap it to watch the video right in the player. Pick quality on the fly, go fullscreen with the expand button or by rotating your phone, and see synced lyrics over fullscreen video. Video stays on across songs until you turn it off.",
-    # Patch-level bump (5.18.2 → 5.18.3) → the client classifier routes
-    # this to the Minor tier (quiet card in Settings, red dot on the
-    # home gear). `mandatoryBelow` is effectively ignored for Minor.
+    "latestVersion": "5.19.0",
+    "latestVersionCode": 87,
+    "apkUrl": "https://raw.githubusercontent.com/tusharwadhan/AudioSync-Server/tushar/releases/syncaura-5.19.0.apk",
+    "releaseNotes": "Watch your music 🎬 Live previews in the album art, video mode on tap, fullscreen on rotate — with synced lyrics floating on top.",
+    # Minor-version jump (5.18.x → 5.19.0) → the client classifier routes
+    # this to the MAJOR tier (full update sheet) — the video suite's
+    # public launch deserves the prominent treatment.
     "mandatoryBelow": 41,
     "isEmergency": False,
-    # 5.18.3 is a COHORT build (video-suite test): offered only to these
-    # two accounts. Empty the list (or call /admin/set-target-emails)
-    # when this goes public.
-    "targetEmails": ["tushar.code05@gmail.com", "sushil3994kumar@gmail.com"],
+    # PUBLIC release: empty list = offered to every account. (5.18.3 was
+    # the 2-account cohort test of the same video suite.)
+    "targetEmails": [],
 }
 
 
