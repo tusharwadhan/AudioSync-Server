@@ -51,7 +51,6 @@ from fastapi import APIRouter, Depends, HTTPException, Request
 from firebase_admin import messaging
 from sqlalchemy import text as sql_text
 
-import models
 from auth import AuthedUser, get_current_user
 from db import get_session, try_session_factory
 
@@ -77,6 +76,11 @@ DEFAULT_CONFIG: dict = {
     "requireApproval": False,
     "windowDays": 30,
     "graceMinutes": 120,       # late-boot catch-up window after send time
+    # Android notification channel. MUST stay "" until an app release has
+    # created the channel — Android 8+ silently DROPS notifications aimed
+    # at a channel the app never created. "" = FCM SDK fallback channel,
+    # which displays on every current install.
+    "channelId": "",
 }
 
 # Factory-default line pool. Seeded into app_config on first read; the live
@@ -256,12 +260,17 @@ async def load_lines(session) -> dict:
 # ── picker ───────────────────────────────────────────────────────────────
 
 async def _audience(session, cfg: dict) -> list[dict]:
+    # Reachable = has the social-path token (users.fcm_token — registered on
+    # every signed-in app open since the DM-push feature) OR a row in the new
+    # authed store (5.18.4+, carries the in-app opt-out). Legacy users
+    # opt out via audience.exclude until their app has the toggle.
     rows = (
         await session.execute(
             sql_text(
-                "SELECT DISTINCT u.id, u.email, u.display_name "
-                "FROM users u JOIN user_fcm_tokens t "
-                "ON t.user_id = u.id AND t.enabled"
+                "SELECT DISTINCT u.id, u.email, u.display_name FROM users u "
+                "WHERE u.fcm_token IS NOT NULL "
+                "   OR EXISTS (SELECT 1 FROM user_fcm_tokens t "
+                "              WHERE t.user_id = u.id AND t.enabled)"
             )
         )
     ).all()
@@ -502,10 +511,15 @@ async def build_batch(session, cfg: dict, use_llm: bool) -> list[dict]:
     return items
 
 
-def _fcm_message(token: str, item: dict) -> messaging.Message:
+def _fcm_message(token: str, item: dict, channel_id: str | None) -> messaging.Message:
     image = item.get("image") or None
     if image and not image.startswith("https://"):
         image = None
+    android_notif = messaging.AndroidNotification(image=image)
+    if channel_id:
+        android_notif = messaging.AndroidNotification(
+            channel_id=channel_id, image=image,
+        )
     return messaging.Message(
         token=token,
         notification=messaging.Notification(
@@ -519,15 +533,15 @@ def _fcm_message(token: str, item: dict) -> messaging.Message:
         },
         android=messaging.AndroidConfig(
             priority="high",
-            notification=messaging.AndroidNotification(
-                channel_id="morning_picks", image=image,
-            ),
+            notification=android_notif,
         ),
     )
 
 
 async def send_batch(session, items: list[dict]) -> dict:
     loop = asyncio.get_running_loop()
+    cfg = await load_config(session)
+    channel_id = (cfg.get("channelId") or "").strip() or None
     sent = failed = skipped = 0
     for item in items:
         # Per-day dedupe at send time too (draft may be approved late).
@@ -545,15 +559,27 @@ async def send_batch(session, items: list[dict]) -> dict:
             skipped += 1
             continue
 
-        tokens = (
+        # New authed store (5.18.4+, carries opt-out) ∪ the social-path
+        # token every signed-in install already registers (users.fcm_token).
+        tokens = set(
+            (
+                await session.execute(
+                    sql_text(
+                        "SELECT token FROM user_fcm_tokens "
+                        "WHERE user_id = :u AND enabled"
+                    ),
+                    {"u": item["uid"]},
+                )
+            ).scalars().all()
+        )
+        legacy = (
             await session.execute(
-                sql_text(
-                    "SELECT token FROM user_fcm_tokens "
-                    "WHERE user_id = :u AND enabled"
-                ),
+                sql_text("SELECT fcm_token FROM users WHERE id = :u"),
                 {"u": item["uid"]},
             )
-        ).scalars().all()
+        ).scalar()
+        if legacy:
+            tokens.add(legacy)
         if not tokens:
             skipped += 1
             continue
@@ -562,7 +588,7 @@ async def send_batch(session, items: list[dict]) -> dict:
         last_err = ""
         for token in tokens:
             try:
-                msg = _fcm_message(token, item)
+                msg = _fcm_message(token, item, channel_id)
                 await loop.run_in_executor(_FCM_POOL, messaging.send, msg)
                 ok += 1
             except Exception as e:
@@ -574,6 +600,14 @@ async def send_batch(session, items: list[dict]) -> dict:
                     await session.execute(
                         sql_text("DELETE FROM user_fcm_tokens WHERE token = :t"),
                         {"t": token},
+                    )
+                    await session.execute(
+                        sql_text(
+                            "UPDATE users SET fcm_token = NULL, "
+                            "fcm_token_updated_at = NULL "
+                            "WHERE id = :u AND fcm_token = :t"
+                        ),
+                        {"u": item["uid"], "t": token},
                     )
 
         status = "sent" if ok else f"failed:{last_err or 'no-delivery'}"
@@ -745,8 +779,16 @@ async def mp_status(request: Request, session=Depends(get_session)):
     tokens = (await session.execute(
         sql_text("SELECT COUNT(*) FROM user_fcm_tokens WHERE enabled")
     )).scalar()
+    legacy = (await session.execute(
+        sql_text("SELECT COUNT(*) FROM users WHERE fcm_token IS NOT NULL")
+    )).scalar()
     users = (await session.execute(
-        sql_text("SELECT COUNT(DISTINCT user_id) FROM user_fcm_tokens WHERE enabled")
+        sql_text(
+            "SELECT COUNT(*) FROM users u "
+            "WHERE u.fcm_token IS NOT NULL "
+            "   OR EXISTS (SELECT 1 FROM user_fcm_tokens t "
+            "              WHERE t.user_id = u.id AND t.enabled)"
+        )
     )).scalar()
     today = (await session.execute(
         sql_text("SELECT COUNT(*) FROM morning_push_log WHERE sent_date = :d"),
@@ -756,7 +798,8 @@ async def mp_status(request: Request, session=Depends(get_session)):
         sql_text("SELECT COUNT(*) FROM morning_push_drafts WHERE status = 'pending'")
     )).scalar()
     return {"config": cfg, "istNow": datetime.now(IST).isoformat(),
-            "enabledTokens": tokens, "reachableUsers": users,
+            "enabledTokens": tokens, "legacySocialTokens": legacy,
+            "reachableUsers": users,
             "sentToday": today, "pendingDrafts": pending,
             "groqConfigured": bool(GROQ_API_KEY), "lastError": _last_error}
 
