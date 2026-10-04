@@ -504,11 +504,14 @@ def _merge_tracks(rows: list) -> list[dict]:
                 "song": song, "artist": artist, "videoId": r.video_id,
                 "thumbnail": r.thumbnail or "", "plays": r.plays,
                 "morning": r.morning_plays, "bestPlays": r.plays,
+                "listeners": getattr(r, "listeners", 0),
                 "devotional": is_devotional(r.title, r.uploader),
             }
         else:
             m["plays"] += r.plays
             m["morning"] += r.morning_plays
+            # Same user may sit in both videoId variants — max, not sum.
+            m["listeners"] = max(m["listeners"], getattr(r, "listeners", 0))
             if r.plays > m["bestPlays"]:
                 m["bestPlays"] = r.plays
                 m["videoId"] = r.video_id
@@ -517,23 +520,29 @@ def _merge_tracks(rows: list) -> list[dict]:
 
 
 async def _trending(session, days: int) -> dict | None:
+    """Trending = most DISTINCT listeners, then plays. Raw play counts let
+    one superfan looping a song make it 'trending' for everyone (11K was
+    the global pick off a single user's 28 plays)."""
     rows = (
         await session.execute(
             sql_text(
                 """
                 SELECT video_id, MAX(title) AS title, MAX(uploader) AS uploader,
                        MAX(thumbnail) AS thumbnail, COUNT(*) AS plays,
+                       COUNT(DISTINCT user_id) AS listeners,
                        0 AS morning_plays
                 FROM user_listen_events
                 WHERE played_at >= now() - make_interval(days => :days)
-                GROUP BY video_id ORDER BY COUNT(*) DESC LIMIT 5
+                GROUP BY video_id
+                ORDER BY COUNT(DISTINCT user_id) DESC, COUNT(*) DESC
+                LIMIT 8
                 """
             ),
             {"days": days},
         )
     ).all()
     merged = _merge_tracks(rows)
-    merged.sort(key=lambda t: -t["plays"])
+    merged.sort(key=lambda t: (-t.get("listeners", 0), -t["plays"]))
     return merged[0] if merged else None
 
 
