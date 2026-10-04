@@ -7422,7 +7422,11 @@ async def transliterate_to_roman(text: str) -> str:
                     "Content-Type": "application/json",
                 },
                 json={
-                    "model": "llama-3.1-8b-instant",
+                    # llama-3.x chat models were retired from Groq (404 as of
+                    # 2026-10); gpt-oss is the current catalog. Reasoning
+                    # models spend tokens thinking, hence the higher cap.
+                    "model": "openai/gpt-oss-20b",
+                    "reasoning_effort": "low",
                     "messages": [
                         {
                             "role": "system",
@@ -7431,7 +7435,7 @@ async def transliterate_to_roman(text: str) -> str:
                         {"role": "user", "content": text},
                     ],
                     "temperature": 0.1,
-                    "max_tokens": 200,
+                    "max_tokens": 500,
                 },
             )
             if resp.status_code == 200:
@@ -7541,7 +7545,9 @@ async def generate_teasing_line(song: str, artist: str, lyrics: str = "") -> str
                     "Content-Type": "application/json",
                 },
                 json={
-                    "model": "llama-3.3-70b-versatile",
+                    # llama-3.x retired from Groq (404 as of 2026-10).
+                    "model": "openai/gpt-oss-120b",
+                    "reasoning_effort": "low",
                     "messages": [
                         {
                             "role": "system",
@@ -7568,7 +7574,9 @@ Write ONLY the teasing line, nothing else.""",
                         },
                     ],
                     "temperature": 0.85,
-                    "max_tokens": 50,
+                    # Reasoning model: the cap covers thinking + answer; 50
+                    # would starve it mid-thought and return empty content.
+                    "max_tokens": 400,
                 },
             )
             if resp.status_code == 200:

@@ -123,6 +123,8 @@
     <div class="row" style="margin-top:10px">
       <div class="field"><label>Groq style context (seeds every generated line)</label>
         <textarea id="llmContext" placeholder="e.g. Friendly desi tone, light humor, max one emoji, never cheesy…"></textarea></div>
+      <div class="field" style="max-width:230px"><label>Groq model</label>
+        <input type="text" id="llmModel" placeholder="openai/gpt-oss-120b"></div>
     </div>
     <div class="row" style="margin-top:10px;align-items:flex-end">
       <div class="field" style="max-width:220px"><label>Notification channel id</label>
@@ -291,6 +293,7 @@ function fillConfig(c){
   $("windowDays").value = c.windowDays ?? 30;
   $("audMode").value = (c.audience||{}).mode || "all";
   $("llmContext").value = (c.llm||{}).context || "";
+  $("llmModel").value = (c.llm||{}).model || "";
   $("channelId").value = c.channelId || "";
 }
 document.addEventListener("change", e=>{
@@ -338,7 +341,8 @@ async function saveConfig(){
       channelId: $("channelId").value.trim(),
       days: collectDays(),
       audience: collectAudience(),
-      llm: {enabled: isOn("swLlm"), context: $("llmContext").value.trim()},
+      llm: {enabled: isOn("swLlm"), context: $("llmContext").value.trim(),
+            model: $("llmModel").value.trim() || "openai/gpt-oss-120b"},
     };
     await api("/config", {method:"POST", body: JSON.stringify(body)});
     lastCfg = {...lastCfg, ...body};

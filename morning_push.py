@@ -75,7 +75,7 @@ DEFAULT_CONFIG: dict = {
     "days": {},                # "1".."31" → {"enabled": bool, "time": "HH:MM"}
     "audience": {"mode": "all", "emails": [], "exclude": []},
     "llm": {"enabled": False, "context": "",
-            "model": "llama-3.3-70b-versatile"},
+            "model": "openai/gpt-oss-120b"},
     "requireApproval": False,
     "windowDays": 30,
     "graceMinutes": 120,       # late-boot catch-up window after send time
@@ -421,6 +421,25 @@ def _render_line(lines: dict, bucket: str, tone: str,
 
 # ── Groq line generation ─────────────────────────────────────────────────
 
+# Current Groq catalog default (llama-3.x chat models 404 since ~2026-10).
+DEFAULT_GROQ_MODEL = "openai/gpt-oss-120b"
+
+
+def _parse_line_json(content: str) -> dict | None:
+    content = re.sub(r"^```(json)?|```$", "", content.strip(),
+                     flags=re.MULTILINE).strip()
+    try:
+        return json.loads(content)
+    except Exception:
+        m = re.search(r"\{.*\}", content, re.DOTALL)
+        if m:
+            try:
+                return json.loads(m.group(0))
+            except Exception:
+                pass
+    return None
+
+
 async def _groq_line(cfg_llm: dict, name: str, song: str, artist: str,
                      bucket: str) -> dict | None:
     if not GROQ_API_KEY:
@@ -439,30 +458,43 @@ async def _groq_line(cfg_llm: dict, name: str, song: str, artist: str,
         f"Bucket: {bucket} (morning_ritual = they play this most mornings; "
         f"overall_top = their recent favourite; generic = trending today)."
     )
-    try:
-        async with httpx.AsyncClient(timeout=20) as client:
-            resp = await client.post(
-                GROQ_URL,
-                headers={"Authorization": f"Bearer {GROQ_API_KEY}"},
-                json={
-                    "model": cfg_llm.get("model") or "llama-3.3-70b-versatile",
-                    "messages": [{"role": "system", "content": system},
-                                 {"role": "user", "content": user}],
-                    "temperature": 0.9,
-                    "max_tokens": 150,
-                },
-            )
-            resp.raise_for_status()
-            content = resp.json()["choices"][0]["message"]["content"].strip()
-            content = re.sub(r"^```(json)?|```$", "", content,
-                             flags=re.MULTILINE).strip()
-            out = json.loads(content)
-            title = str(out.get("title") or "").strip()[:64]
-            body = str(out.get("body") or "").strip()[:120]
-            if title and body:
-                return {"title": title, "body": body}
-    except Exception as e:
-        _log(f"groq generation failed: {type(e).__name__}: {e}")
+    model = cfg_llm.get("model") or DEFAULT_GROQ_MODEL
+    for attempt_model in dict.fromkeys([model, DEFAULT_GROQ_MODEL]):
+        try:
+            payload = {
+                "model": attempt_model,
+                "messages": [{"role": "system", "content": system},
+                             {"role": "user", "content": user}],
+                "temperature": 0.9,
+                # Reasoning models (gpt-oss) spend tokens thinking before
+                # the answer; a tight cap starves them into empty content.
+                "max_tokens": 400,
+            }
+            if attempt_model.startswith("openai/gpt-oss"):
+                payload["reasoning_effort"] = "low"
+            async with httpx.AsyncClient(timeout=25) as client:
+                resp = await client.post(
+                    GROQ_URL,
+                    headers={"Authorization": f"Bearer {GROQ_API_KEY}"},
+                    json=payload,
+                )
+                resp.raise_for_status()
+                content = resp.json()["choices"][0]["message"]["content"] or ""
+                out = _parse_line_json(content)
+                if out:
+                    title = str(out.get("title") or "").strip()[:64]
+                    body = str(out.get("body") or "").strip()[:120]
+                    if title and body:
+                        return {"title": title, "body": body}
+                _log(f"groq returned unparseable content via {attempt_model}")
+        except httpx.HTTPStatusError as e:
+            _log(f"groq generation failed ({attempt_model}): "
+                 f"{e.response.status_code} — "
+                 f"{'retrying with default model' if attempt_model != DEFAULT_GROQ_MODEL else 'giving up'}")
+            continue  # 404 = retired model; next loop tries the default
+        except Exception as e:
+            _log(f"groq generation failed: {type(e).__name__}: {e}")
+            break
     return None
 
 
