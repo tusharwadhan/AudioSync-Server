@@ -74,5 +74,5 @@ else
   echo "[Migrate] DATABASE_URL not set — skipping migrations (DB endpoints will fail)."
 fi
 
-echo "[App] Launching uvicorn on port ${PORT:-8000}"
-exec uvicorn main:app --host 0.0.0.0 --port "${PORT:-8000}"
+echo "[App] Launching uvicorn on port ${PORT:-8000} (via serve.py — ws pong enforcement OFF, see serve.py)"
+exec python serve.py

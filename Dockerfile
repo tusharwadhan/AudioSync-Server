@@ -21,6 +21,10 @@ RUN pip install --no-cache-dir -r requirements.txt
 
 # App code
 COPY main.py .
+# Production entrypoint — start.sh execs `python serve.py`. Missing this
+# COPY is not a degraded feature, it is a crash-loop at boot that takes
+# the whole API down (same failure class as control_session.py below).
+COPY serve.py .
 COPY room_manager.py .
 COPY analytics_db.py .
 COPY config.json .

@@ -401,8 +401,14 @@ class RoomManager:
         room.peak_members = max(room.peak_members, len(room.members))
         return room, was_host, displaced_id, displaced_was_live
 
-    def cleanup_stale_disconnects(self, max_age: float = 60.0) -> list:
-        """Remove pending disconnects older than max_age seconds. Returns stale client_ids."""
+    def cleanup_stale_disconnects(self, max_age: float = 180.0) -> list:
+        """Remove pending disconnects older than max_age seconds. Returns stale client_ids.
+
+        max_age MUST exceed main.MEMBER_GRACE_SECONDS (120): this sweep nulls
+        host_id for aged pending disconnects, and running it inside the grace
+        window would strip a frozen host's role while their seat is still
+        being held for them (next joiner would be auto-promoted host, and the
+        real host's rejoin lands as a conflict)."""
         now = time.time()
         stale = [cid for cid, info in self._pending_disconnects.items()
                  if now - info["time"] > max_age]

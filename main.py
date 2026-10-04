@@ -509,11 +509,16 @@ async def wake_after_disconnect(client_id: str, room_code: str):
       3. Each attempt requires the member to still be in the roster flagged
          `reconnecting`; leaving mid-grace drops them from the roster.
     """
-    # Last retry at 15s, not 20s: the HOST's room is destroyed at 30s, and the
-    # client needs FCM delivery + process start + WS connect + a 2s rejoin
-    # delay after that. A 20s push left almost no budget for the case this
-    # feature most wants to save. All three stay inside the 45s member grace.
-    for delay in (0, 5, 15):
+    # Ladder sized to the grace windows (member grace and host destroy are
+    # both 120s now): the early rungs catch a process that is still being
+    # torn down or briefly dozed; the 45/90s rungs exist because FCM
+    # delivery to an idle ColorOS device is routinely deferred — without
+    # them, a phone the first three pushes missed had 105 silent seconds
+    # in which NOTHING paged it and the grace just ran out. Every rung
+    # needs FCM delivery + process start + WS connect + a 2s rejoin delay,
+    # so the last one fires at 90s, not later. The 5s per-token throttle
+    # (_last_wake_at) keeps quota use bounded.
+    for delay in (0, 5, 15, 45, 90):
         if delay:
             # No try/except: CancelledError must propagate so a kick/leave can
             # actually stop the retries and shutdown isn't silently swallowed.
@@ -1303,6 +1308,75 @@ async def startup_analytics_cleanup():
             await analytics.cleanup_old_data()
 
     asyncio.create_task(_cleanup_loop())
+
+
+# ── Room socket keepalive ────────────────────────────────────────────
+# MEASURED on production (2026-10-04 probes): Render's proxy kills any
+# connection with no DATA frames for ~300s regardless of WS protocol
+# ping/pong traffic (two silent probe clients, one auto-ponging and one
+# not, both died at ~305s with close 1006). Live phones survive via
+# their own 60s JSON ping, but a phone FROZEN by its OEM (ColorOS,
+# screen off) sends nothing; its TCP socket is still healthy (the
+# kernel ACKs while the app is frozen), so a server-side data frame
+# every 40s keeps the proxy fed and the socket alive until the app
+# thaws — the disconnect simply never happens. Shipped 5.18.x clients
+# ignore unknown message types, so "ka" needs no app update.
+# serve.py's ws_ping_timeout=None is the insurance half: the pinned
+# uvicorn/websockets pair never kills on a missed pong (a frozen app
+# cannot pong — pongs are app-level, not kernel), so no future quiet
+# dependency bump can reintroduce a pong-enforcement kill.
+#
+# ACCEPTED TRADE (reviewed): with pong-kills off, a phone that dies
+# WITHOUT closing (battery death) lingers as a normal-looking roster
+# member until the proxy's TCP retransmits give up (~15-30 min) and the
+# receive loop fails into the grace path. Frozen-healthy and dead are
+# indistinguishable from rx-silence; any horizon short enough to catch
+# the dead would also kill the frozen phones this exists to save.
+KA_INTERVAL_SECONDS = 40
+
+
+async def _ka_force_close(ws):
+    """Last resort for a wedged transport: close it so its own receive
+    loop fails and routes through the normal grace/wake machinery."""
+    try:
+        await asyncio.wait_for(ws.close(), timeout=5)
+    except Exception:
+        pass
+
+
+@app.on_event("startup")
+async def startup_room_keepalive():
+    async def _ka_loop():
+        while True:
+            await asyncio.sleep(KA_INTERVAL_SECONDS)
+            try:
+                for room in list(room_manager.rooms.values()):
+                    for member in list(room.members.values()):
+                        if member.reconnecting:
+                            continue   # no live socket to feed
+                        # ws_send swallows ERRORS on purpose (a dead
+                        # socket must be noticed by the endpoint's own
+                        # receive loop → grace machinery, never reaped
+                        # abruptly here) — but a send can also HANG:
+                        # a black-holed peer pauses the transport and
+                        # send awaits drain(). One wedged socket must
+                        # not stall the sweep for every room, so the
+                        # hang gets a timeout and the wedged socket a
+                        # fire-and-forget close (which lands it in the
+                        # grace path via its receive loop).
+                        try:
+                            await asyncio.wait_for(
+                                ws_send(member.websocket, {"type": "ka"}),
+                                timeout=10,
+                            )
+                        except asyncio.TimeoutError:
+                            print(f"[KA] wedged socket for {member.client_id[:8]} — closing it")
+                            asyncio.create_task(_ka_force_close(member.websocket))
+            except Exception as e:
+                # The loop must outlive any single bad room or socket.
+                print(f"[KA] keepalive sweep error: {e}")
+
+    asyncio.create_task(_ka_loop())
 
 
 @app.on_event("startup")
@@ -4152,6 +4226,35 @@ async def handle_join_room(client_id: str, websocket: WebSocket, msg: dict):
     name = msg.get("name", "Unknown")
     room, promoted = room_manager.join_room(code, client_id, websocket, name=name)
     role = "host" if promoted else "guest"
+
+    # Ghost dedupe: if this DEVICE (same FCM token — registered on every
+    # socket open, so it precedes the join) already holds a reconnecting
+    # seat in this room under an older client_id, the "newcomer" is that
+    # very member returning through the front door instead of rejoin_room.
+    # Without this, the roster shows the same person twice for the whole
+    # grace window (field-reported). Remove the ghost silently: its grace
+    # and wake tasks are cancelled, and the member_joined broadcast below
+    # carries the already-corrected roster. Secret-based rejoins are
+    # unaffected — they displace their ghost inside rejoin_room itself.
+    _token = _fcm_tokens.get(client_id)
+    if _token:
+        for _mid, _ghost in list(room.members.items()):
+            if (
+                _mid != client_id
+                and _ghost.reconnecting
+                and _fcm_tokens.get(_mid) == _token
+            ):
+                room.members.pop(_mid, None)
+                room_manager._client_to_room.pop(_mid, None)
+                room_manager._pending_disconnects.pop(_mid, None)
+                _gt = _disconnect_grace_tasks.pop(_mid, None)
+                if _gt:
+                    _gt.cancel()
+                _wt = _wake_tasks.pop(_mid, None)
+                if _wt:
+                    _wt.cancel()
+                print(f"[WS] {code}: deduped ghost {_mid[:8]} (same device as joiner {client_id[:8]})")
+
     print(
         f"[WS] {client_id[:8]} ({name}) joined room {code} as {role} ({len(room.members)} members)"
     )
@@ -5241,7 +5344,16 @@ async def handle_leave(client_id: str):
 # broadcast this long; handle_rejoin_room cancels it on a within-grace rejoin
 # and stays silent. Only if the member is still gone at expiry do we announce
 # the leave. Kills the flapping that a 2-second network hiccup used to cause.
-MEMBER_GRACE_SECONDS = 45
+# 45 → 120 (2026-10): the screen-off kill chain (OEM freeze → missed pongs)
+# plus FCM wake latency routinely landed rejoins just past 45s, turning every
+# screen-off into a visible leave/join. 120s covers the wake ladder with room
+# to spare; the roster meanwhile shows the member as reconnecting, not gone.
+MEMBER_GRACE_SECONDS = 120
+# Host disconnects arm room destruction after THIS long. Was 30s — combined
+# with the ~40s frozen-phone socket kill, a host turning their screen off
+# could destroy the whole room in ~70s. Must be ≥ MEMBER_GRACE_SECONDS or
+# the room dies while its own host is still inside the member grace.
+HOST_DESTROY_GRACE_SECONDS = 120
 _disconnect_grace_tasks: dict[str, "asyncio.Task"] = {}   # disconnected client_id -> pending leave task
 
 
@@ -5306,7 +5418,9 @@ async def handle_disconnect(client_id: str):
         # Host gone: existing behavior destroys the room after its own grace and
         # sends room_closed, which supersedes the deferred member_left (which
         # then no-ops because the room is gone).
-        asyncio.create_task(destroy_room_after_grace(client_id, code, 30))
+        asyncio.create_task(
+            destroy_room_after_grace(client_id, code, HOST_DESTROY_GRACE_SECONDS)
+        )
 
 
 async def member_left_after_grace(client_id: str, code: str, delay: int):
@@ -6748,9 +6862,22 @@ async def websocket_endpoint(websocket: WebSocket):
     analytics.log_event("ws_connect", client_id=client_id)
     await ws_send(websocket, {"type": "connected", "clientId": client_id})
 
+    # Disconnect forensics: close code + how long since the client last
+    # SENT anything. Signature readout (probe-calibrated 2026-10-04):
+    # code 1006 with last_rx_age near 300s = Render's data-idle kill (the
+    # frozen-phone screen-off class — should disappear for room members
+    # once the 40s "ka" frames flow, IF Render credits server→client
+    # data; if it only counts inbound, these persist and the grace+wake
+    # path is the net). Code 1011 at any age would mean a uvicorn
+    # keepalive kill — never observed on current prod, and serve.py's
+    # ws_ping_timeout=None keeps it that way.
+    connected_at = time.monotonic()
+    last_rx = connected_at
+
     try:
         while True:
             raw = await websocket.receive_text()
+            last_rx = time.monotonic()
             try:
                 msg = json.loads(raw)
             except json.JSONDecodeError:
@@ -7027,12 +7154,20 @@ async def websocket_endpoint(websocket: WebSocket):
                     except Exception:
                         pass
 
-    except WebSocketDisconnect:
-        print(f"[WS] Client disconnected: {client_id[:8]}")
+    except WebSocketDisconnect as e:
+        _now = time.monotonic()
+        print(
+            f"[WS] Client disconnected: {client_id[:8]} code={e.code} "
+            f"age={_now - connected_at:.0f}s last_rx_age={_now - last_rx:.0f}s"
+        )
         analytics.log_event("ws_disconnect", client_id=client_id)
         await _cleanup_disconnect(client_id)
     except Exception as e:
-        print(f"[WS] Error for {client_id[:8]}: {e}")
+        _now = time.monotonic()
+        print(
+            f"[WS] Error for {client_id[:8]}: {e} "
+            f"(age={_now - connected_at:.0f}s last_rx_age={_now - last_rx:.0f}s)"
+        )
         analytics.log_event("ws_disconnect", client_id=client_id)
         await _cleanup_disconnect(client_id)
     finally:

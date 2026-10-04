@@ -1,5 +1,13 @@
 fastapi>=0.115.0
-uvicorn[standard]>=0.30.0
+# Pinned (same rationale as yt-dlp below): the room screen-off fix depends
+# on this exact pair's WebSocket keepalive semantics — uvicorn 0.40's
+# "auto" picks the legacy websockets impl, where ws_ping_timeout=None
+# means "ping every 20s, NEVER fail the connection on a missing pong"
+# (serve.py). Newer uvicorns switch "auto" to the sansio impl whose ping
+# behavior differs across versions; a silent upgrade could reintroduce
+# the frozen-phone socket kill or stop server pings entirely.
+uvicorn[standard]==0.40.0
+websockets==16.0
 # Pinned, not floated: every deploy reinstalls dependencies, so a floating
 # pin silently upgrades yt-dlp on deploys that had nothing to do with it.
 # It was not the culprit for the 2026-09 suggestions outage, but ruling it
