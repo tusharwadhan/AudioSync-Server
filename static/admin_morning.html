@@ -69,6 +69,15 @@
   .warnbox{background:#241a08;border:1px solid #4a3410;color:#e6b03d;
            border-radius:9px;padding:8px 12px;font-size:12.5px}
   details summary{cursor:pointer;color:var(--accent);font-size:13px}
+  .userlist{display:flex;flex-direction:column;gap:6px;max-height:300px;
+            overflow-y:auto;background:#0f0908;border:1px solid var(--line);
+            border-radius:10px;padding:10px}
+  .urow{display:flex;align-items:center;gap:10px;cursor:pointer;
+        padding:5px 8px;border-radius:8px}
+  .urow:hover{background:var(--card2)}
+  .urow input{accent-color:var(--accent2);width:16px;height:16px}
+  .urow .who{flex:1;min-width:0}
+  .urow .who .hint{display:block;font-size:11.5px}
 </style>
 </head>
 <body>
@@ -102,15 +111,14 @@
         <input type="number" id="graceMinutes" value="120"></div>
       <div class="field" style="max-width:120px"><label>Window (days)</label>
         <input type="number" id="windowDays" value="30"></div>
-      <div class="field" style="max-width:170px"><label>Audience</label>
-        <select id="audMode"><option value="all">Everyone with a token</option>
-        <option value="emails">Only listed emails</option></select></div>
+      <div class="field" style="max-width:200px"><label>Audience</label>
+        <select id="audMode"><option value="all">Everyone (untick to exclude)</option>
+        <option value="emails">Only ticked users</option></select></div>
     </div>
     <div class="row" style="margin-top:10px">
-      <div class="field"><label>Audience emails (comma separated — used when "Only listed")</label>
-        <input type="text" id="audEmails" placeholder="tushar.code05@gmail.com, …"></div>
-      <div class="field"><label>Exclude emails (never send)</label>
-        <input type="text" id="audExclude" placeholder=""></div>
+      <div class="field"><label>Users with push tokens <span id="userCount"></span></label>
+        <div id="userList" class="userlist"><span class="hint">Connect to load users…</span></div>
+      </div>
     </div>
     <div class="row" style="margin-top:10px">
       <div class="field"><label>Groq style context (seeds every generated line)</label>
@@ -213,7 +221,50 @@ async function refreshAll(){
   renderDays(st.config);
   ["cfgCard","daysCard","prevCard","draftsCard","linesCard","logCard"]
     .forEach(id=>$(id).style.display="block");
-  loadLines(); loadDrafts(); loadLog();
+  loadUsers(); loadLines(); loadDrafts(); loadLog();
+}
+
+let users = [], lastCfg = {};
+async function loadUsers(){
+  try{
+    const r = await api("/users");
+    users = r.items;
+    $("userCount").textContent = `(${users.length})`;
+    renderUsers();
+  }catch(e){ $("userList").innerHTML = `<span class="hint">${e.message}</span>`; }
+}
+function renderUsers(){
+  if(!users.length){
+    $("userList").innerHTML = "<span class='hint'>No users with push tokens yet.</span>";
+    return;
+  }
+  const mode = $("audMode").value;
+  const aud = lastCfg.audience || {};
+  const inc = new Set((aud.emails||[]).map(e=>e.toLowerCase()));
+  const exc = new Set((aud.exclude||[]).map(e=>e.toLowerCase()));
+  $("userList").innerHTML = users.map(u=>{
+    const em = (u.email||"").toLowerCase();
+    const checked = mode==="emails" ? inc.has(em) : !exc.has(em);
+    const noMail = !em;
+    return `<label class="urow">
+      <input type="checkbox" data-em="${em}" ${checked&&!noMail?"checked":""} ${noMail?"disabled":""}>
+      <span class="who">${u.name||"(no name)"}
+        <span class="hint">${u.email||"no email — can't be targeted"}</span></span>
+      <span class="pill">${u.events} plays</span>
+      ${u.socialToken?'<span class="pill">social</span>':""}
+      ${u.appTokens?'<span class="pill llm">app×'+u.appTokens+"</span>":""}
+    </label>`;
+  }).join("");
+}
+function collectAudience(){
+  const mode = $("audMode").value;
+  const boxes = [...document.querySelectorAll("#userList input[type=checkbox]:not(:disabled)")];
+  if(!boxes.length) return {mode, emails: (lastCfg.audience||{}).emails||[],
+                            exclude: (lastCfg.audience||{}).exclude||[]};
+  if(mode==="emails")
+    return {mode, emails: boxes.filter(b=>b.checked).map(b=>b.dataset.em), exclude: []};
+  return {mode:"all", emails: [],
+          exclude: boxes.filter(b=>!b.checked).map(b=>b.dataset.em)};
 }
 
 function chip(label, val, cls){return `<span class="chip ${cls||""}">${label} <b>${val}</b></span>`}
@@ -231,6 +282,7 @@ function renderStatus(st){
 }
 
 function fillConfig(c){
+  lastCfg = c;
   setOn("swEnabled", c.enabled);
   setOn("swApproval", c.requireApproval);
   setOn("swLlm", (c.llm||{}).enabled);
@@ -238,11 +290,12 @@ function fillConfig(c){
   $("graceMinutes").value = c.graceMinutes ?? 120;
   $("windowDays").value = c.windowDays ?? 30;
   $("audMode").value = (c.audience||{}).mode || "all";
-  $("audEmails").value = ((c.audience||{}).emails||[]).join(", ");
-  $("audExclude").value = ((c.audience||{}).exclude||[]).join(", ");
   $("llmContext").value = (c.llm||{}).context || "";
   $("channelId").value = c.channelId || "";
 }
+document.addEventListener("change", e=>{
+  if(e.target && e.target.id==="audMode") renderUsers();
+});
 
 function renderDays(c){
   const days = c.days || {};
@@ -284,12 +337,11 @@ async function saveConfig(){
       windowDays: +$("windowDays").value || 30,
       channelId: $("channelId").value.trim(),
       days: collectDays(),
-      audience: {mode: $("audMode").value,
-                 emails: csv($("audEmails").value),
-                 exclude: csv($("audExclude").value)},
+      audience: collectAudience(),
       llm: {enabled: isOn("swLlm"), context: $("llmContext").value.trim()},
     };
     await api("/config", {method:"POST", body: JSON.stringify(body)});
+    lastCfg = {...lastCfg, ...body};
     $("cfgSaved").textContent = "Saved ✓ " + new Date().toLocaleTimeString();
     toast("Config saved");
     const st = await api("/status"); renderStatus(st);

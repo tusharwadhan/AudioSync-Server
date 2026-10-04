@@ -8017,6 +8017,10 @@ api.include_router(social.router)
 # Morning push — daily personalized notification. Admin cockpit under
 # /api/v1/admin/morning-push/*, token registration at /api/v1/user/fcm-token.
 import morning_push
+# Groq key lives assembled in THIS file (hum-detection Whisper), not in a
+# Render env var — hand it over so LLM line generation works out of the box.
+if not morning_push.GROQ_API_KEY:
+    morning_push.GROQ_API_KEY = GROQ_API_KEY
 api.include_router(morning_push.router)
 
 

@@ -959,6 +959,38 @@ async def mp_send(request: Request, session=Depends(get_session)):
     return {"ok": True, "mode": "draft", "draftId": int(draft_id), **summary}
 
 
+@router.get("/admin/morning-push/users")
+async def mp_users(request: Request, session=Depends(get_session)):
+    """Every user the push can reach, for the console's audience picker."""
+    _require_admin(request)
+    rows = (
+        await session.execute(
+            sql_text(
+                """
+                SELECT u.id, u.email, u.display_name, u.last_seen,
+                       (u.fcm_token IS NOT NULL) AS social_token,
+                       (SELECT COUNT(*) FROM user_fcm_tokens t
+                         WHERE t.user_id = u.id AND t.enabled) AS app_tokens,
+                       (SELECT COUNT(*) FROM user_listen_events e
+                         WHERE e.user_id = u.id) AS events
+                FROM users u
+                WHERE u.fcm_token IS NOT NULL
+                   OR EXISTS (SELECT 1 FROM user_fcm_tokens t
+                              WHERE t.user_id = u.id AND t.enabled)
+                ORDER BY u.last_seen DESC NULLS LAST
+                """
+            )
+        )
+    ).all()
+    return {"items": [
+        {"uid": r.id, "email": r.email or "", "name": r.display_name or "",
+         "lastSeen": r.last_seen.isoformat() if r.last_seen else "",
+         "socialToken": bool(r.social_token), "appTokens": r.app_tokens,
+         "events": r.events}
+        for r in rows
+    ]}
+
+
 @router.get("/admin/morning-push/log")
 async def mp_log(request: Request, limit: int = 60,
                  session=Depends(get_session)):
