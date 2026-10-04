@@ -302,8 +302,12 @@ def _compose_banner(art_bytes: bytes) -> bytes:
                          (img.width - w) // 2 + w, (img.height - h) // 2 + h))
 
     if art.width / art.height >= 1.4:
-        # Cinematic video frame — straight full-bleed crop.
+        # Cinematic video frame — full-bleed crop with a vivid grade so the
+        # card pops like food photography instead of a dim paused frame.
         canvas = cover(art, W, H)
+        canvas = ImageEnhance.Color(canvas).enhance(1.28)
+        canvas = ImageEnhance.Brightness(canvas).enhance(1.07)
+        canvas = ImageEnhance.Contrast(canvas).enhance(1.05)
     else:
         # Square-ish album art: full-height sharp art, bright colorful
         # blur of the same art filling the wings seamlessly.
@@ -321,8 +325,8 @@ def _compose_banner(art_bytes: bytes) -> bytes:
 async def _banner_bytes(video_id: str) -> bytes | None:
     import tempfile
 
-    # v2 cache key — composition changed, old cached banners must not serve.
-    cache = os.path.join(tempfile.gettempdir(), f"mpb2_{video_id}.jpg")
+    # v3 cache key — vivid grade added, old cached banners must not serve.
+    cache = os.path.join(tempfile.gettempdir(), f"mpb3_{video_id}.jpg")
     if os.path.exists(cache):
         with open(cache, "rb") as f:
             return f.read()
