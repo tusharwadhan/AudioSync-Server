@@ -745,10 +745,36 @@ async def build_batch(session, cfg: dict, use_llm: bool,
     return items
 
 
-def _fcm_message(token: str, item: dict, channel_id: str | None) -> messaging.Message:
+# App versionCode that ships the custom Zomato-style renderer (5.19.1).
+CUSTOM_RENDER_MIN_CODE = 88
+
+
+def _fcm_message(token: str, item: dict, channel_id: str | None,
+                 custom_render: bool = False) -> messaging.Message:
     image = item.get("image") or None
     if image and not image.startswith("https://"):
         image = None
+    if custom_render:
+        # DATA-ONLY: the app (5.19.1+) draws the notification itself —
+        # full-bleed banner with the text overlaid, true Zomato style.
+        # A notification block here would double-notify.
+        return messaging.Message(
+            token=token,
+            data={
+                "type": "morning_push",
+                "title": item["title"],
+                "body": item["body"],
+                "image": image or "",
+                "play_video_id": item.get("videoId") or "",
+                "play_title": item.get("song") or "",
+                "play_uploader": item.get("artist") or "",
+                "play_thumbnail": (
+                    f"https://i.ytimg.com/vi/{item['videoId']}/hqdefault.jpg"
+                    if item.get("videoId") else ""
+                ),
+            },
+            android=messaging.AndroidConfig(priority="high"),
+        )
     android_notif = messaging.AndroidNotification(image=image)
     if channel_id:
         android_notif = messaging.AndroidNotification(
@@ -808,36 +834,38 @@ async def send_batch(session, items: list[dict], force: bool = False) -> dict:
                 skipped += 1
                 continue
 
-        # New authed store (5.18.4+, carries opt-out) ∪ the social-path
-        # token every signed-in install already registers (users.fcm_token).
-        tokens = set(
-            (
-                await session.execute(
-                    sql_text(
-                        "SELECT token FROM user_fcm_tokens "
-                        "WHERE user_id = :u AND enabled"
-                    ),
-                    {"u": item["uid"]},
-                )
-            ).scalars().all()
-        )
+        # New authed store (5.19.0+, carries opt-out + app version) ∪ the
+        # social-path token every signed-in install already registers.
+        rows = (
+            await session.execute(
+                sql_text(
+                    "SELECT token, app_version_code FROM user_fcm_tokens "
+                    "WHERE user_id = :u AND enabled"
+                ),
+                {"u": item["uid"]},
+            )
+        ).all()
+        tokens: dict[str, int] = {r.token: r.app_version_code for r in rows}
         legacy = (
             await session.execute(
                 sql_text("SELECT fcm_token FROM users WHERE id = :u"),
                 {"u": item["uid"]},
             )
         ).scalar()
-        if legacy:
-            tokens.add(legacy)
+        if legacy and legacy not in tokens:
+            tokens[legacy] = 0
         if not tokens:
             skipped += 1
             continue
 
         ok = 0
         last_err = ""
-        for token in tokens:
+        for token, app_code in tokens.items():
             try:
-                msg = _fcm_message(token, item, channel_id)
+                msg = _fcm_message(
+                    token, item, channel_id,
+                    custom_render=app_code >= CUSTOM_RENDER_MIN_CODE,
+                )
                 await loop.run_in_executor(_FCM_POOL, messaging.send, msg)
                 ok += 1
             except Exception as e:
@@ -994,6 +1022,10 @@ async def register_user_fcm_token(
         raise HTTPException(status_code=400, detail="missing/invalid token")
     device = (body.get("device") or "").strip()[:128] or None
     enabled = bool(body.get("morningPush", True))
+    try:
+        app_version = int(body.get("appVersionCode") or 0)
+    except Exception:
+        app_version = 0
 
     # The user row may not exist yet (fresh sign-in before first sync).
     await session.execute(
@@ -1007,12 +1039,15 @@ async def register_user_fcm_token(
     )
     await session.execute(
         sql_text(
-            "INSERT INTO user_fcm_tokens (token, user_id, device, enabled, updated_at) "
-            "VALUES (:t, :u, :d, :e, now()) "
+            "INSERT INTO user_fcm_tokens "
+            "(token, user_id, device, enabled, app_version_code, updated_at) "
+            "VALUES (:t, :u, :d, :e, :v, now()) "
             "ON CONFLICT (token) DO UPDATE SET "
-            "user_id = :u, device = :d, enabled = :e, updated_at = now()"
+            "user_id = :u, device = :d, enabled = :e, "
+            "app_version_code = :v, updated_at = now()"
         ),
-        {"t": token, "u": user["uid"], "d": device, "e": enabled},
+        {"t": token, "u": user["uid"], "d": device, "e": enabled,
+         "v": app_version},
     )
     await session.commit()
     return {"ok": True, "morningPush": enabled}
