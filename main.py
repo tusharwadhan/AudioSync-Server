@@ -241,9 +241,10 @@ APP_UPDATE_CONFIG = {
     # public launch deserves the prominent treatment.
     "mandatoryBelow": 41,
     "isEmergency": False,
-    # PUBLIC release: empty list = offered to every account. (5.18.3 was
-    # the 2-account cohort test of the same video suite.)
-    "targetEmails": [],
+    # Pulled back to tushar-only minutes after the public flip: 5.19.1
+    # (custom morning-push notification) ships right behind, so nobody
+    # should burn an update cycle on 5.19.0. Re-empty when 5.19.1 is up.
+    "targetEmails": ["tushar.code05@gmail.com"],
 }
 
 
