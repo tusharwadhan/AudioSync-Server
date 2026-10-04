@@ -57,7 +57,10 @@ from db import get_session, try_session_factory
 router = APIRouter(tags=["morning-push"])
 
 IST = ZoneInfo("Asia/Kolkata")
-ADMIN_SECRET = os.getenv("ADMIN_SECRET", "")
+# Same env var main.py uses — NOT "ADMIN_SECRET"; that name is unset on
+# Render, and `if not ADMIN_SECRET` would then 403 every admin call even
+# with the correct header (exactly what happened on first deploy).
+ADMIN_SECRET = os.getenv("SYNCAURA_ADMIN_SECRET", "") or os.getenv("ADMIN_SECRET", "")
 GROQ_API_KEY = os.getenv("GROQ_API_KEY", "")
 GROQ_URL = "https://api.groq.com/openai/v1/chat/completions"
 
