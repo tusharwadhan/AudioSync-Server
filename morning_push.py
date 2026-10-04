@@ -1118,6 +1118,14 @@ async def mp_set_config(request: Request, session=Depends(get_session)):
         raise HTTPException(status_code=400, detail="expected object")
     current = await load_config(session)
     merged = _merge_config(current, body)
+    # days and audience arrive as COMPLETE snapshots from the console —
+    # the nested merge resurrected removed entries (a re-enabled day could
+    # never be deleted: its absence kept the old {enabled:false}, so days
+    # could only ever accumulate disables). Replace them wholesale.
+    if isinstance(body.get("days"), dict):
+        merged["days"] = body["days"]
+    if isinstance(body.get("audience"), dict):
+        merged["audience"] = body["audience"]
     # A null override/note means "clear it for this user".
     if isinstance(merged.get("overrides"), dict):
         merged["overrides"] = {k: v for k, v in merged["overrides"].items() if v}

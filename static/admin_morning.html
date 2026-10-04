@@ -180,7 +180,10 @@
     <h2>Monthly calendar</h2>
     <details id="daysDetails">
       <summary>Per-date overrides <span class="hint" id="daysSummary"></span></summary>
-      <div class="hint" style="margin:8px 0 10px">Click a date to skip it; set a time to override 'default time' for that date.</div>
+      <div class="row" style="margin:8px 0 10px">
+        <span class="hint">Click a date to skip it; set a time to override 'default time' for that date.</span>
+        <button class="ghost" type="button" onclick="resetDays()">Reset — every day at default time</button>
+      </div>
       <div class="grid-days" id="dayGrid"></div>
     </details>
   </div>
@@ -557,6 +560,16 @@ function collectDays(){
   return out;
 }
 const csv = s => s.split(",").map(x=>x.trim()).filter(Boolean);
+
+async function resetDays(){
+  if(!confirm("Clear ALL per-date overrides? Every day goes back to the default time.")) return;
+  try{
+    await api("/config", {method:"POST", body: JSON.stringify({days: {}})});
+    lastCfg.days = {};
+    renderDays(lastCfg);
+    toast("Calendar reset — every day at default time");
+  }catch(e){ toast(e.message, true); }
+}
 
 async function saveConfig(){
   try{
