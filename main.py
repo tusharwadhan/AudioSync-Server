@@ -8027,14 +8027,73 @@ async def startup_morning_push():
     asyncio.create_task(morning_push.scheduler_loop())
 
 
+# ── Morning-push console page gate ──────────────────────────────────────
+# The page is password-protected on top of the per-call X-Admin-Secret.
+# Only the SHA-256 of the password is stored; the submitted value is
+# hashed and compared constant-time. A correct login sets an HttpOnly
+# cookie derived from the hash, so the page stays unlocked per browser.
+_MP_PAGE_PW_SHA256 = "9017515ad91b791792e458e64e633675d01fea37e3e385ba6374116df792df7f"
+_MP_COOKIE_VALUE = hashlib.sha256(
+    (_MP_PAGE_PW_SHA256 + ":syncaura-console-v1").encode()
+).hexdigest()
+
+_MP_LOGIN_HTML = """<!doctype html><html><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Console Login</title><style>
+body{margin:0;min-height:100svh;display:grid;place-items:center;
+     background:#0a0506;color:#f3e9e2;font:15px/1.5 system-ui,sans-serif}
+form{background:#150e0b;border:1px solid #2b1d16;border-radius:14px;
+     padding:28px;width:min(92vw,360px);display:flex;flex-direction:column;gap:12px}
+h1{font-size:17px;margin:0}
+input{background:#0f0908;border:1px solid #2b1d16;border-radius:8px;
+      color:#f3e9e2;padding:10px 12px;font:inherit}
+input:focus{outline:1px solid #ff8a3d;border-color:#ff8a3d}
+button{background:linear-gradient(135deg,#ff8a3d,#ff5a1f);color:#1a0d05;
+       border:0;border-radius:9px;padding:10px;font:inherit;font-weight:700;cursor:pointer}
+.err{color:#e6553d;font-size:13px}</style></head><body>
+<form method="post" action="/admin/morning">
+  <h1>🌅 Morning Push Console</h1>
+  __ERR__
+  <input type="password" name="password" placeholder="Console password" autofocus>
+  <button>Unlock</button>
+</form></body></html>"""
+
+
 @app.get("/admin/morning", response_class=HTMLResponse)
-async def morning_push_console():
-    """Admin cockpit for the morning push. The page itself is public (root
-    paths skip the API-key middleware, same as /share and /app) but every
-    data call it makes requires X-Admin-Secret, entered in the page."""
+async def morning_push_console(request: Request):
+    """Admin cockpit for the morning push. Root paths skip the API-key
+    middleware (same as /share and /app), so the page carries its own
+    password gate; every data call additionally needs X-Admin-Secret."""
+    if request.cookies.get("mp_console") != _MP_COOKIE_VALUE:
+        return HTMLResponse(_MP_LOGIN_HTML.replace("__ERR__", ""))
     path = os.path.join(os.path.dirname(__file__), "static", "admin_morning.html")
     with open(path, encoding="utf-8") as f:
         return HTMLResponse(f.read())
+
+
+@app.post("/admin/morning", response_class=HTMLResponse)
+async def morning_push_console_login(request: Request):
+    import hmac as _hmac
+    try:
+        form = await request.form()
+        submitted = str(form.get("password") or "")
+    except Exception:
+        submitted = ""
+    ok = _hmac.compare_digest(
+        hashlib.sha256(submitted.encode("utf-8")).hexdigest(),
+        _MP_PAGE_PW_SHA256,
+    )
+    if not ok:
+        return HTMLResponse(
+            _MP_LOGIN_HTML.replace("__ERR__", '<div class="err">Wrong password</div>'),
+            status_code=401,
+        )
+    resp = RedirectResponse("/admin/morning", status_code=303)
+    resp.set_cookie(
+        "mp_console", _MP_COOKIE_VALUE,
+        max_age=60 * 60 * 24 * 30, httponly=True, secure=True, samesite="lax",
+    )
+    return resp
 
 # Register the versioned API router
 app.include_router(api)
