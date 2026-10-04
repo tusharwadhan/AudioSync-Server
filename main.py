@@ -12,6 +12,7 @@ from fastapi import (
 )
 import dataclasses
 import secrets
+from zoneinfo import ZoneInfo
 from starlette.websockets import WebSocketState
 from fastapi.responses import HTMLResponse, JSONResponse, FileResponse, RedirectResponse
 import tempfile
@@ -3080,6 +3081,149 @@ async def _load_playback_errors_from_db(limit: int, device: str) -> list[dict]:
         "serverTime": r.received_at.isoformat() if r.received_at else "",
         "clientIp": r.client_ip or "",
     } for r in rows]
+
+
+@api.get("/admin/listen-overview")
+async def admin_listen_overview(
+    request: Request,
+    days: int = 30,
+    email: str = "",
+    recent: int = 30,
+    session=Depends(get_session),
+):
+    """
+    Admin-only viewer for the user_listen_events log — per-user totals,
+    top tracks over the window, and the 06:00–10:59 IST "morning" picks
+    (the exact data the daily morning push will personalize from).
+
+        curl "https://<host>/api/v1/admin/listen-overview?days=30" \\
+             -H "X-API-Key: <api key>" -H "X-Admin-Secret: <admin secret>"
+
+    Pass &email=<user email> to also get that user's most recent raw
+    events (capped by &recent=, max 200).
+    """
+    if not ADMIN_SECRET or request.headers.get("X-Admin-Secret") != ADMIN_SECRET:
+        raise HTTPException(status_code=403, detail="Forbidden")
+
+    from sqlalchemy import text as _text
+
+    days = max(1, min(days, 365))
+    recent = max(1, min(recent, 200))
+
+    # Per-user rollup
+    users_rows = (
+        await session.execute(
+            _text(
+                """
+                SELECT u.id, u.email, u.display_name,
+                       COUNT(e.id) AS total,
+                       MIN(e.played_at) AS first_ev,
+                       MAX(e.played_at) AS last_ev,
+                       COUNT(*) FILTER (
+                           WHERE e.played_at >= now() - make_interval(days => :days)
+                       ) AS window_total,
+                       COUNT(*) FILTER (
+                           WHERE e.played_at >= now() - make_interval(days => :days)
+                             AND EXTRACT(HOUR FROM e.played_at AT TIME ZONE 'Asia/Kolkata')
+                                 BETWEEN 6 AND 10
+                       ) AS morning_total
+                FROM users u
+                JOIN user_listen_events e ON e.user_id = u.id
+                GROUP BY u.id, u.email, u.display_name
+                ORDER BY total DESC
+                """
+            ),
+            {"days": days},
+        )
+    ).all()
+
+    # Per-user per-track counts over the window (tiny table — pick the
+    # top N per user in Python rather than a window-function query).
+    track_rows = (
+        await session.execute(
+            _text(
+                """
+                SELECT user_id, video_id,
+                       MAX(title) AS title, MAX(uploader) AS uploader,
+                       COUNT(*) AS plays,
+                       COUNT(*) FILTER (
+                           WHERE EXTRACT(HOUR FROM played_at AT TIME ZONE 'Asia/Kolkata')
+                                 BETWEEN 6 AND 10
+                       ) AS morning_plays
+                FROM user_listen_events
+                WHERE played_at >= now() - make_interval(days => :days)
+                GROUP BY user_id, video_id
+                """
+            ),
+            {"days": days},
+        )
+    ).all()
+
+    by_user: dict = {}
+    for r in track_rows:
+        by_user.setdefault(r.user_id, []).append(r)
+
+    out_users = []
+    for u in users_rows:
+        tracks = by_user.get(u.id, [])
+        top = sorted(tracks, key=lambda t: -t.plays)[:5]
+        morning = sorted(
+            [t for t in tracks if t.morning_plays > 0],
+            key=lambda t: -t.morning_plays,
+        )[:3]
+        out_users.append({
+            "uid": u.id,
+            "email": u.email or "",
+            "name": u.display_name or "",
+            "totalEvents": u.total,
+            "firstEvent": u.first_ev.isoformat() if u.first_ev else "",
+            "lastEvent": u.last_ev.isoformat() if u.last_ev else "",
+            f"last{days}d": u.window_total,
+            f"morning{days}d": u.morning_total,
+            "topTracks": [
+                {"videoId": t.video_id, "title": t.title or "",
+                 "uploader": t.uploader or "", "plays": t.plays}
+                for t in top
+            ],
+            "morningPicks": [
+                {"videoId": t.video_id, "title": t.title or "",
+                 "uploader": t.uploader or "", "morningPlays": t.morning_plays}
+                for t in morning
+            ],
+        })
+
+    result: dict = {"windowDays": days, "users": out_users}
+
+    if email:
+        recent_rows = (
+            await session.execute(
+                _text(
+                    """
+                    SELECT e.video_id, e.title, e.uploader, e.source,
+                           e.played_at, e.duration_listened, e.completion_pct
+                    FROM user_listen_events e
+                    JOIN users u ON u.id = e.user_id
+                    WHERE lower(u.email) = lower(:email)
+                    ORDER BY e.played_at DESC
+                    LIMIT :lim
+                    """
+                ),
+                {"email": email, "lim": recent},
+            )
+        ).all()
+        result["recentEvents"] = [
+            {"videoId": r.video_id, "title": r.title or "",
+             "uploader": r.uploader or "", "source": r.source or "",
+             "playedAt": r.played_at.isoformat() if r.played_at else "",
+             "playedAtIST": r.played_at.astimezone(
+                 ZoneInfo("Asia/Kolkata")
+             ).strftime("%Y-%m-%d %H:%M") if r.played_at else "",
+             "durationListened": r.duration_listened,
+             "completionPct": r.completion_pct}
+            for r in recent_rows
+        ]
+
+    return result
 
 
 # TEMPORARY diagnostic for the listen_events push 500s (2026-07-14).
