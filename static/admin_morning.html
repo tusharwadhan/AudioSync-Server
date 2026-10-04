@@ -311,7 +311,8 @@ function renderUsers(){
         <span class="hint">${u.email||"no email — can't be targeted"}</span></span>
       <span class="pill">${u.events} plays</span>
       ${u.socialToken?'<span class="pill">social</span>':""}
-      ${u.appTokens?'<span class="pill llm">app×'+u.appTokens+"</span>":""}
+      ${u.appVersion?`<span class="pill llm">v${u.appVersion}${u.appVersion>=88?" 🎴":""}</span>`
+        :'<span class="pill" style="color:#b86">not updated</span>'}
     </label>`;
   }).join("");
 }

@@ -1354,6 +1354,9 @@ async def mp_users(request: Request, session=Depends(get_session)):
                        (u.fcm_token IS NOT NULL) AS social_token,
                        (SELECT COUNT(*) FROM user_fcm_tokens t
                          WHERE t.user_id = u.id AND t.enabled) AS app_tokens,
+                       (SELECT COALESCE(MAX(t.app_version_code), 0)
+                          FROM user_fcm_tokens t
+                         WHERE t.user_id = u.id) AS app_version,
                        (SELECT COUNT(*) FROM user_listen_events e
                          WHERE e.user_id = u.id) AS events
                 FROM users u
@@ -1369,7 +1372,7 @@ async def mp_users(request: Request, session=Depends(get_session)):
         {"uid": r.id, "email": r.email or "", "name": r.display_name or "",
          "lastSeen": r.last_seen.isoformat() if r.last_seen else "",
          "socialToken": bool(r.social_token), "appTokens": r.app_tokens,
-         "events": r.events}
+         "appVersion": r.app_version, "events": r.events}
         for r in rows
     ]}
 
