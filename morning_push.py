@@ -277,48 +277,52 @@ _BANNER_ID_RE = re.compile(r"^[A-Za-z0-9_-]{6,20}$")
 
 
 def _compose_banner(art_bytes: bytes) -> bytes:
+    """Zomato-style FULL-BLEED card, never a framed thumbnail: wide video
+    frames cover-crop edge-to-edge; square album art fills the full height
+    with bright blurred wings of the same artwork — no margins, no rounded
+    inner corners, no dark padding."""
     from io import BytesIO
 
-    from PIL import Image, ImageDraw, ImageEnhance, ImageFilter
+    from PIL import Image, ImageEnhance, ImageFilter
 
     W, H = 1200, 600
     art = Image.open(BytesIO(art_bytes)).convert("RGB")
 
     # YouTube pads square album art to 16:9 with black bars — trim any
-    # near-black margins so the blur + foreground use the real artwork.
+    # near-black margins so we work with the real artwork.
     gray = art.convert("L")
     bbox = gray.point(lambda p: 255 if p > 16 else 0).getbbox()
     if bbox:
         art = art.crop(bbox)
 
-    # Background: cover-fill, heavy blur, dimmed.
-    scale = max(W / art.width, H / art.height)
-    bg = art.resize((int(art.width * scale) + 1, int(art.height * scale) + 1))
-    bg = bg.crop(((bg.width - W) // 2, (bg.height - H) // 2,
-                  (bg.width - W) // 2 + W, (bg.height - H) // 2 + H))
-    bg = bg.filter(ImageFilter.GaussianBlur(36))
-    bg = ImageEnhance.Brightness(bg).enhance(0.55)
+    def cover(img, w, h):
+        s = max(w / img.width, h / img.height)
+        img = img.resize((int(img.width * s) + 1, int(img.height * s) + 1))
+        return img.crop(((img.width - w) // 2, (img.height - h) // 2,
+                         (img.width - w) // 2 + w, (img.height - h) // 2 + h))
 
-    # Foreground: sharp art, rounded corners, centered.
-    fh = int(H * 0.82)
-    fw = int(art.width * (fh / art.height))
-    if fw > int(W * 0.9):
-        fw = int(W * 0.9)
-        fh = int(art.height * (fw / art.width))
-    fg = art.resize((fw, fh))
-    mask = Image.new("L", (fw, fh), 0)
-    ImageDraw.Draw(mask).rounded_rectangle((0, 0, fw, fh), radius=28, fill=255)
-    bg.paste(fg, ((W - fw) // 2, (H - fh) // 2), mask)
+    if art.width / art.height >= 1.4:
+        # Cinematic video frame — straight full-bleed crop.
+        canvas = cover(art, W, H)
+    else:
+        # Square-ish album art: full-height sharp art, bright colorful
+        # blur of the same art filling the wings seamlessly.
+        canvas = cover(art, W, H).filter(ImageFilter.GaussianBlur(28))
+        canvas = ImageEnhance.Brightness(canvas).enhance(0.85)
+        fw = int(art.width * (H / art.height))
+        fg = art.resize((min(fw, W), H))
+        canvas.paste(fg, ((W - fg.width) // 2, 0))
 
     out = BytesIO()
-    bg.save(out, "JPEG", quality=82)
+    canvas.save(out, "JPEG", quality=84)
     return out.getvalue()
 
 
 async def _banner_bytes(video_id: str) -> bytes | None:
     import tempfile
 
-    cache = os.path.join(tempfile.gettempdir(), f"mpb_{video_id}.jpg")
+    # v2 cache key — composition changed, old cached banners must not serve.
+    cache = os.path.join(tempfile.gettempdir(), f"mpb2_{video_id}.jpg")
     if os.path.exists(cache):
         with open(cache, "rb") as f:
             return f.read()
@@ -757,9 +761,17 @@ def _fcm_message(token: str, item: dict, channel_id: str | None) -> messaging.Me
         ),
         data={
             "type": "morning_push",
-            "videoId": item.get("videoId") or "",
-            "songTitle": item.get("song") or "",
-            "artist": item.get("artist") or "",
+            # Keys match MainActivity's existing play-intent extras
+            # (OfflineBackupActivity path), so tapping the notification
+            # starts playback with ZERO new routing code — on every app
+            # version back to when that path shipped.
+            "play_video_id": item.get("videoId") or "",
+            "play_title": item.get("song") or "",
+            "play_uploader": item.get("artist") or "",
+            "play_thumbnail": (
+                f"https://i.ytimg.com/vi/{item['videoId']}/hqdefault.jpg"
+                if item.get("videoId") else ""
+            ),
         },
         android=messaging.AndroidConfig(
             priority="high",
