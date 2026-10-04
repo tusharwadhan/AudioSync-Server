@@ -241,10 +241,9 @@ APP_UPDATE_CONFIG = {
     # public launch deserves the prominent treatment.
     "mandatoryBelow": 41,
     "isEmergency": False,
-    # Pulled back to tushar-only minutes after the public flip: 5.19.1
-    # (custom morning-push notification) ships right behind, so nobody
-    # should burn an update cycle on 5.19.0. Re-empty when 5.19.1 is up.
-    "targetEmails": ["tushar.code05@gmail.com"],
+    # PUBLIC: 5.19.1 is the video-suite launch + the Zomato-style morning
+    # push card, device-tested before this flip. Empty list = everyone.
+    "targetEmails": [],
 }
 
 
