@@ -110,9 +110,11 @@
     .urow{flex-wrap:wrap;padding:8px}
     .urow .who{flex:1 1 150px}
     .userlist{max-height:260px}
-    /* picker modal fills the phone nicely */
+    /* picker + note modals fill the phone nicely */
     #picker > div{width:94vw;max-height:88vh}
     #picker .row input{min-width:0;flex:1 1 140px}
+    #noteModal > div{width:94vw}
+    #noteModal .row button{flex:1 1 30%;padding:11px 6px}
   }
 </style>
 </head>
@@ -237,7 +239,21 @@
       <button onclick="searchSongs()">Search</button>
       <button class="ghost" onclick="closePicker()">Close</button>
     </div>
-    <div id="pickResults" style="margin-top:10px;overflow-y:auto"></div>
+    <div id="pickAuto" style="margin-top:10px"></div>
+    <div id="pickResults" style="margin-top:8px;overflow-y:auto"></div>
+  </div>
+</div>
+<div id="noteModal" style="display:none;position:fixed;inset:0;background:#000c;z-index:8;place-items:center">
+  <div class="card" style="width:min(94vw,480px)">
+    <h2>Groq note for <span id="noteWho" style="text-transform:none;letter-spacing:0"></span></h2>
+    <div class="hint" style="margin-bottom:8px">How should their lines be written? This rides into every generated line for this user.</div>
+    <textarea id="noteText" style="min-height:110px"
+      placeholder="e.g. no emoji, keep it short, she loves bhajans — stay respectful"></textarea>
+    <div class="row" style="margin-top:12px">
+      <button onclick="saveUserCtx()">Save note</button>
+      <button class="danger" onclick="saveUserCtx(true)">Clear note</button>
+      <button class="ghost" onclick="document.getElementById('noteModal').style.display='none'">Cancel</button>
+    </div>
   </div>
 </div>
 <div id="toast"></div>
@@ -342,18 +358,43 @@ async function regenRow(em){
     toast(`New line for ${em} — save as draft when happy`);
   }catch(e){ toast(e.message, true); }
 }
+let pickSeq = 0; // guards against a slow response from an EARLIER picker
+                 // session overwriting the current user's list (saw it live:
+                 // Tushar's library rendered inside Renu's picker).
 async function openPicker(em){
+  const seq = ++pickSeq;
   pickEmail = em;
+  pickItems = [];
   $("pickWho").textContent = em;
   $("pickQ").value = "";
   $("picker").style.display = "grid";
+  const ov = (lastCfg.overrides||{})[em];
+  $("pickAuto").innerHTML = `
+    <div class="urow" onclick="chooseAuto()" style="border:1px solid ${ov?"var(--accent)":"var(--line)"};border-radius:10px">
+      <span style="font-size:20px">✨</span>
+      <span class="who"><b>Automatic — their morning listening decides</b>
+        <span class="hint">${ov
+          ? `Currently pinned to “${ov.song}”. Tap to switch back to automatic.`
+          : "Currently active: picks from their 6–11am plays, rotates daily."}</span></span>
+      ${ov?"":'<span class="pill">active</span>'}
+    </div>`;
   $("pickResults").innerHTML = "<span class='hint'>Loading their top songs…</span>";
   try{
     const r = await api(`/user-songs?email=${encodeURIComponent(em)}`);
+    if(seq !== pickSeq) return; // a newer picker session took over
     renderPickList(r.items, true);
-  }catch(e){ $("pickResults").innerHTML = `<span class="hint">${e.message}</span>`; }
+  }catch(e){
+    if(seq === pickSeq)
+      $("pickResults").innerHTML = `<span class="hint">${e.message}</span>`;
+  }
 }
 function closePicker(){ $("picker").style.display = "none"; }
+async function chooseAuto(){
+  const em = pickEmail;
+  closePicker();
+  if((lastCfg.overrides||{})[em]) await clearOverride(em);
+  else toast("Already automatic for " + em);
+}
 const esc = s => String(s??"").replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/"/g,"&quot;");
 let pickItems = [];
 function renderPickList(items, library){
@@ -370,15 +411,20 @@ function renderPickList(items, library){
 async function searchSongs(){
   const q = $("pickQ").value.trim();
   if(!q) return;
+  const seq = ++pickSeq;
   $("pickResults").innerHTML = "<span class='hint'>Searching…</span>";
   try{
     const r = await fetch(`/api/v1/search?q=${encodeURIComponent(q)}&limit=8`,
                           {headers:{"X-API-Key": API_KEY}});
     const d = await r.json();
+    if(seq !== pickSeq) return; // superseded by a newer search/picker
     renderPickList((d.results||[]).map(s=>(
       {videoId:s.videoId, song:s.title, artist:s.uploader, image:s.thumbnail}
     )), false);
-  }catch(e){ $("pickResults").innerHTML = `<span class="hint">${e.message}</span>`; }
+  }catch(e){
+    if(seq === pickSeq)
+      $("pickResults").innerHTML = `<span class="hint">${e.message}</span>`;
+  }
 }
 async function chooseSong(s){
   try{
@@ -399,18 +445,29 @@ async function clearOverride(em){
     if(lastBatch) regenRow(em);
   }catch(e){ toast(e.message, true); }
 }
-async function editUserCtx(em){
-  const cur = (lastCfg.userContext||{})[em] || "";
-  const v = prompt(`Groq note for ${em} — how should their lines be written?`, cur);
-  if(v === null) return;
+let noteEmail = null;
+function editUserCtx(em){
+  noteEmail = em;
+  $("noteWho").textContent = em;
+  $("noteText").value = (lastCfg.userContext||{})[em] || "";
+  $("noteModal").style.display = "grid";
+  $("noteText").focus();
+}
+async function saveUserCtx(clear){
+  const em = noteEmail;
+  const v = clear ? "" : $("noteText").value.trim();
+  $("noteModal").style.display = "none";
   try{
     await api("/config", {method:"POST",
-      body: JSON.stringify({userContext: {[em]: v.trim() || null}})});
+      body: JSON.stringify({userContext: {[em]: v || null}})});
     lastCfg.userContext = lastCfg.userContext || {};
-    if(v.trim()) lastCfg.userContext[em] = v.trim();
+    if(v) lastCfg.userContext[em] = v;
     else delete lastCfg.userContext[em];
-    toast(v.trim() ? "Note saved" : "Note cleared");
-    if(lastBatch && lastBatch.llm) regenRow(em); // notes only affect Groq lines
+    toast(v ? "Note saved" : "Note cleared");
+    if(lastBatch){
+      // Notes only change Groq lines; a template batch just needs the badge.
+      if(lastBatch.llm) regenRow(em); else redrawBatch();
+    }
   }catch(e){ toast(e.message, true); }
 }
 async function saveDryAsDraft(){
