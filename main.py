@@ -4389,6 +4389,9 @@ async def handle_join_room(client_id: str, websocket: WebSocket, msg: dict):
         and room_manager._client_to_room.get(client_id) == code
         and client_id in _same.members
         and not _same.members[client_id].reconnecting
+        # Hostless room: fall through to the normal path — join_room's
+        # promotion heals the dangle (the guard would freeze it as-is).
+        and _same.host_id in _same.members
     ):
         _me = _same.members[client_id]
         _me.websocket = websocket
@@ -5694,6 +5697,13 @@ async def destroy_room_after_grace(client_id: str, code: str, delay: int = 30):
     room_manager.cleanup_stale_disconnects()
     room = room_manager.rooms.get(code)
     if room is None:
+        return
+    # Stale-incarnation guard: this task was armed for ONE specific host
+    # client_id. If the host has since returned and been re-promoted under a
+    # NEW client_id (front-door dedupe) and then dropped AGAIN, the new
+    # disconnect armed its own task — letting this old one proceed would
+    # truncate the second grace window to whatever was left of the first.
+    if room.host_id != client_id:
         return
     # Check if room has an ACTIVE host — present in the roster AND not still in
     # the disconnect grace window (a reconnecting host is NOT active).
