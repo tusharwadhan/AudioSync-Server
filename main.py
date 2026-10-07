@@ -1383,15 +1383,30 @@ async def startup_room_keepalive():
 async def startup_room_cleanup():
     """Periodically clean up zombie rooms with no active host."""
 
+    # code -> first time the sweep saw the room hostless. Destruction needs
+    # TWO consecutive sightings: a transiently dangling host_id (any brief
+    # mid-flight state, known or future) must cost at most ~120s of zombie
+    # lifetime, never a destroyed room.
+    _zombie_since: dict[str, float] = {}
+
     async def _cleanup_loop():
         while True:
             await asyncio.sleep(60)
+            # Drop stale entries for rooms that no longer exist or healed.
+            for _zc in list(_zombie_since.keys()):
+                _zr = room_manager.rooms.get(_zc)
+                if _zr is None or _zr.host_id in _zr.members:
+                    _zombie_since.pop(_zc, None)
             for code in list(room_manager.rooms.keys()):
                 room = room_manager.rooms.get(code)
                 if room is None:
                     continue
                 # If host_id is not in active members, room is a zombie
                 if room.host_id not in room.members:
+                    _first = _zombie_since.setdefault(code, time.time())
+                    if time.time() - _first < 90:
+                        continue  # second sighting required before destroy
+                    _zombie_since.pop(code, None)
                     await analytics.log_room_destroyed(
                         code,
                         room.host_name,
@@ -4364,6 +4379,35 @@ async def handle_join_room(client_id: str, websocket: WebSocket, msg: dict):
         await ws_send(websocket, {"type": "error", "message": "Room code required"})
         return
 
+    # Same-room re-join (double-tap, or auto-rejoin raced by a manual join):
+    # the client is already an ACTIVE member of this very room. Without this
+    # guard the leave-first below would — for a host — DESTROY the room and
+    # then answer "Room not found". Resend the current state instead.
+    _same = room_manager.rooms.get(code)
+    if (
+        _same is not None
+        and room_manager._client_to_room.get(client_id) == code
+        and client_id in _same.members
+        and not _same.members[client_id].reconnecting
+    ):
+        _me = _same.members[client_id]
+        _me.websocket = websocket
+        _role = "host" if _same.host_id == client_id else "guest"
+        await ws_send(websocket, {"type": "room_joined", "state": {
+            "code": _same.code,
+            "hostName": _same.host_name,
+            "memberCount": len(_same.members),
+            "currentSong": _same.current_song,
+            "position": room_manager.get_estimated_position(_same),
+            "isPlaying": _same.is_playing,
+            "queue": _same.serialize_queue_for_client(client_id),
+            "members": room_manager.get_member_list(_same),
+            "role": _role,
+            "memberSecret": _me.secret,
+        }})
+        print(f"[WS] {client_id[:8]} idempotent same-room join {code} as {_role}")
+        return
+
     # Leave any existing room first (prevent stale membership)
     old_code, was_host, remaining_ws = room_manager.leave_room(client_id)
     if old_code and was_host:
@@ -4399,25 +4443,31 @@ async def handle_join_room(client_id: str, websocket: WebSocket, msg: dict):
                 return
 
     name = msg.get("name", "Unknown")
-    room, promoted = room_manager.join_room(code, client_id, websocket, name=name)
-    role = "host" if promoted else "guest"
 
-    # Ghost dedupe: if this DEVICE (same FCM token — registered on every
-    # socket open, so it precedes the join) already holds a reconnecting
-    # seat in this room under an older client_id, the "newcomer" is that
-    # very member returning through the front door instead of rejoin_room.
-    # Without this, the roster shows the same person twice for the whole
-    # grace window (field-reported). Remove the ghost silently: its grace
-    # and wake tasks are cancelled, and the member_joined broadcast below
-    # carries the already-corrected roster. Secret-based rejoins are
-    # unaffected — they displace their ghost inside rejoin_room itself.
+    # Ghost dedupe — runs BEFORE join_room, deliberately. If this DEVICE
+    # already holds a reconnecting seat under an older client_id, the
+    # "newcomer" is that member returning through the front door. Match is
+    # against the ghost's last_fcm_token SNAPSHOT (stamped at disconnect):
+    # live-token equality can never fire because register_fcm_token pops
+    # the ghost's live entry the instant this device re-registered.
+    # Ordering matters twice over:
+    #   1. With the ghost popped first, join_room's promotion check sees a
+    #      hostless room and hands host_id back to the returning host —
+    #      after-join ordering left host_id dangling and the zombie sweep /
+    #      destroy_room_after_grace killed the room under the host.
+    #   2. INVARIANT: no `await` between the pop below and join_room —
+    #      host_id dangles in that window, and the cleanup loops can only
+    #      interleave at awaits. Keep this block synchronous.
+    # Secret-based rejoins are unaffected — they displace their ghost
+    # inside rejoin_room itself. A token ROTATED while away won't match:
+    # that ghost just ages out through the normal grace path (status quo).
     _token = _fcm_tokens.get(client_id)
     if _token:
         for _mid, _ghost in list(room.members.items()):
             if (
                 _mid != client_id
                 and _ghost.reconnecting
-                and _fcm_tokens.get(_mid) == _token
+                and _ghost.last_fcm_token == _token
             ):
                 room.members.pop(_mid, None)
                 room_manager._client_to_room.pop(_mid, None)
@@ -4429,6 +4479,9 @@ async def handle_join_room(client_id: str, websocket: WebSocket, msg: dict):
                 if _wt:
                     _wt.cancel()
                 print(f"[WS] {code}: deduped ghost {_mid[:8]} (same device as joiner {client_id[:8]})")
+
+    room, promoted = room_manager.join_room(code, client_id, websocket, name=name)
+    role = "host" if promoted else "guest"
 
     print(
         f"[WS] {client_id[:8]} ({name}) joined room {code} as {role} ({len(room.members)} members)"
@@ -5543,6 +5596,17 @@ async def handle_disconnect(client_id: str):
     code, was_host, member_kept = room_manager.disconnect_member(client_id)
     if not code:
         return
+
+    # Snapshot the device's FCM token onto the kept ghost NOW: when the same
+    # device returns on a new socket, register_fcm_token pops this client's
+    # live _fcm_tokens entry — destroying the only evidence that ghost and
+    # newcomer are one device. The front-door dedupe in handle_join_room
+    # matches against this snapshot instead of (always-false) live equality.
+    if member_kept:
+        _g_room = room_manager.rooms.get(code)
+        _g = _g_room.members.get(client_id) if _g_room else None
+        if _g:
+            _g.last_fcm_token = _fcm_tokens.get(client_id)
 
     print(f"[WS] {client_id[:8]} disconnected from room {code} (was_host={was_host}) — grace {MEMBER_GRACE_SECONDS}s")
     analytics.log_event(

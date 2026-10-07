@@ -38,6 +38,13 @@ class RoomMember:
     # back as a guest, because the secret path deliberately skips the
     # legacy fallback that used to restore them.
     was_host: bool = False
+    # Snapshot of the device's FCM token, stamped by handle_disconnect the
+    # moment this member becomes a reconnecting ghost. register_fcm_token
+    # POPS the live _fcm_tokens entry when the SAME device returns on a new
+    # socket, so live-token equality can never identify a ghost (the 10-04
+    # dedupe that relied on it was dead code). The front-door ghost dedupe
+    # matches the newcomer's live token against this snapshot instead.
+    last_fcm_token: Optional[str] = None
 
 
 @dataclass
@@ -207,6 +214,10 @@ class RoomManager:
             if room.host_id != client_id:  # only if actually promoting
                 room.host_id = client_id
                 room.host_name = name
+                # Sticky host record: without it a promoted host loses the
+                # host-restore protection on their NEXT reconnect once
+                # cleanup_stale_disconnects nulls host_id.
+                member.was_host = True
                 promoted = True
         return room, promoted
 
