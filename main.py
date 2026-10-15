@@ -1392,6 +1392,12 @@ async def startup_room_cleanup():
     async def _cleanup_loop():
         while True:
             await asyncio.sleep(60)
+            # Orphaned transport gates (room gone or code re-minted onto a
+            # different room object): drop entry + cancel any sleeping task.
+            for _gc in list(_transport_gates.keys()):
+                _gg = _transport_gates[_gc]
+                if room_manager.rooms.get(_gc) is not _gg.room:
+                    discard_transport_gate(_gc)
             # Drop stale entries for rooms that no longer exist or healed.
             for _zc in list(_zombie_since.keys()):
                 _zr = room_manager.rooms.get(_zc)
@@ -1419,6 +1425,7 @@ async def startup_room_cleanup():
                     for mid in list(room.members.keys()):
                         room_manager._client_to_room.pop(mid, None)
                     del room_manager.rooms[code]
+                    discard_transport_gate(code)
                     for ws in remaining_ws:
                         await ws_send(ws, {"type": "room_closed"})
                     print(f"[Cleanup] Destroyed zombie room {code} (no active host)")
@@ -4299,6 +4306,7 @@ async def handle_create_room(client_id: str, websocket: WebSocket, msg: dict):
     # Leave any existing room first
     old_code, was_host, remaining_ws = room_manager.leave_room(client_id)
     if old_code and was_host:
+        discard_transport_gate(old_code)
         for ws in remaining_ws:
             await ws_send(ws, {"type": "room_closed"})
 
@@ -4414,6 +4422,7 @@ async def handle_join_room(client_id: str, websocket: WebSocket, msg: dict):
     # Leave any existing room first (prevent stale membership)
     old_code, was_host, remaining_ws = room_manager.leave_room(client_id)
     if old_code and was_host:
+        discard_transport_gate(old_code)
         for ws in remaining_ws:
             await ws_send(ws, {"type": "room_closed"})
     elif old_code:
@@ -4528,6 +4537,117 @@ async def handle_join_room(client_id: str, websocket: WebSocket, msg: dict):
     )
 
 
+# ── Per-room transport gate: song-change debounce ────────────────────────
+# Every sync_play makes every member run an on-device extraction (the
+# host's URL is IP-locked and 403s for anyone else — see the client).
+# A machine-gunned next/play burst is exactly the request shape that trips
+# YouTube's bot wall (bootstrap 429 → fallback → 403 → flagged session
+# that outlives the room). The gate: LEADING edge applies instantly;
+# anything further inside the window collapses into ONE pending slot
+# (latest wins) fired on the TRAILING edge — a 5-press burst becomes two
+# applications. The per-room lock also fixes a real pre-existing race:
+# `next` is dispatched via create_task, so two rapid presses interleaved
+# at awaits and double-popped the queue.
+TRANSPORT_GATE_WINDOW = 1.5
+
+
+class _TransportGate:
+    __slots__ = ("room", "lock", "last", "pending", "task")
+
+    def __init__(self, room):
+        # Room IDENTITY, not code: 4-char codes get re-minted after a room
+        # dies; a trailing task must never fire a stale command into a new
+        # room wearing the old code, nor inherit its debounce timestamp.
+        self.room = room
+        self.lock = asyncio.Lock()
+        self.last = 0.0          # monotonic time of last apply COMPLETION
+        self.pending = None      # (kind, client_id, msg) — latest wins
+        self.task = None
+
+
+_transport_gates: dict[str, _TransportGate] = {}
+
+
+def _gate_for(room) -> _TransportGate:
+    g = _transport_gates.get(room.code)
+    if g is None or g.room is not room:
+        g = _TransportGate(room)
+        _transport_gates[room.code] = g
+    return g
+
+
+def discard_transport_gate(code: str):
+    """Call at every room-destruction site: drops the gate entry and kills
+    any sleeping trailing task so an orphan can never outlive its room."""
+    g = _transport_gates.pop(code, None)
+    if g and g.task:
+        g.task.cancel()
+
+
+async def _apply_song_change(kind: str, client_id: str, msg):
+    if kind == "next":
+        await _handle_next_inner(client_id)
+    else:
+        await _handle_play_inner(client_id, msg)
+
+
+async def _gate_submit(room, kind: str, client_id: str, msg):
+    """ALWAYS invoked via create_task — the leading apply awaits the host's
+    extract round-trip (seconds); running it inline in the socket dispatch
+    loop would deadlock extract_response handling and stall ka/chat."""
+    g = _gate_for(room)
+    now = time.monotonic()
+    if g.task is None and not g.lock.locked() and now - g.last >= TRANSPORT_GATE_WINDOW:
+        async with g.lock:
+            await _apply_song_change(kind, client_id, msg)
+        # Window measured from COMPLETION, not submission: a long extract
+        # must not let the trailing edge fire back-to-back with zero pacing.
+        g.last = time.monotonic()
+        return
+    if g.pending is not None:
+        print(f"[Gate] room {room.code}: coalesced a song-change burst "
+              f"(replaced pending {g.pending[0]} with {kind})")
+    g.pending = (kind, client_id, msg)
+    if g.task is None:
+        g.task = asyncio.create_task(_gate_trailing(g))
+
+
+async def _gate_trailing(g: _TransportGate):
+    try:
+        while True:
+            wait = TRANSPORT_GATE_WINDOW - (time.monotonic() - g.last)
+            if wait > 0:
+                await asyncio.sleep(wait)
+                continue  # re-measure: a leading apply may have moved `last`
+            item = g.pending
+            if item is None:
+                return
+            g.pending = None
+            # Re-validate by IDENTITY: the room must still be the exact
+            # object this gate was built for, and the sender still its host.
+            if room_manager.rooms.get(g.room.code) is not g.room:
+                return
+            kind, client_id, msg = item
+            if not room_manager.is_host(client_id):
+                continue
+            async with g.lock:
+                await _apply_song_change(kind, client_id, msg)
+            g.last = time.monotonic()
+    finally:
+        g.task = None
+        # A command that slipped in between the last pending-consume and
+        # this cleanup must not be stranded: re-arm — but ONLY while this
+        # gate is still the registered one (discard_transport_gate cancels
+        # us and pops the entry; re-arming then would resurrect a gate the
+        # destruction path just killed) and its room is still alive.
+        if (
+            g.pending is not None
+            and _transport_gates.get(g.room.code) is g
+            and room_manager.rooms.get(g.room.code) is g.room
+        ):
+            g.task = asyncio.create_task(_gate_trailing(g))
+
+
 async def handle_play(client_id: str, msg: dict):
     if not room_manager.is_host(client_id):
         return
@@ -4539,7 +4659,10 @@ async def handle_play(client_id: str, msg: dict):
     if not video_id:
         return
 
-    # Block host from playing a different song if there's a voted request (>1 vote)
+    # Block host from playing a different song if there's a voted request
+    # (>1 vote). Stays PRE-GATE so the host's play_blocked feedback is
+    # instant; staleness is acceptable (a pending `next` pops the voted
+    # item itself before any trailing play applies).
     if room.has_voted_request():
         sorted_q = room.get_sorted_queue()
         top = sorted_q[0] if sorted_q and not sorted_q[0].is_suggestion else None
@@ -4556,6 +4679,22 @@ async def handle_play(client_id: str, msg: dict):
                     },
                 )
             return
+
+    # Fire-and-forget into the gate — NEVER awaited inline (see _gate_submit).
+    asyncio.create_task(_gate_submit(room, "play", client_id, msg))
+
+
+async def _handle_play_inner(client_id: str, msg: dict):
+    # Defense-in-depth re-checks: the gate may apply this on the trailing
+    # edge, after the world changed.
+    if not room_manager.is_host(client_id):
+        return
+    room = room_manager.get_room_for_client(client_id)
+    if not room:
+        return
+    video_id = msg.get("videoId", "")
+    if not video_id:
+        return
 
     print(f"[WS] Room {room.code}: host playing {video_id}")
     analytics.log_event(
@@ -4789,6 +4928,19 @@ async def handle_extract_response(client_id: str, msg: dict):
 
 
 async def handle_next(client_id: str):
+    if not room_manager.is_host(client_id):
+        return
+    room = room_manager.get_room_for_client(client_id)
+    if not room or not room.queue:
+        return
+    # Fire-and-forget into the per-room transport gate (debounce + the
+    # serialization that kills the old concurrent double-pop race).
+    asyncio.create_task(_gate_submit(room, "next", client_id, None))
+
+
+async def _handle_next_inner(client_id: str):
+    # Defense-in-depth re-checks: may run on the trailing edge, after the
+    # world changed.
     if not room_manager.is_host(client_id):
         return
     room = room_manager.get_room_for_client(client_id)
@@ -5549,6 +5701,7 @@ async def handle_leave(client_id: str):
     )
 
     if was_host:
+        discard_transport_gate(code)
         if room_snapshot:
             await analytics.log_room_destroyed(*room_snapshot)
         # Room was destroyed — notify remaining members directly
@@ -5723,6 +5876,7 @@ async def destroy_room_after_grace(client_id: str, code: str, delay: int = 30):
         for mid in list(room.members.keys()):
             room_manager._client_to_room.pop(mid, None)
         del room_manager.rooms[code]
+        discard_transport_gate(code)
         for ws in remaining_ws:
             await ws_send(ws, {"type": "room_closed"})
         print(f"[WS] Room {code} destroyed after host grace period expired")
