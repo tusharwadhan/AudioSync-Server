@@ -148,7 +148,9 @@
         <option value="emails">Only ticked users</option></select></div>
     </div>
     <div class="row" style="margin-top:10px">
-      <div class="field"><label>Users with push tokens <span id="userCount"></span></label>
+      <div class="field"><label>Users with push tokens <span id="userCount"></span>
+          <a href="#" onclick="checkDelivery();return false" style="margin-left:8px">Check delivery</a>
+          <span class="hint" id="delivMsg"></span></label>
         <div id="userList" class="userlist"><span class="hint">Loading users…</span></div>
       </div>
     </div>
@@ -316,6 +318,24 @@ async function loadUsers(){
     renderUsers();
   }catch(e){ $("userList").innerHTML = `<span class="hint">${e.message}</span>`; }
 }
+let deliv = {};
+function delivPill(d){
+  const m = {valid:["✓ can receive","var(--ok)"], dead:["✗ app likely removed","var(--err)"],
+             unknown:["? unclear","var(--warn)"], "no-token":["no token","var(--dim)"]}[d.overall]
+            || [d.overall,"var(--dim)"];
+  return `<span class="pill" style="color:${m[1]};border-color:${m[1]}">${m[0]}</span>`;
+}
+async function checkDelivery(){
+  $("delivMsg").textContent = "Checking with Firebase… nothing is sent";
+  try{
+    const r = await api("/check-delivery", {method:"POST", body: JSON.stringify({})});
+    deliv = {};
+    r.items.forEach(i=>{ deliv[(i.email||"").toLowerCase()] = i; });
+    renderUsers();
+    const n = k=>r.items.filter(i=>i.overall===k).length;
+    $("delivMsg").textContent = `${n("valid")} can receive · ${n("dead")} likely removed · ${n("unknown")} unclear`;
+  }catch(e){ $("delivMsg").textContent = ""; toast(e.message, true); }
+}
 function renderUsers(){
   if(!users.length){
     $("userList").innerHTML = "<span class='hint'>No users with push tokens yet.</span>";
@@ -335,6 +355,7 @@ function renderUsers(){
         <span class="hint">${u.email||"no email — can't be targeted"}</span></span>
       <span class="pill">${u.events} plays</span>
       ${u.socialToken?'<span class="pill">social</span>':""}
+      ${deliv[em] ? delivPill(deliv[em]) : ""}
       ${u.appVersion?`<span class="pill llm">v${u.appVersion}${u.appVersion>=88?" 🎴":""}</span>`
         :'<span class="pill" style="color:#b86">not updated</span>'}
     </label>`;

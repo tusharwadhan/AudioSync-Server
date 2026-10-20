@@ -1490,6 +1490,80 @@ async def mp_users(request: Request, session=Depends(get_session)):
     ]}
 
 
+@router.post("/admin/morning-push/check-delivery")
+async def mp_check_delivery(request: Request, session=Depends(get_session)):
+    """Ask Firebase whether each user's push token is still valid, WITHOUT
+    sending anything (dry run) and WITHOUT deleting tokens. A token Google
+    has invalidated (UNREGISTERED) usually means the app was uninstalled or
+    its data cleared; Google marks that lazily, so 'valid' is a good sign,
+    not proof. Body: {"emails": [...]} (omit = everyone reachable)."""
+    _require_admin(request)
+    try:
+        body = await request.json()
+    except Exception:
+        body = {}
+    wanted = {e.strip().lower() for e in (body.get("emails") or []) if e}
+    rows = (
+        await session.execute(
+            sql_text(
+                """
+                SELECT u.id, u.email, u.display_name, u.last_seen, u.fcm_token
+                FROM users u
+                WHERE u.fcm_token IS NOT NULL
+                   OR EXISTS (SELECT 1 FROM user_fcm_tokens t
+                              WHERE t.user_id = u.id AND t.enabled)
+                ORDER BY u.last_seen DESC NULLS LAST
+                """
+            )
+        )
+    ).all()
+    loop = asyncio.get_running_loop()
+    out = []
+    for r in rows:
+        if wanted and (r.email or "").lower() not in wanted:
+            continue
+        trows = (
+            await session.execute(
+                sql_text("SELECT token, app_version_code FROM user_fcm_tokens "
+                         "WHERE user_id = :u AND enabled"),
+                {"u": r.id},
+            )
+        ).all()
+        tokens: dict[str, str] = {t.token: "app" for t in trows}
+        if r.fcm_token and r.fcm_token not in tokens:
+            tokens[r.fcm_token] = "social"
+        results = []
+        for token, kind in tokens.items():
+            try:
+                await loop.run_in_executor(
+                    _FCM_POOL,
+                    lambda t=token: messaging.send(
+                        messaging.Message(token=t, data={"type": "delivery_check"}),
+                        dry_run=True,
+                    ),
+                )
+                verdict = "valid"
+            except messaging.UnregisteredError:
+                verdict = "unregistered"
+            except (messaging.SenderIdMismatchError, ValueError):
+                verdict = "invalid"
+            except Exception as e:
+                verdict = f"error:{type(e).__name__}"
+            results.append({"kind": kind, "verdict": verdict})
+        if not results:
+            overall = "no-token"
+        elif any(x["verdict"] == "valid" for x in results):
+            overall = "valid"
+        elif all(x["verdict"] in ("unregistered", "invalid") for x in results):
+            overall = "dead"
+        else:
+            overall = "unknown"
+        out.append({"email": r.email or "", "name": r.display_name or "",
+                    "lastSeen": r.last_seen.isoformat() if r.last_seen else "",
+                    "overall": overall, "tokens": results})
+    return {"items": out}
+
+
 @router.get("/admin/morning-push/log")
 async def mp_log(request: Request, limit: int = 60,
                  session=Depends(get_session)):
