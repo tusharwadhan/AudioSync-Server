@@ -42,6 +42,7 @@ import concurrent.futures
 import hashlib
 import json
 import os
+import random
 import re
 from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
@@ -90,6 +91,10 @@ DEFAULT_CONFIG: dict = {
     # Per-user note fed to Groq alongside the global style context
     # ("she loves bhajans, keep it respectful"). {email(lower): "text"}.
     "userContext": {},
+    # Per-user FIXED message that replaces generation for that user:
+    # {email(lower): {"title": "...", "body": "..."}}; {name} {song} {artist}
+    # are filled in. null clears on merge.
+    "pinned": {},
     "windowDays": 30,
     "graceMinutes": 120,       # late-boot catch-up window after send time
     # Android notification channel. MUST stay "" until an app release has
@@ -614,12 +619,28 @@ def _render_line(lines: dict, bucket: str, tone: str,
 # The editable base rules shown in the console (config llm.systemPrompt
 # overrides this; empty = this). The JSON reply shape is appended in code.
 DEFAULT_SYSTEM_PROMPT = (
-    "You write ONE short morning push notification for SyncAura, an Indian "
-    "music app. Title max 38 characters, body max 90. "
-    "Warm, playful; light Hinglish or simple English. Greet the user by "
-    "their first name in the title (e.g. 'Good morning, Tushar ☀️'). "
-    "Mention the song naturally. No hashtags, no quotes around the song name."
+    "You write push notifications for SyncAura, a premium Indian music app. "
+    "Your voice is a witty friend with great taste: short, specific, human. "
+    "NEVER open with 'Good morning' or 'Start your day', and never use the "
+    "words 'vibes', 'soulful', 'soothing', 'melody' or 'Enjoy'. Never explain "
+    "the song; at most one emoji (zero is fine). Use the person's first name "
+    "only when it makes the line better. Title max 38 characters, body max "
+    "80: the title is the hook, the body is the payoff and names the song.\n"
+    "Examples of the quality bar (other songs):\n"
+    '{"title":"Okay, this one again?","body":"Tum Hi Ho is calling your name."}\n'
+    '{"title":"Rahul, we need to talk","body":"Kala Chashma has been waiting all night."}\n'
+    '{"title":"Plot twist for your commute","body":"Put on Tera Ban Jaunga and watch the traffic disappear."}'
 )
+
+# One is picked at random per generation so lines differ run to run.
+ANGLES = [
+    "a playful dare or challenge",
+    "a curious question that makes them want to tap",
+    "a tiny teasing remark about their taste",
+    "a vivid one-image mood (a scene, not a feeling word)",
+    "a confident 'you'll love this' nudge",
+    "a nostalgic wink, as if recalling a shared memory",
+]
 
 # Current Groq catalog default (llama-3.x chat models 404 since ~2026-10).
 DEFAULT_GROQ_MODEL = "openai/gpt-oss-120b"
@@ -642,7 +663,8 @@ def _parse_line_json(content: str) -> dict | None:
 
 async def _groq_line(cfg_llm: dict, name: str, song: str, artist: str,
                      bucket: str, user_ctx: str = "",
-                     devotional: bool = False) -> dict | None:
+                     devotional: bool = False,
+                     recent: list[str] | None = None) -> dict | None:
     if not GROQ_API_KEY:
         return None
     context = (cfg_llm.get("context") or "").strip()
@@ -665,9 +687,12 @@ async def _groq_line(cfg_llm: dict, name: str, song: str, artist: str,
     )
     user = (
         f"User first name: {name}. This morning's pick: '{song}' by {artist}. "
+        f"Angle for this one: {random.choice(ANGLES)}. "
         f"Bucket: {bucket} (morning_ritual = they play this most mornings; "
         f"overall_top = their recent favourite; generic = trending today; "
         f"custom = hand-picked specially for them today)."
+        + (f" Do NOT reuse the wording of these recent notifications sent to "
+           f"this user: {' | '.join(recent)}." if recent else "")
         + (f" Follow the admin's instructions for this user exactly: {user_ctx}"
            if user_ctx else "")
     )
@@ -678,7 +703,7 @@ async def _groq_line(cfg_llm: dict, name: str, song: str, artist: str,
                 "model": attempt_model,
                 "messages": [{"role": "system", "content": system},
                              {"role": "user", "content": user}],
-                "temperature": 0.9,
+                "temperature": 1.0,
                 # Reasoning models (gpt-oss) spend tokens thinking before
                 # the answer; a tight cap starves them into empty content.
                 "max_tokens": 400,
@@ -713,6 +738,25 @@ async def _groq_line(cfg_llm: dict, name: str, song: str, artist: str,
 
 # ── batch building + sending ─────────────────────────────────────────────
 
+async def _recent_titles(session, uid, limit: int = 6) -> list[str]:
+    try:
+        rows = (await session.execute(
+            sql_text("SELECT title FROM morning_push_log WHERE user_id = :u "
+                     "AND title IS NOT NULL ORDER BY id DESC LIMIT :n"),
+            {"u": uid, "n": limit},
+        )).all()
+        return [r[0] for r in rows if r[0]]
+    except Exception:
+        return []
+
+
+def _fill_pinned(text: str, slots: dict) -> str:
+    out = text
+    for k in ("name", "song", "artist"):
+        out = out.replace("{" + k + "}", str(slots.get(k, "") or ""))
+    return out
+
+
 async def build_batch(session, cfg: dict, use_llm: bool,
                       only_email: str | None = None) -> list[dict]:
     days = int(cfg.get("windowDays") or 30)
@@ -726,6 +770,8 @@ async def build_batch(session, cfg: dict, use_llm: bool,
     trending = await _trending(session, days)
 
     overrides = {k.lower(): v for k, v in (cfg.get("overrides") or {}).items() if v}
+    pinned = {k.lower(): v for k, v in (cfg.get("pinned") or {}).items()
+              if isinstance(v, dict) and v.get("title") and v.get("body")}
 
     items = []
     for u in audience:
@@ -757,14 +803,20 @@ async def build_batch(session, cfg: dict, use_llm: bool,
 
         line = None
         llm_used = False
+        pin = pinned.get((u["email"] or "").lower())
+        if pin:
+            # Admin-written fixed message: no generation, no template.
+            line = {"title": _fill_pinned(pin["title"], slots)[:64],
+                    "body": _fill_pinned(pin["body"], slots)[:120]}
         # Devotional picks use the curated pool unless the admin wrote a
         # note for this user — that is an explicit request for custom text.
         user_ctx = ((cfg.get("userContext") or {})
                     .get((u["email"] or "").lower()) or "").strip()
-        if use_llm and track and (tone != "devotional" or user_ctx):
+        if line is None and use_llm and track and (tone != "devotional" or user_ctx):
             line = await _groq_line(cfg.get("llm") or {}, u["name"],
                                     track["song"], track["artist"], bucket,
-                                    user_ctx, devotional=(tone == "devotional"))
+                                    user_ctx, devotional=(tone == "devotional"),
+                                    recent=await _recent_titles(session, u["uid"]))
             llm_used = line is not None
         if line is None:
             # Custom picks render from the most personal pool.
@@ -775,6 +827,7 @@ async def build_batch(session, cfg: dict, use_llm: bool,
         items.append({
             "uid": u["uid"], "email": u["email"], "name": u["name"],
             "bucket": bucket, "tone": tone, "llm": llm_used,
+            "pinned": bool(pin),
             "videoId": vid,
             "song": slots["song"], "artist": slots["artist"],
             # Composed wide banner (Zomato-style card); raw thumbnail only
@@ -1159,6 +1212,8 @@ async def mp_set_config(request: Request, session=Depends(get_session)):
     # A null override/note means "clear it for this user".
     if isinstance(merged.get("overrides"), dict):
         merged["overrides"] = {k: v for k, v in merged["overrides"].items() if v}
+    if isinstance(merged.get("pinned"), dict):
+        merged["pinned"] = {k: v for k, v in merged["pinned"].items() if v}
     if isinstance(merged.get("userContext"), dict):
         merged["userContext"] = {k: v for k, v in merged["userContext"].items() if v}
     await _kv_set(session, CONFIG_KEY, merged)

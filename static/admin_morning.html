@@ -250,6 +250,22 @@
     </div>
   </div>
 </div>
+<div id="pinModal" style="display:none;position:fixed;inset:0;background:#000c;z-index:8;place-items:center">
+  <div class="card" style="width:min(94vw,480px)">
+    <h2>Fixed message for <span id="pinWho" style="text-transform:none;letter-spacing:0"></span></h2>
+    <div class="hint" style="margin-bottom:8px">Sent exactly as written every morning to this user — no Groq, no templates.
+      You can use {name} {song} {artist}. Clear it to go back to generated messages.</div>
+    <label>Title</label>
+    <input type="text" id="pinTitle" maxlength="64" placeholder="e.g. Your daily dose, {name}">
+    <label style="margin-top:10px">Body</label>
+    <textarea id="pinBody" style="min-height:80px" maxlength="120" placeholder="e.g. {song} is ready when you are"></textarea>
+    <div class="row" style="margin-top:12px">
+      <button onclick="savePinned()">Save message</button>
+      <button class="danger" onclick="savePinned(true)">Clear</button>
+      <button class="ghost" onclick="document.getElementById('pinModal').style.display='none'">Cancel</button>
+    </div>
+  </div>
+</div>
 <div id="toast"></div>
 
 <script>
@@ -450,6 +466,30 @@ function editUserCtx(em){
   $("noteModal").style.display = "grid";
   $("noteText").focus();
 }
+let pinEmail = null;
+function editPinned(em){
+  pinEmail = em;
+  const p = (lastCfg.pinned||{})[em] || {};
+  $("pinWho").textContent = em;
+  $("pinTitle").value = p.title || "";
+  $("pinBody").value = p.body || "";
+  $("pinModal").style.display = "grid";
+  $("pinTitle").focus();
+}
+async function savePinned(clear){
+  const em = pinEmail;
+  const t = $("pinTitle").value.trim(), b = $("pinBody").value.trim();
+  if(!clear && (!t || !b)){ toast("Add both a title and a body", true); return; }
+  $("pinModal").style.display = "none";
+  try{
+    await api("/config", {method:"POST",
+      body: JSON.stringify({pinned: {[em]: clear ? null : {title:t, body:b}}})});
+    lastCfg.pinned = lastCfg.pinned || {};
+    if(clear) delete lastCfg.pinned[em]; else lastCfg.pinned[em] = {title:t, body:b};
+    toast(clear ? "Fixed message cleared" : "Fixed message saved");
+    if(lastBatch) regenRow(em);
+  }catch(e){ toast(e.message, true); }
+}
 async function saveUserCtx(clear){
   const em = noteEmail;
   const v = clear ? "" : $("noteText").value.trim();
@@ -627,7 +667,7 @@ function itemsTable(items, editable){
       <td>${i.name}<br><span class="hint">${i.email||i.uid.slice(0,8)}</span></td>
       <td>${i.song?`${i.song}<br><span class="hint">${i.artist}</span>`:"<span class='hint'>—</span>"}</td>
       <td><div class="msg-t">${i.title}</div><div class="msg-b">${i.body}</div></td>
-      <td><span class="pill">${i.bucket}·${i.tone}</span>${i.llm?' <span class="pill llm">groq</span>':""}</td>
+      <td><span class="pill">${i.bucket}·${i.tone}</span>${i.llm?' <span class="pill llm">groq</span>':""}${i.pinned?' <span class="pill">pinned</span>':""}</td>
       ${editable && em ? `<td style="white-space:nowrap">
         <button type="button" class="mini" title="Re-generate this user's line only"
           onclick="regenRow('${em}')">🔄</button>
@@ -635,6 +675,8 @@ function itemsTable(items, editable){
           onclick="openPicker('${em}')">🎵</button>
         ${ov?`<button type="button" class="mini" title="Clear custom song"
           onclick="clearOverride('${em}')">✕</button>`:""}
+        <button type="button" class="mini" title="Fixed message for this user (replaces generation)"
+          onclick="editPinned('${em}')">${(lastCfg.pinned||{})[em]?"📌✓":"📌"}</button>
         <button type="button" class="mini" title="Groq note for this user"
           onclick="editUserCtx('${em}')">${ctx?"📝✓":"📝"}</button>
       </td>` : (editable?"<td></td>":"")}
