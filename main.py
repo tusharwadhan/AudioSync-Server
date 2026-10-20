@@ -8281,6 +8281,8 @@ _MP_COOKIE_VALUE = hashlib.sha256(
     (_MP_PIN_PBKDF2 + ":syncaura-console-v2").encode()
 ).hexdigest()
 
+morning_push.CONSOLE_COOKIE_VALUE = _MP_COOKIE_VALUE
+
 _MP_LOCK_AFTER = 5            # failed attempts per client before lockout
 _MP_LOCK_GLOBAL_AFTER = 30    # failed attempts from everyone before lockout
 _MP_LOCK_SECONDS = 900

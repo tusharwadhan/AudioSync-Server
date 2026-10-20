@@ -172,7 +172,16 @@ def _log(msg: str) -> None:
     print(f"[MorningPush] {msg}", flush=True)
 
 
+# Set by main.py: the value of the PIN-login cookie. The console page proves
+# itself with that cookie; the X-Admin-Secret header stays valid for curl.
+CONSOLE_COOKIE_VALUE = ""
+
+
 def _require_admin(request: Request) -> None:
+    import hmac
+    cookie = request.cookies.get("mp_console") or ""
+    if CONSOLE_COOKIE_VALUE and hmac.compare_digest(cookie, CONSOLE_COOKIE_VALUE):
+        return
     if not ADMIN_SECRET or request.headers.get("X-Admin-Secret") != ADMIN_SECRET:
         raise HTTPException(status_code=403, detail="Forbidden")
 
@@ -602,6 +611,16 @@ def _render_line(lines: dict, bucket: str, tone: str,
 
 # ── Groq line generation ─────────────────────────────────────────────────
 
+# The editable base rules shown in the console (config llm.systemPrompt
+# overrides this; empty = this). The JSON reply shape is appended in code.
+DEFAULT_SYSTEM_PROMPT = (
+    "You write ONE short morning push notification for SyncAura, an Indian "
+    "music app. Title max 38 characters, body max 90. "
+    "Warm, playful; light Hinglish or simple English. Greet the user by "
+    "their first name in the title (e.g. 'Good morning, Tushar ☀️'). "
+    "Mention the song naturally. No hashtags, no quotes around the song name."
+)
+
 # Current Groq catalog default (llama-3.x chat models 404 since ~2026-10).
 DEFAULT_GROQ_MODEL = "openai/gpt-oss-120b"
 
@@ -622,26 +641,35 @@ def _parse_line_json(content: str) -> dict | None:
 
 
 async def _groq_line(cfg_llm: dict, name: str, song: str, artist: str,
-                     bucket: str, user_ctx: str = "") -> dict | None:
+                     bucket: str, user_ctx: str = "",
+                     devotional: bool = False) -> dict | None:
     if not GROQ_API_KEY:
         return None
     context = (cfg_llm.get("context") or "").strip()
+    user_ctx = (user_ctx or "").strip()
+    base = (cfg_llm.get("systemPrompt") or "").strip() or DEFAULT_SYSTEM_PROMPT
     system = (
-        "You write ONE short morning push notification for SyncAura, an Indian "
-        "music app. Reply with ONLY a JSON object: "
-        '{"title": "...", "body": "..."}. Title max 38 characters, body max 90. '
-        "Warm, playful; light Hinglish or simple English. Greet the user by "
-        "their first name in the title (e.g. 'Good morning, Tushar ☀️'). "
-        "Mention the song naturally. No hashtags, no quotes around the song name."
+        base
+        # Not editable: the parser needs exactly this shape back.
+        + ' Reply with ONLY a JSON object: {"title": "...", "body": "..."}.'
         + (f" Extra context from the admin: {context}" if context else "")
+        + (" This song is devotional: never joke about God, the deity or the "
+           "prayer itself; keep any teasing aimed at the user, gentle and "
+           "respectful." if devotional else "")
+        # The per-user note is a direct order from the admin and must win
+        # over every default above (length, greeting, emoji, tone).
+        + (f" HIGHEST PRIORITY — the admin's instructions for THIS user, "
+           f"which override every default above, including the length "
+           f"limits, the greeting, emoji use and tone: {user_ctx}"
+           if user_ctx else "")
     )
     user = (
         f"User first name: {name}. This morning's pick: '{song}' by {artist}. "
         f"Bucket: {bucket} (morning_ritual = they play this most mornings; "
         f"overall_top = their recent favourite; generic = trending today; "
         f"custom = hand-picked specially for them today)."
-        + (f" Note about this user from the admin: {user_ctx.strip()}"
-           if user_ctx.strip() else "")
+        + (f" Follow the admin's instructions for this user exactly: {user_ctx}"
+           if user_ctx else "")
     )
     model = cfg_llm.get("model") or DEFAULT_GROQ_MODEL
     for attempt_model in dict.fromkeys([model, DEFAULT_GROQ_MODEL]):
@@ -729,13 +757,14 @@ async def build_batch(session, cfg: dict, use_llm: bool,
 
         line = None
         llm_used = False
-        # Devotional picks never go through the LLM — curated pool only.
-        if use_llm and track and tone not in ("devotional",):
-            user_ctx = ((cfg.get("userContext") or {})
-                        .get((u["email"] or "").lower()) or "")
+        # Devotional picks use the curated pool unless the admin wrote a
+        # note for this user — that is an explicit request for custom text.
+        user_ctx = ((cfg.get("userContext") or {})
+                    .get((u["email"] or "").lower()) or "").strip()
+        if use_llm and track and (tone != "devotional" or user_ctx):
             line = await _groq_line(cfg.get("llm") or {}, u["name"],
                                     track["song"], track["artist"], bucket,
-                                    user_ctx)
+                                    user_ctx, devotional=(tone == "devotional"))
             llm_used = line is not None
         if line is None:
             # Custom picks render from the most personal pool.
@@ -1098,7 +1127,8 @@ async def mp_status(request: Request, session=Depends(get_session)):
             "enabledTokens": tokens, "legacySocialTokens": legacy,
             "reachableUsers": users,
             "sentToday": today, "pendingDrafts": pending,
-            "groqConfigured": bool(GROQ_API_KEY), "lastError": _last_error}
+            "groqConfigured": bool(GROQ_API_KEY), "lastError": _last_error,
+            "defaultSystemPrompt": DEFAULT_SYSTEM_PROMPT}
 
 
 @router.get("/admin/morning-push/config")
@@ -1179,6 +1209,15 @@ async def mp_dry_run(request: Request, llm: bool = False,
             "llm": llm, "count": len(items), "items": items}
 
 
+async def _discard_pending(session) -> None:
+    """A fresh draft supersedes any pending one — there is only ever one
+    batch waiting to be sent."""
+    await session.execute(
+        sql_text("UPDATE morning_push_drafts SET status = 'discarded' "
+                 "WHERE status = 'pending'")
+    )
+
+
 @router.post("/admin/morning-push/generate")
 async def mp_generate(request: Request, session=Depends(get_session)):
     _require_admin(request)
@@ -1189,6 +1228,7 @@ async def mp_generate(request: Request, session=Depends(get_session)):
     use_llm = bool(body.get("llm"))
     cfg = await load_config(session)
     items = await build_batch(session, cfg, use_llm=use_llm)
+    await _discard_pending(session)
     draft_id = (
         await session.execute(
             sql_text(
@@ -1261,6 +1301,7 @@ async def mp_create_draft(request: Request, session=Depends(get_session)):
                 detail="each item needs at least uid, title, body",
             )
         it.setdefault("date", date_str)
+    await _discard_pending(session)
     draft_id = (
         await session.execute(
             sql_text(

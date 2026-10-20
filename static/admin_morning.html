@@ -80,7 +80,6 @@
   .urow .who .hint{display:block;font-size:11.5px}
   button.mini{background:var(--card2);border:1px solid var(--line);color:var(--txt);
               padding:3px 9px;border-radius:7px;font-weight:500;font-size:13px}
-  .secretbox{min-width:260px}
 
   /* ── Mobile: this console is used mostly from a phone ── */
   @media (max-width:680px){
@@ -89,7 +88,6 @@
     .card{padding:13px;border-radius:12px}
     h1{font-size:16px}
     .topbar{gap:8px}
-    .secretbox{flex:1;min-width:0}
     .field{min-width:46%}
     /* action buttons become a tappable 2-col grid */
     .row.actions button{flex:1 1 46%;padding:11px 8px}
@@ -124,15 +122,11 @@
   <div class="topbar">
     <h1>🌅 Morning Push Console</h1>
     <div class="grow"></div>
-    <div class="secretbox">
-      <input type="password" id="secret" placeholder="Admin secret">
-    </div>
-    <button onclick="connect()">Connect</button>
   </div>
 
   <div class="card" id="statusCard">
     <h2>Status</h2>
-    <div class="chips" id="chips"><span class="chip">Enter the admin secret and press Connect</span></div>
+    <div class="chips" id="chips"><span class="chip">Loading…</span></div>
   </div>
 
   <div class="card" id="cfgCard" style="display:none">
@@ -155,8 +149,17 @@
     </div>
     <div class="row" style="margin-top:10px">
       <div class="field"><label>Users with push tokens <span id="userCount"></span></label>
-        <div id="userList" class="userlist"><span class="hint">Connect to load users…</span></div>
+        <div id="userList" class="userlist"><span class="hint">Loading users…</span></div>
       </div>
+    </div>
+    <div class="row" style="margin-top:10px">
+      <div class="field"><label>Groq base rules — the instructions every line starts from
+        <a href="#" onclick="resetSysPrompt();return false" style="margin-left:8px">Reset to default</a></label>
+        <textarea id="llmSystem" style="min-height:130px"></textarea>
+        <span class="hint">Edit freely; it saves automatically. Applied in this order:
+          base rules → style context below → a respect guard for devotional songs →
+          the per-user note (which always wins). The reply format (title + body as JSON)
+          is added automatically and can't be broken from here.</span></div>
     </div>
     <div class="row" style="margin-top:10px">
       <div class="field"><label>Groq style context (seeds every generated line)</label>
@@ -171,8 +174,7 @@
         Android silently drops notifications aimed at a channel the app never made.</div>
     </div>
     <div class="row" style="margin-top:14px">
-      <button onclick="saveConfig()">Save controls + calendar</button>
-      <span class="hint" id="cfgSaved"></span>
+      <span class="hint" id="cfgSaved">Changes save automatically</span>
     </div>
   </div>
 
@@ -189,31 +191,20 @@
   </div>
 
   <div class="card" id="prevCard" style="display:none">
-    <h2>Preview &amp; send</h2>
+    <h2>Generate &amp; send</h2>
     <div class="row actions">
-      <button class="ghost" onclick="dryRun(false)">Dry-run (templates)</button>
-      <button class="ghost" onclick="dryRun(true)">Dry-run (Groq)</button>
-      <button onclick="generateDraft(true)">Generate Groq draft</button>
-      <button onclick="generateDraft(false)">Generate template draft</button>
-      <button class="danger" onclick="sendDirect()">Send now (no draft)</button>
+      <button onclick="generate()">Generate</button>
+      <span class="switch" id="swGroq" onclick="toggle(this)"><span class="tr"></span> Use Groq</span>
       <span class="switch" id="swForce" onclick="toggle(this)"><span class="tr"></span>
         Force resend (ignore today's once-per-day guard)</span>
     </div>
-    <div id="prevMeta" class="hint" style="margin-top:10px"></div>
+    <div id="prevMeta" class="hint" style="margin-top:10px">Generate writes today's message for everyone in the audience. Check it, tweak any row, then send. Generating again replaces it.</div>
     <div id="prevTable" style="overflow-x:auto"></div>
-    <div class="row" id="dryActions" style="margin-top:12px;display:none">
-      <button onclick="saveDryAsDraft()">💾 Save this exact batch as a sendable draft</button>
-    </div>
     <div class="row" id="draftActions" style="margin-top:12px;display:none">
-      <button onclick="sendDraft()">✅ Send this draft</button>
+      <button onclick="sendDraft()">✅ Send to everyone listed</button>
       <button class="danger" onclick="discardDraft()">Discard</button>
       <span class="hint" id="draftLabel"></span>
     </div>
-  </div>
-
-  <div class="card" id="draftsCard" style="display:none">
-    <h2>Pending drafts</h2>
-    <div id="draftsList" class="hint">—</div>
   </div>
 
   <div class="card" id="linesCard" style="display:none">
@@ -275,29 +266,27 @@ function isOn(id){return $(id).classList.contains("on")}
 function setOn(id,v){$(id).classList.toggle("on",!!v)}
 
 async function api(path, opts={}){
-  const secret = localStorage.getItem("mp_secret") || $("secret").value.trim();
-  const r = await fetch(BASE+path, {...opts, headers:{
-    "X-API-Key": API_KEY, "X-Admin-Secret": secret,
+  const r = await fetch(BASE+path, {...opts, credentials:"same-origin", headers:{
+    "X-API-Key": API_KEY,
     ...(opts.body ? {"Content-Type":"application/json"} : {}),
   }});
-  if(r.status===403) throw new Error("Forbidden — wrong admin secret?");
+  if(r.status===403) throw new Error("Session expired — reload the page to sign in again");
   if(!r.ok) throw new Error((await r.text()).slice(0,200));
   return r.json();
 }
 
 async function connect(){
-  const s = $("secret").value.trim();
-  if(s) localStorage.setItem("mp_secret", s);
-  try{ await refreshAll(); toast("Connected"); }
+  try{ await refreshAll(); cfgReady = true; }
   catch(e){ toast(e.message, true); }
 }
 
 async function refreshAll(){
   const st = await api("/status");
   renderStatus(st);
+  defaultSys = st.defaultSystemPrompt || "";
   fillConfig(st.config);
   renderDays(st.config);
-  ["cfgCard","daysCard","prevCard","draftsCard","linesCard","logCard"]
+  ["cfgCard","daysCard","prevCard","linesCard","logCard"]
     .forEach(id=>$(id).style.display="block");
   loadUsers(); loadLines(); loadDrafts(); loadLog();
 }
@@ -342,12 +331,17 @@ function redrawBatch(){
   if(!lastBatch) return;
   $("prevTable").innerHTML = itemsTable(lastBatch.items, true);
 }
-// Any single-row change invalidates a stored draft: the screen is now an
-// unsaved batch again — save it to make it sendable.
-function batchEdited(){
-  currentDraftId = null;
-  $("draftActions").style.display = "none";
-  $("dryActions").style.display = lastBatch && lastBatch.items.length ? "flex" : "none";
+// Any single-row change is saved straight back into the one pending draft
+// (replacing it), so what's on screen is always exactly what Send sends.
+async function batchEdited(){
+  if(!lastBatch || !lastBatch.items.length) return;
+  try{
+    const r = await api("/draft", {method:"POST",
+      body: JSON.stringify({items: lastBatch.items})});
+    currentDraftId = r.draftId;
+    $("draftActions").style.display = "flex";
+    $("draftLabel").textContent = "Draft saved";
+  }catch(e){ toast(e.message, true); }
 }
 async function regenRow(em){
   if(!lastBatch) return;
@@ -473,19 +467,6 @@ async function saveUserCtx(clear){
     }
   }catch(e){ toast(e.message, true); }
 }
-async function saveDryAsDraft(){
-  if(!lastBatch || !lastBatch.items.length) return;
-  try{
-    const r = await api("/draft", {method:"POST",
-      body: JSON.stringify({items: lastBatch.items})});
-    currentDraftId = r.draftId;
-    $("dryActions").style.display = "none";
-    $("draftActions").style.display = "flex";
-    $("draftLabel").textContent = `Draft #${r.draftId} (saved from dry-run)`;
-    toast(`Saved as draft #${r.draftId} — exactly what you previewed`);
-    loadDrafts();
-  }catch(e){ toast(e.message, true); }
-}
 function collectAudience(){
   const mode = $("audMode").value;
   const boxes = [...document.querySelectorAll("#userList input[type=checkbox]:not(:disabled)")];
@@ -511,16 +492,23 @@ function renderStatus(st){
     (st.lastError ? chip("Last error", st.lastError, "off") : "");
 }
 
+let defaultSys = "";
+function resetSysPrompt(){
+  $("llmSystem").value = defaultSys;
+  queueSave(0);
+}
 function fillConfig(c){
   lastCfg = c;
   setOn("swEnabled", c.enabled);
   setOn("swApproval", c.requireApproval);
   setOn("swLlm", (c.llm||{}).enabled);
+  setOn("swGroq", (c.llm||{}).enabled);
   $("defaultTime").value = c.defaultTime || "08:00";
   $("graceMinutes").value = c.graceMinutes ?? 120;
   $("windowDays").value = c.windowDays ?? 30;
   $("audMode").value = (c.audience||{}).mode || "all";
   $("llmContext").value = (c.llm||{}).context || "";
+  $("llmSystem").value = (c.llm||{}).systemPrompt || defaultSys;
   $("llmModel").value = (c.llm||{}).model || "";
   $("channelId").value = c.channelId || "";
 }
@@ -571,7 +559,33 @@ async function resetDays(){
   }catch(e){ toast(e.message, true); }
 }
 
+// Autosave: every change in the Controls or Calendar card is saved by
+// itself. Typing/time edits wait for a pause; toggles save right away. Only
+// one save is in flight at a time — a change made meanwhile is sent after.
+let cfgReady = false, saveTimer = null, saving = false, saveAgain = false;
+function queueSave(delay){
+  if(!cfgReady) return;
+  $("cfgSaved").textContent = "Unsaved changes…";
+  clearTimeout(saveTimer);
+  saveTimer = setTimeout(saveConfig, delay);
+}
+["cfgCard","daysCard"].forEach(id=>{
+  const card = $(id);
+  card.addEventListener("input", e=>{
+    if(e.target.matches("input[type=text],input[type=number],input[type=time],textarea")) queueSave(800);
+  });
+  card.addEventListener("change", e=>{
+    if(e.target.matches("select,input[type=checkbox],input[type=time],input[type=number]")) queueSave(250);
+  });
+  card.addEventListener("click", e=>{
+    if(e.target.closest(".switch, .day .n")) queueSave(250);
+  });
+});
+
 async function saveConfig(){
+  if(saving){ saveAgain = true; return; }
+  saving = true; saveAgain = false;
+  $("cfgSaved").textContent = "Saving…";
   try{
     const body = {
       enabled: isOn("swEnabled"),
@@ -583,14 +597,22 @@ async function saveConfig(){
       days: collectDays(),
       audience: collectAudience(),
       llm: {enabled: isOn("swLlm"), context: $("llmContext").value.trim(),
+            // Empty = "use the built-in default", so future default
+            // improvements still reach an untouched prompt.
+            systemPrompt: ($("llmSystem").value.trim() === defaultSys.trim())
+                          ? "" : $("llmSystem").value.trim(),
             model: $("llmModel").value.trim() || "openai/gpt-oss-120b"},
     };
     await api("/config", {method:"POST", body: JSON.stringify(body)});
     lastCfg = {...lastCfg, ...body};
     $("cfgSaved").textContent = "Saved ✓ " + new Date().toLocaleTimeString();
-    toast("Config saved");
     const st = await api("/status"); renderStatus(st);
-  }catch(e){ toast(e.message, true); }
+  }catch(e){
+    $("cfgSaved").textContent = "Not saved — retry by changing anything";
+    toast(e.message, true);
+  }
+  saving = false;
+  if(saveAgain) queueSave(0);
 }
 
 function itemsTable(items, editable){
@@ -619,30 +641,17 @@ function itemsTable(items, editable){
     </tr>`}).join("") + "</table>";
 }
 
-async function dryRun(llm){
+async function generate(){
+  const llm = isOn("swGroq");
   try{
-    $("prevMeta").textContent = llm ? "Asking Groq to write today's lines…" : "Rendering…";
-    const r = await api("/dry-run?llm="+llm);
-    currentDraftId = null; $("draftActions").style.display="none";
-    lastBatch = {items: r.items, llm};
-    $("dryActions").style.display = r.items.length ? "flex" : "none";
-    $("prevMeta").textContent = `Dry-run for ${r.date} — ${r.count} user(s), ${llm?"Groq":"template"} lines. Nothing sent — tweak rows (🔄 🎵 📝), then save as a draft to send.`;
-    redrawBatch();
-  }catch(e){ toast(e.message, true); $("prevMeta").textContent=""; }
-}
-
-async function generateDraft(llm){
-  try{
-    $("prevMeta").textContent = llm ? "Generating Groq draft…" : "Generating draft…";
+    $("prevMeta").textContent = llm ? "Asking Groq to write today's messages…" : "Writing today's messages…";
     const r = await api("/generate", {method:"POST", body: JSON.stringify({llm})});
     currentDraftId = r.draftId;
     lastBatch = {items: r.items, llm};
-    $("dryActions").style.display="none";
-    $("prevMeta").textContent = `Draft #${r.draftId} — ${r.count} user(s), ${llm?"Groq":"template"} lines. Tweak rows (🔄 🎵 📝) — any change unsaves the draft — then send or discard.`;
+    $("prevMeta").textContent = `${r.count} user(s), ${llm?"Groq":"template"} lines. Tweak any row (🔄 🎵 📝) — changes save automatically — then send. Generating again replaces this.`;
     redrawBatch();
-    $("draftActions").style.display="flex";
-    $("draftLabel").textContent = `Draft #${r.draftId}`;
-    loadDrafts();
+    $("draftActions").style.display = r.items.length ? "flex" : "none";
+    $("draftLabel").textContent = "Draft saved";
   }catch(e){ toast(e.message, true); $("prevMeta").textContent=""; }
 }
 
@@ -655,7 +664,9 @@ async function sendDraft(id){
     const r = await api("/send", {method:"POST", body: JSON.stringify({draftId, force})});
     toast(`Sent ${r.sent} · failed ${r.failed} · skipped ${r.skipped}`);
     $("draftActions").style.display="none"; currentDraftId=null;
-    loadDrafts(); loadLog(); refreshStatusOnly();
+    lastBatch=null; $("prevTable").innerHTML="";
+    $("prevMeta").textContent = "Sent. Generate again to prepare another batch.";
+    loadLog(); refreshStatusOnly();
   }catch(e){ toast(e.message, true); }
 }
 async function discardDraft(id){
@@ -665,36 +676,26 @@ async function discardDraft(id){
     await api("/discard", {method:"POST", body: JSON.stringify({draftId})});
     toast(`Draft #${draftId} discarded`);
     $("draftActions").style.display="none"; currentDraftId=null;
-    $("prevTable").innerHTML=""; $("prevMeta").textContent="";
-    loadDrafts();
-  }catch(e){ toast(e.message, true); }
-}
-async function sendDirect(){
-  const force = isOn("swForce");
-  if(!confirm(`Send the morning push RIGHT NOW to the whole audience (template lines)?${force?" (FORCE: ignoring today's once-per-day guard)":""}`)) return;
-  try{
-    const r = await api("/send", {method:"POST", body: JSON.stringify({direct:true, force})});
-    toast(`Sent ${r.sent} · failed ${r.failed} · skipped ${r.skipped}`);
-    loadLog(); refreshStatusOnly();
+    lastBatch=null; $("prevTable").innerHTML=""; $("prevMeta").textContent="";
   }catch(e){ toast(e.message, true); }
 }
 async function refreshStatusOnly(){ try{ renderStatus(await api("/status")); }catch(_){} }
 
+// On page open, show the draft that is waiting (e.g. one the 8am scheduler
+// made while waiting for approval) so it can be checked and sent.
 async function loadDrafts(){
+  if(lastBatch) return;
   try{
     const r = await api("/drafts");
-    const pend = r.drafts.filter(d=>d.status==="pending");
-    $("draftsList").innerHTML = pend.length ? pend.map(d=>`
-      <div style="margin-bottom:14px">
-        <div class="row" style="margin-bottom:6px">
-          <b>Draft #${d.draftId}</b>
-          <span class="hint">${new Date(d.createdAt).toLocaleString()} · ${d.count} user(s)</span>
-          <button onclick="sendDraft(${d.draftId})">Send</button>
-          <button class="danger" onclick="discardDraft(${d.draftId})">Discard</button>
-        </div>
-        <details><summary>Preview</summary>${itemsTable(d.items)}</details>
-      </div>`).join("") : "<span class='hint'>No drafts awaiting approval.</span>";
-  }catch(e){ $("draftsList").textContent = e.message; }
+    const d = r.drafts.find(x=>x.status==="pending");
+    if(!d || !d.items.length) return;
+    currentDraftId = d.draftId;
+    lastBatch = {items: d.items, llm: d.items.some(i=>i.llm)};
+    $("prevMeta").textContent = `Waiting draft from ${new Date(d.createdAt).toLocaleString()} — ${d.count} user(s). Send it, tweak rows, or Generate again to replace it.`;
+    redrawBatch();
+    $("draftActions").style.display = "flex";
+    $("draftLabel").textContent = "Draft saved";
+  }catch(e){ /* the preview is optional */ }
 }
 
 async function loadLines(){
@@ -722,11 +723,7 @@ async function loadLog(){
   }catch(e){ $("logTable").textContent = e.message; }
 }
 
-// auto-connect if a secret is remembered
-if(localStorage.getItem("mp_secret")){
-  $("secret").value = localStorage.getItem("mp_secret");
-  connect();
-}
+connect();
 </script>
 </body>
 </html>
