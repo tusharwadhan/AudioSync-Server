@@ -8269,67 +8269,112 @@ async def startup_morning_push():
 
 
 # ── Morning-push console page gate ──────────────────────────────────────
-# The page is password-protected on top of the per-call X-Admin-Secret.
-# Only the SHA-256 of the password is stored; the submitted value is
-# hashed and compared constant-time. A correct login sets an HttpOnly
-# cookie derived from the hash, so the page stays unlocked per browser.
-_MP_PAGE_PW_SHA256 = "9017515ad91b791792e458e64e633675d01fea37e3e385ba6374116df792df7f"
+# The page is PIN-protected on top of the per-call X-Admin-Secret. Only a
+# salted PBKDF2 hash of the PIN is stored; the submitted PIN is hashed and
+# compared constant-time. A 4-digit PIN is a tiny space, so failed attempts
+# are throttled per client and globally (see _mp_pin_locked). A correct PIN
+# sets an HttpOnly cookie derived from the hash, so the page stays unlocked
+# per browser.
+_MP_PIN_SALT = b"syncaura-console-pin-v1"
+_MP_PIN_PBKDF2 = "2990381dd71efc85a2f4995dcac64708d8d09c4cc5375c100f10fb579a9b01a2"
 _MP_COOKIE_VALUE = hashlib.sha256(
-    (_MP_PAGE_PW_SHA256 + ":syncaura-console-v1").encode()
+    (_MP_PIN_PBKDF2 + ":syncaura-console-v2").encode()
 ).hexdigest()
 
-_MP_LOGIN_HTML = """<!doctype html><html><head><meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Console Login</title><style>
-body{margin:0;min-height:100svh;display:grid;place-items:center;
-     background:#0a0506;color:#f3e9e2;font:15px/1.5 system-ui,sans-serif}
-form{background:#150e0b;border:1px solid #2b1d16;border-radius:14px;
-     padding:28px;width:min(92vw,360px);display:flex;flex-direction:column;gap:12px}
-h1{font-size:17px;margin:0}
-input{background:#0f0908;border:1px solid #2b1d16;border-radius:8px;
-      color:#f3e9e2;padding:10px 12px;font:inherit}
-input:focus{outline:1px solid #ff8a3d;border-color:#ff8a3d}
-button{background:linear-gradient(135deg,#ff8a3d,#ff5a1f);color:#1a0d05;
-       border:0;border-radius:9px;padding:10px;font:inherit;font-weight:700;cursor:pointer}
-.err{color:#e6553d;font-size:13px}</style></head><body>
-<form method="post" action="/admin/morning">
-  <h1>🌅 Morning Push Console</h1>
-  __ERR__
-  <input type="password" name="password" placeholder="Console password" autofocus>
-  <button>Unlock</button>
-</form></body></html>"""
+_MP_LOCK_AFTER = 5            # failed attempts per client before lockout
+_MP_LOCK_GLOBAL_AFTER = 30    # failed attempts from everyone before lockout
+_MP_LOCK_SECONDS = 900
+_mp_fails: dict = {}          # client ip -> (count, locked_until_monotonic)
+_mp_global_fails = [0, 0.0]   # [count, locked_until_monotonic]
+
+
+def _mp_client_ip(request: Request) -> str:
+    fwd = request.headers.get("x-forwarded-for", "")
+    if fwd:
+        return fwd.split(",")[0].strip()
+    return request.client.host if request.client else "?"
+
+
+def _mp_pin_locked(ip: str) -> int:
+    """Seconds of lockout remaining for this client (0 = free to try)."""
+    import time as _t
+    now = _t.monotonic()
+    left = 0
+    entry = _mp_fails.get(ip)
+    if entry and entry[1] > now:
+        left = max(left, int(entry[1] - now) + 1)
+    if _mp_global_fails[1] > now:
+        left = max(left, int(_mp_global_fails[1] - now) + 1)
+    return left
+
+
+def _mp_pin_record_fail(ip: str) -> None:
+    import time as _t
+    now = _t.monotonic()
+    if len(_mp_fails) > 2000:
+        for k in [k for k, v in _mp_fails.items() if v[1] < now]:
+            _mp_fails.pop(k, None)
+    count, until = _mp_fails.get(ip, (0, 0.0))
+    if until and until < now:
+        count, until = 0, 0.0
+    count += 1
+    if count >= _MP_LOCK_AFTER:
+        until = now + _MP_LOCK_SECONDS
+        count = 0
+    _mp_fails[ip] = (count, until)
+    if _mp_global_fails[1] and _mp_global_fails[1] < now:
+        _mp_global_fails[0], _mp_global_fails[1] = 0, 0.0
+    _mp_global_fails[0] += 1
+    if _mp_global_fails[0] >= _MP_LOCK_GLOBAL_AFTER:
+        _mp_global_fails[0] = 0
+        _mp_global_fails[1] = now + _MP_LOCK_SECONDS
+
+
+def _mp_login_page(locked_for: int = 0) -> HTMLResponse:
+    path = os.path.join(os.path.dirname(__file__), "static", "admin_login.html")
+    with open(path, encoding="utf-8") as f:
+        html = f.read()
+    html = html.replace("/*__LOCK__*/", f"startLock({locked_for});" if locked_for else "")
+    return HTMLResponse(html, headers={"Cache-Control": "no-store"})
 
 
 @app.get("/admin/morning", response_class=HTMLResponse)
 async def morning_push_console(request: Request):
     """Admin cockpit for the morning push. Root paths skip the API-key
     middleware (same as /share and /app), so the page carries its own
-    password gate; every data call additionally needs X-Admin-Secret."""
-    if request.cookies.get("mp_console") != _MP_COOKIE_VALUE:
-        return HTMLResponse(_MP_LOGIN_HTML.replace("__ERR__", ""))
+    PIN gate; every data call additionally needs X-Admin-Secret."""
+    import hmac as _hmac
+    cookie = request.cookies.get("mp_console") or ""
+    if not _hmac.compare_digest(cookie, _MP_COOKIE_VALUE):
+        return _mp_login_page(_mp_pin_locked(_mp_client_ip(request)))
     path = os.path.join(os.path.dirname(__file__), "static", "admin_morning.html")
     with open(path, encoding="utf-8") as f:
-        return HTMLResponse(f.read())
+        return HTMLResponse(f.read(), headers={"Cache-Control": "no-store"})
 
 
-@app.post("/admin/morning", response_class=HTMLResponse)
-async def morning_push_console_login(request: Request):
+@app.post("/admin/morning/pin")
+async def morning_push_console_pin(request: Request):
     import hmac as _hmac
+    ip = _mp_client_ip(request)
+    left = _mp_pin_locked(ip)
+    if left:
+        return JSONResponse({"ok": False, "retryAfter": left}, status_code=429)
     try:
-        form = await request.form()
-        submitted = str(form.get("password") or "")
+        body = await request.json()
+        submitted = str(body.get("pin") or "")
     except Exception:
         submitted = ""
-    ok = _hmac.compare_digest(
-        hashlib.sha256(submitted.encode("utf-8")).hexdigest(),
-        _MP_PAGE_PW_SHA256,
+    digest = await asyncio.to_thread(
+        hashlib.pbkdf2_hmac, "sha256", submitted.encode("utf-8"), _MP_PIN_SALT, 200000
     )
-    if not ok:
-        return HTMLResponse(
-            _MP_LOGIN_HTML.replace("__ERR__", '<div class="err">Wrong password</div>'),
-            status_code=401,
-        )
-    resp = RedirectResponse("/admin/morning", status_code=303)
+    if not _hmac.compare_digest(digest.hex(), _MP_PIN_PBKDF2):
+        _mp_pin_record_fail(ip)
+        left = _mp_pin_locked(ip)
+        if left:
+            return JSONResponse({"ok": False, "retryAfter": left}, status_code=429)
+        return JSONResponse({"ok": False}, status_code=401)
+    _mp_fails.pop(ip, None)
+    resp = JSONResponse({"ok": True})
     resp.set_cookie(
         "mp_console", _MP_COOKIE_VALUE,
         max_age=60 * 60 * 24 * 30, httponly=True, secure=True, samesite="lax",
