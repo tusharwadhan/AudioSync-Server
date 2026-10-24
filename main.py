@@ -2526,6 +2526,15 @@ async def get_lyrics_endpoint(
     plain_lyrics = None
     source = ""
     lr_plain_backup = None  # plain lyrics found early, used only as last resort
+    # YTM sometimes returns lyric lines with NO timing (same text, source
+    # LyricFind) flagged as timed. Held here so LRCLIB gets a chance at real
+    # synced lyrics first; used as plain text only if LRCLIB has nothing.
+    ytm_untimed = ""
+
+    def _untimed(ls) -> bool:
+        """True when 'timed' lines carry no usable timing (all share one
+        start, or the last line starts at 0)."""
+        return bool(ls) and (len({ln.startMs for ln in ls}) < 2 or ls[-1].startMs <= 0)
 
     # ── 1. YTM fast path first: two slim anonymous innertube calls,
     # measured ~0.2-0.5s total from Render's egress (Phase-0 gate) ──
@@ -2535,7 +2544,13 @@ async def get_lyrics_endpoint(
         lines, source, fast_confirmed_none = await asyncio.wait_for(
             _fetch_ytm_lyrics_fast(video_id), timeout=6.0
         )
-        if lines:
+        if _untimed(lines):
+            print(f"[/lyrics] YTM fast lines for {video_id} carry no timings — treating as untimed")
+            ytm_untimed = "\n".join(ln.text for ln in lines)
+            lines = []
+            # The legacy chain would return the same untimed text at 5-10s.
+            fast_confirmed_none = True
+        elif lines:
             print(f"[/lyrics] YTM fast: {len(lines)} timed lines ({time.time() - start:.2f}s)")
     except Exception as fast_err:
         print(f"[/lyrics] YTM fast path error: {fast_err!r}")
@@ -2606,6 +2621,10 @@ async def get_lyrics_endpoint(
                                         endMs=int(getattr(entry, "end_time", 0)),
                                     )
                                 )
+                            if _untimed(lines):
+                                print(f"[/lyrics] YTM lines for {video_id} carry no timings — treating as untimed")
+                                ytm_untimed = "\n".join(ln.text for ln in lines)
+                                lines = []
                         elif isinstance(lyrics_data, str):
                             plain_lyrics = lyrics_data
                 except Exception as yt_err:
@@ -2643,6 +2662,10 @@ async def get_lyrics_endpoint(
         plain_lyrics = lr_plain_backup
         source = "LRCLIB"
         print(f"[/lyrics] LRCLIB: plain lyrics ({len(plain_lyrics)} chars)")
+
+    if not lines and not plain_lyrics and ytm_untimed:
+        plain_lyrics = ytm_untimed
+        source = source or "YouTube Music"
 
     if not lines and not plain_lyrics:
         print(f"[/lyrics] No lyrics found ({time.time() - start:.2f}s)")
