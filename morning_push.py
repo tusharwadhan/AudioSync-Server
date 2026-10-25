@@ -1335,6 +1335,38 @@ async def mp_user_songs(request: Request, email: str, days: int = 365,
     ]}
 
 
+@router.get("/admin/morning-push/user-plays")
+async def mp_user_plays(request: Request, email: str, limit: int = 100,
+                        session=Depends(get_session)):
+    """One user's most recent plays WITH times (IST) — read-only."""
+    _require_admin(request)
+    limit = max(1, min(limit, 300))
+    rows = (
+        await session.execute(
+            sql_text(
+                """
+                SELECT e.title, e.uploader, e.played_at, e.received_at,
+                       e.duration_listened, e.completion_pct
+                FROM user_listen_events e
+                JOIN users u ON u.id = e.user_id
+                WHERE lower(u.email) = lower(:email)
+                ORDER BY e.played_at DESC
+                LIMIT :lim
+                """
+            ),
+            {"email": email, "lim": limit},
+        )
+    ).all()
+    def ist(dt):
+        return dt.astimezone(IST).strftime("%Y-%m-%d %H:%M") if dt else ""
+    return {"items": [
+        {"song": r.title or "", "artist": r.uploader or "",
+         "playedAtIST": ist(r.played_at), "receivedAtIST": ist(r.received_at),
+         "listenedSec": r.duration_listened, "completionPct": r.completion_pct}
+        for r in rows
+    ]}
+
+
 @router.post("/admin/morning-push/draft")
 async def mp_create_draft(request: Request, session=Depends(get_session)):
     """Store an already-rendered batch (e.g. a dry-run the admin liked) as a

@@ -268,6 +268,16 @@
     </div>
   </div>
 </div>
+<div id="playsModal" style="display:none;position:fixed;inset:0;background:#000c;z-index:8;place-items:center">
+  <div class="card" style="width:min(96vw,640px);max-height:86vh;display:flex;flex-direction:column">
+    <h2>Recent plays — <span id="playsWho" style="text-transform:none;letter-spacing:0"></span></h2>
+    <div class="hint" style="margin-bottom:8px">Times are IST. "Heard" is how long they actually listened; "synced" is when the phone reported it.</div>
+    <div id="playsBody" style="overflow:auto;flex:1"></div>
+    <div class="row" style="margin-top:10px">
+      <button class="ghost" onclick="document.getElementById('playsModal').style.display='none'">Close</button>
+    </div>
+  </div>
+</div>
 <div id="toast"></div>
 
 <script>
@@ -318,6 +328,21 @@ async function loadUsers(){
     renderUsers();
   }catch(e){ $("userList").innerHTML = `<span class="hint">${e.message}</span>`; }
 }
+async function showPlays(em){
+  $("playsWho").textContent = em;
+  $("playsBody").innerHTML = "<span class='hint'>Loading…</span>";
+  $("playsModal").style.display = "grid";
+  try{
+    const r = await api("/user-plays?limit=120&email="+encodeURIComponent(em));
+    $("playsBody").innerHTML = r.items.length
+      ? "<table><tr><th>When (IST)</th><th>Song</th><th>Heard</th><th>Synced</th></tr>" +
+        r.items.map(i=>`<tr><td style="white-space:nowrap">${i.playedAtIST}</td>
+          <td>${i.song}<br><span class="hint">${i.artist}</span></td>
+          <td>${i.listenedSec!=null?Math.round(i.listenedSec)+"s":""}${i.completionPct!=null?" · "+Math.round(i.completionPct)+"%":""}</td>
+          <td class="hint" style="white-space:nowrap">${i.receivedAtIST}</td></tr>`).join("") + "</table>"
+      : "<span class='hint'>No plays recorded.</span>";
+  }catch(e){ $("playsBody").textContent = e.message; }
+}
 let deliv = {};
 function delivPill(d){
   const m = {valid:["✓ can receive","var(--ok)"], dead:["✗ app likely removed","var(--err)"],
@@ -353,7 +378,8 @@ function renderUsers(){
       <input type="checkbox" data-em="${em}" ${checked&&!noMail?"checked":""} ${noMail?"disabled":""}>
       <span class="who">${u.name||"(no name)"}
         <span class="hint">${u.email||"no email — can't be targeted"}</span></span>
-      <span class="pill">${u.events} plays</span>
+      <a href="#" class="pill" title="Show recent plays with times"
+         onclick="showPlays('${em}');return false">${u.events} plays ›</a>
       ${u.socialToken?'<span class="pill">social</span>':""}
       ${deliv[em] ? delivPill(deliv[em]) : ""}
       ${u.appVersion?`<span class="pill llm">v${u.appVersion}${u.appVersion>=88?" 🎴":""}</span>`
