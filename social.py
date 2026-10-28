@@ -1536,12 +1536,24 @@ async def handle_dm_send(client_id: str, websocket: WebSocket, msg: dict) -> Non
         await _send(websocket, _err("not_subscribed", "Call social_subscribe first"))
         return
 
+    # Errors for a send name the message they belong to, so the app can fail
+    # exactly that bubble instead of guessing among several in flight.
+    _n = msg.get("client_nonce")
+    _err_nonce = _n if isinstance(_n, str) and len(_n) <= 64 else None
+
+    def _serr(code: str, message: str) -> dict:
+        d = _err(code, message)
+        d["received"] = "dm_send"
+        if _err_nonce:
+            d["client_nonce"] = _err_nonce
+        return d
+
     recipient_uid = (msg.get("to_uid") or "").strip()
     if not recipient_uid:
-        await _send(websocket, _err("bad_request", "to_uid required"))
+        await _send(websocket, _serr("bad_request", "to_uid required"))
         return
     if recipient_uid == sender_uid:
-        await _send(websocket, _err("bad_request", "Cannot DM yourself"))
+        await _send(websocket, _serr("bad_request", "Cannot DM yourself"))
         return
 
     text = (msg.get("text") or "").strip() or None
@@ -1561,7 +1573,7 @@ async def handle_dm_send(client_id: str, websocket: WebSocket, msg: dict) -> Non
     if view_once or photo_url:
         if not view_once or not photo_url:
             # Both must be set together — plain photos don't exist yet.
-            await _send(websocket, _err("bad_request", "view_once requires photo_url and vice versa"))
+            await _send(websocket, _serr("bad_request", "view_once requires photo_url and vice versa"))
             return
         # Reject view-once across a non-accepted gate so a stranger
         # can't push a one-time photo behind their first DM
@@ -1579,7 +1591,7 @@ async def handle_dm_send(client_id: str, websocket: WebSocket, msg: dict) -> Non
         cloud = os.environ.get("CLOUDINARY_CLOUD_NAME", "")
         expected_prefix = f"https://res.cloudinary.com/{cloud}/"
         if not cloud or not photo_url.startswith(expected_prefix) or "/dm_photos/" not in photo_url:
-            await _send(websocket, _err("bad_photo_url", "Invalid photo URL"))
+            await _send(websocket, _serr("bad_photo_url", "Invalid photo URL"))
             return
         # Verify the Cloudinary asset's context binds it to
         # (sender, recipient). Without this, a stolen signature can
@@ -1589,7 +1601,7 @@ async def handle_dm_send(client_id: str, websocket: WebSocket, msg: dict) -> Non
         import cloudinary.api
         public_id = _public_id_from_dm_photo_url(photo_url)
         if public_id is None:
-            await _send(websocket, _err("bad_photo_url", "Cannot parse public_id"))
+            await _send(websocket, _serr("bad_photo_url", "Cannot parse public_id"))
             return
         try:
             resource = await asyncio.to_thread(
@@ -1597,17 +1609,17 @@ async def handle_dm_send(client_id: str, websocket: WebSocket, msg: dict) -> Non
             )
         except Exception as e:
             print(f"[dm_send view_once] context fetch failed for {public_id}: {e}")
-            await _send(websocket, _err("verify_failed", "Photo verification failed"))
+            await _send(websocket, _serr("verify_failed", "Photo verification failed"))
             return
         ctx = (resource.get("context") or {}).get("custom", {})
         if ctx.get("from_uid") != sender_uid or ctx.get("to_uid") != recipient_uid:
-            await _send(websocket, _err("context_mismatch", "Photo not bound to this conversation"))
+            await _send(websocket, _serr("context_mismatch", "Photo not bound to this conversation"))
             return
 
     if text is None and np_video_id is None and share_moment is None and not view_once:
         await _send(
             websocket,
-            _err("empty_message", "Provide text, np_video_id, share_moment, or view-once photo"),
+            _serr("empty_message", "Provide text, np_video_id, share_moment, or view-once photo"),
         )
         return
 
@@ -1627,7 +1639,7 @@ async def handle_dm_send(client_id: str, websocket: WebSocket, msg: dict) -> Non
     # an identifier, so refuse it outright; the free-text fields are
     # trimmed to fit instead of dropping the message.
     if np_video_id is not None and len(np_video_id) > 32:
-        await _send(websocket, _err("bad_request", "np_video_id too long"))
+        await _send(websocket, _serr("bad_request", "np_video_id too long"))
         return
     np_title = _clip(msg.get("np_title"), 512)
     np_artist = _clip(msg.get("np_artist"), 255)
@@ -1637,7 +1649,7 @@ async def handle_dm_send(client_id: str, websocket: WebSocket, msg: dict) -> Non
 
     sender = presence.get(sender_uid)
     if sender is None:
-        await _send(websocket, _err("not_subscribed", "Call social_subscribe first"))
+        await _send(websocket, _serr("not_subscribed", "Call social_subscribe first"))
         return
 
     async with _session_scope() as session:
@@ -1649,7 +1661,7 @@ async def handle_dm_send(client_id: str, websocket: WebSocket, msg: dict) -> Non
             )
         ).scalar_one_or_none()
         if exists is None:
-            await _send(websocket, _err("recipient_not_found", "Unknown recipient"))
+            await _send(websocket, _serr("recipient_not_found", "Unknown recipient"))
             return
 
         # Gate logic: if no thread state OR pending, this is a request.
