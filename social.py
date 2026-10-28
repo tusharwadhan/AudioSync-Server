@@ -1163,9 +1163,11 @@ async def handle_social_subscribe(client_id: str, websocket: WebSocket, msg: dic
     await _send(websocket, snapshot)
 
 
-async def handle_social_disconnect(client_id: str) -> None:
+async def handle_social_disconnect(client_id: str, seen_at: float | None = None) -> None:
     """Called from main.handle_disconnect for every WS that drops.
-    Idempotent if the client never sent social_subscribe."""
+    Idempotent if the client never sent social_subscribe. `seen_at` (epoch
+    seconds) lets the stale-presence sweep stamp last_seen with the user's
+    real last activity instead of the moment the sweep noticed."""
     kicked = presence.unsubscribe_by_client(client_id)
     if kicked is None:
         return
@@ -1176,12 +1178,72 @@ async def handle_social_disconnect(client_id: str) -> None:
             await session.execute(
                 update(models.User)
                 .where(models.User.id == kicked.uid)
-                .values(last_seen=_now())
+                .values(
+                    last_seen=datetime.fromtimestamp(seen_at, tz=timezone.utc)
+                    if seen_at else _now()
+                )
             )
             await session.commit()
     except Exception as e:
         print(f"[social] last_seen update failed for {kicked.uid[:8]}: {e}")
+    # The user may have reconnected while we awaited the DB write above
+    # (a new socket already announced presence_join): a late presence_leave
+    # would then show them offline while they are online.
+    if presence.is_online(kicked.uid):
+        return
     await _broadcast({"type": "presence_leave", "uid": kicked.uid})
+
+
+# A live app sends `presence_ping` every 30s (and any frame refreshes the
+# clock). The server runs with ws_ping_timeout=None (see serve.py), so a
+# phone that vanished without closing its socket - swiped away, dozing, lost
+# signal - used to stay "online" until Render's ~5 min idle cutoff. The sweep
+# drops presence once the client has been silent for this long (2 missed
+# pings is 2 intervals; the sweep runs every 15s) and closes the socket so a client that
+# is actually still alive reconnects and re-subscribes.
+PRESENCE_STALE_S = float(os.environ.get("PRESENCE_STALE_S", "60"))
+PRESENCE_SWEEP_ENABLED = os.environ.get("PRESENCE_SWEEP", "1") != "0"
+
+
+async def sweep_stale_presence(timeout: float = PRESENCE_STALE_S) -> list[str]:
+    """Mark silent users offline. Returns the uids it dropped."""
+    now = time.time()
+    dropped: list[str] = []
+    for entry in presence.all_entries():
+        if now - entry.last_ping <= timeout:
+            continue
+        # Re-check against the live map: the entry may have been replaced
+        # (reconnect) or refreshed while we were awaiting earlier drops.
+        cur = presence.get(entry.uid)
+        if cur is not entry or time.time() - entry.last_ping <= timeout:
+            continue
+        print(
+            f"[social] presence sweep: {entry.uid[:8]} silent "
+            f"{int(time.time() - entry.last_ping)}s - marking offline"
+        )
+        try:
+            await handle_social_disconnect(entry.client_id, seen_at=entry.last_ping)
+            try:
+                # A dead peer may never acknowledge the close; don't wait long.
+                await asyncio.wait_for(entry.websocket.close(code=1001), timeout=3)
+            except Exception:
+                pass
+            dropped.append(entry.uid)
+        except Exception as e:
+            # One bad entry must not stop the rest of the sweep.
+            print(f"[social] presence sweep: dropping {entry.uid[:8]} failed: {type(e).__name__}")
+    return dropped
+
+
+async def presence_sweep_loop(interval_seconds: int = 15) -> None:
+    while True:
+        await asyncio.sleep(interval_seconds)
+        if not PRESENCE_SWEEP_ENABLED:
+            continue
+        try:
+            await sweep_stale_presence()
+        except Exception as e:
+            print(f"[social] presence sweep failed: {type(e).__name__}: {e}")
 
 
 async def handle_dm_set_mute(client_id: str, websocket: WebSocket, msg: dict) -> None:

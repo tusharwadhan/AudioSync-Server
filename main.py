@@ -7345,6 +7345,9 @@ async def websocket_endpoint(websocket: WebSocket):
         while True:
             raw = await websocket.receive_text()
             last_rx = time.monotonic()
+            # Any frame proves the client is alive: keeps social presence
+            # fresh for the stale-presence sweep (no-op for non-social sockets).
+            social.presence.touch(client_id)
             try:
                 msg = json.loads(raw)
             except json.JSONDecodeError:
@@ -8461,6 +8464,7 @@ app.include_router(api)
 async def startup_social_prune() -> None:
     """Start the periodic lounge/DM retention sweeper."""
     asyncio.create_task(social.prune_loop())
+    asyncio.create_task(social.presence_sweep_loop())
 
 
 if __name__ == "__main__":
