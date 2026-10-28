@@ -688,7 +688,7 @@ class LyricsLine(BaseModel):
 # gap grows across the song -- that is the wrong recording, and the duration
 # scoring in _lrclib_score exists to prevent it.
 
-_LYRICS_OFFSET_CAP_MS = 30_000       # beyond this it is not a sync problem
+_LYRICS_OFFSET_CAP_MS = 120_000      # the app's nudge panel spans +/-120s
 _TRUSTED_OFFSET_UIDS = {
     u.strip() for u in os.getenv("LYRICS_OFFSET_TRUSTED_UIDS", "").split(",")
     if u.strip()
