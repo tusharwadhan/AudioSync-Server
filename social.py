@@ -143,6 +143,10 @@ class _Online:
     name: str
     avatar_url: str | None
     last_ping: float
+    # True while the user's app is not on screen (backgrounded / swiped
+    # away but the process lives on). An away user keeps their socket and
+    # still receives DMs live, but is hidden from everyone's online list.
+    away: bool = False
 
 
 class PresenceManager:
@@ -200,7 +204,21 @@ class PresenceManager:
         return self._by_uid.get(uid)
 
     def is_online(self, uid: str) -> bool:
+        """Connected (socket subscribed), whether or not shown as online."""
         return uid in self._by_uid
+
+    def is_visible(self, uid: str) -> bool:
+        """Shown to others as online: connected AND not away."""
+        e = self._by_uid.get(uid)
+        return e is not None and not e.away
+
+    def set_away(self, uid: str, away: bool) -> bool:
+        """Returns True when the state actually changed."""
+        e = self._by_uid.get(uid)
+        if e is None or e.away == away:
+            return False
+        e.away = away
+        return True
 
     def uid_for_client(self, client_id: str) -> str | None:
         return self._client_to_uid.get(client_id)
@@ -217,6 +235,7 @@ class PresenceManager:
         return [
             {"uid": o.uid, "name": o.name, "avatar_url": o.avatar_url}
             for o in self._by_uid.values()
+            if not o.away
         ]
 
     def all_entries(self) -> list[_Online]:
@@ -724,7 +743,7 @@ async def _friend_summaries(session: AsyncSession, uid: str) -> list[dict]:
             # as misses. See photo_url_with_version() docstring.
             "avatar_url": photo_url_with_version(photo_url, photo_updated_at),
             "status_text": status_text,
-            "is_online": presence.is_online(friend_uid),
+            "is_online": presence.is_visible(friend_uid),
             "last_seen_ms": _to_ms(last_seen),
         }
         for (friend_uid, display_name, photo_url, photo_updated_at, status_text, last_seen) in rows
@@ -1145,16 +1164,29 @@ async def handle_social_subscribe(client_id: str, websocket: WebSocket, msg: dic
             _err("session_replaced", "Signed in from another device"),
         )
 
+    # A socket opened while the app is not on screen (a background service
+    # reconnecting) subscribes as away: it stays hidden instead of
+    # flickering "joined"/"left" at everyone.
+    start_away = msg.get("away") is True
+    if start_away:
+        presence.set_away(uid, True)
+        if kicked is not None and not kicked.away:
+            # The old entry was visible and friends were told "joined";
+            # this reconnect replaces it hidden, so retire it explicitly or
+            # they would keep showing the user online.
+            await _broadcast({"type": "presence_leave", "uid": uid}, exclude_uid=uid)
+
     # Broadcast our arrival to everyone else.
-    await _broadcast(
-        {
-            "type": "presence_join",
-            "uid": uid,
-            "name": name or "",
-            "avatar_url": avatar_url,
-        },
-        exclude_uid=uid,
-    )
+    if not start_away:
+        await _broadcast(
+            {
+                "type": "presence_join",
+                "uid": uid,
+                "name": name or "",
+                "avatar_url": avatar_url,
+            },
+            exclude_uid=uid,
+        )
 
     # Build + send the initial snapshot.
     async with _session_scope() as session:
@@ -1191,6 +1223,8 @@ async def handle_social_disconnect(client_id: str, seen_at: float | None = None)
     # would then show them offline while they are online.
     if presence.is_online(kicked.uid):
         return
+    if kicked.away:
+        return  # already announced as gone when they went away
     await _broadcast({"type": "presence_leave", "uid": kicked.uid})
 
 
@@ -1384,6 +1418,55 @@ async def handle_dm_unfriend(client_id: str, websocket: WebSocket, msg: dict) ->
 
 async def handle_presence_ping(client_id: str, websocket: WebSocket, msg: dict) -> None:
     presence.touch(client_id)
+    # Newer apps repeat their away/visible state in every ping, so a lost
+    # presence_state frame (or a race around connect) heals within 30s.
+    if isinstance(msg.get("away"), bool):
+        await _apply_away(client_id, msg["away"])
+
+
+async def handle_presence_state(client_id: str, websocket: WebSocket, msg: dict) -> None:
+    """`presence_state {away: bool}` - the app reports whether it is on
+    screen. Backgrounded/swiped-away apps often keep their process (and
+    socket) alive for minutes, which made friends see them online long
+    after they left. Away => announced as `presence_leave` and dropped
+    from online lists; the socket and live DM delivery are unaffected.
+    Back on screen => `presence_join` again."""
+    presence.touch(client_id)
+    await _apply_away(client_id, msg.get("away") is True)
+
+
+async def _apply_away(client_id: str, away: bool) -> None:
+    uid = presence.uid_for_client(client_id)
+    if uid is None:
+        return
+    if not presence.set_away(uid, away):
+        return
+    entry = presence.get(uid)
+    if entry is None:
+        return
+    if away:
+        try:
+            async with _session_scope() as session:
+                await session.execute(
+                    update(models.User).where(models.User.id == uid).values(last_seen=_now())
+                )
+                await session.commit()
+        except Exception as e:
+            print(f"[social] last_seen update failed for {uid[:8]}: {e}")
+        # The user may have reconnected visibly while we awaited the DB write.
+        if presence.get(uid) is not entry or not entry.away:
+            return
+        await _broadcast({"type": "presence_leave", "uid": uid}, exclude_uid=uid)
+    else:
+        await _broadcast(
+            {
+                "type": "presence_join",
+                "uid": uid,
+                "name": entry.name or "",
+                "avatar_url": entry.avatar_url,
+            },
+            exclude_uid=uid,
+        )
 
 
 async def handle_social_fcm_register(

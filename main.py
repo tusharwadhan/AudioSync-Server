@@ -7531,6 +7531,9 @@ async def websocket_endpoint(websocket: WebSocket):
             elif msg_type == "presence_ping":
                 await _social_safe(social.handle_presence_ping, client_id, websocket, msg)
 
+            elif msg_type == "presence_state":
+                await _social_safe(social.handle_presence_state, client_id, websocket, msg)
+
             elif msg_type == "social_fcm_register":
                 await _social_safe(social.handle_social_fcm_register, client_id, websocket, msg)
 
