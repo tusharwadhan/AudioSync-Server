@@ -7555,6 +7555,12 @@ async def websocket_endpoint(websocket: WebSocket):
             elif msg_type == "dm_open":
                 await _social_safe(social.handle_dm_open, client_id, websocket, msg)
 
+            elif msg_type == "dm_read_ids":
+                await _social_safe(social.handle_dm_read_ids, client_id, websocket, msg)
+
+            elif msg_type == "dm_close":
+                await _social_safe(social.handle_dm_close, client_id, websocket, msg)
+
             # ── DM chat-parity messages ──
             elif msg_type == "dm_chat_react":
                 await _social_safe(social.handle_dm_chat_react, client_id, websocket, msg)

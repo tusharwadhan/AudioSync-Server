@@ -57,6 +57,7 @@ REST endpoints (mounted under /api/v1/social):
 from __future__ import annotations
 
 import asyncio
+import collections
 import os
 import json
 import time
@@ -66,7 +67,8 @@ from typing import Any, Optional
 
 from fastapi import APIRouter, Depends, HTTPException, WebSocket
 from pydantic import BaseModel
-from sqlalchemy import and_, delete, or_, select, update, func
+from sqlalchemy import and_, delete, exists, or_, select, update, func
+from sqlalchemy import text as sql_text
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 from firebase_admin import auth as fb_auth
@@ -247,6 +249,36 @@ presence = PresenceManager()
 _fcm_tokens_by_uid: dict[str, str] = {}
 
 
+async def steal_fcm_token(session: AsyncSession, token: str, new_uid: str) -> list[str]:
+    """A device token belongs to exactly one account. When it is registered
+    for `new_uid`, clear it from every other users.fcm_token row and drop
+    the stale in-memory mappings, so the previous account on a shared
+    phone stops receiving the new account's pushes. Returns the uids it
+    was taken from. Does not commit."""
+    rows = (
+        await session.execute(
+            sql_text(
+                "UPDATE users SET fcm_token = NULL WHERE fcm_token = :t "
+                "AND id <> :u RETURNING id"
+            ),
+            {"t": token, "u": new_uid},
+        )
+    ).scalars().all()
+    # The morning-push table maps token -> user too; the WS register path
+    # never updates it, so drop other accounts' mapping (the REST path
+    # re-asserts ownership with its own upsert).
+    await session.execute(
+        sql_text("DELETE FROM user_fcm_tokens WHERE token = :t AND user_id <> :u"),
+        {"t": token, "u": new_uid},
+    )
+    for other in list(_fcm_tokens_by_uid):
+        if other != new_uid and _fcm_tokens_by_uid.get(other) == token:
+            _fcm_tokens_by_uid.pop(other, None)
+    for other in rows:
+        _fcm_tokens_by_uid.pop(other, None)
+    return list(rows)
+
+
 async def _push_dm_fcm(
     *,
     recipient_uid: str,
@@ -254,6 +286,8 @@ async def _push_dm_fcm(
     sender_name: str,
     preview: str,
     sender_avatar_url: str | None = None,
+    private: bool = False,
+    message_id: int | None = None,
 ) -> None:
     """Send a data-only FCM message for a DM the recipient missed
     because they weren't connected. Best-effort, but every branch
@@ -310,8 +344,14 @@ async def _push_dm_fcm(
             "type": "dm",
             "from_uid": sender_uid,
             "from_name": sender_name[:120],
-            "preview": (preview or "")[:200],
+            # Disappearing chats never put message text in the push payload
+            # (it would outlive the message in notification history).
+            "preview": "New message" if private else (preview or "")[:200],
         }
+        if message_id is not None:
+            data["message_id"] = str(message_id)
+        if private:
+            data["private"] = "1"
         if sender_avatar_url:
             # Carry the avatar so the recipient's notification can render
             # the sender's face (drives Android 11+ Conversation classification).
@@ -319,12 +359,18 @@ async def _push_dm_fcm(
         message = _fcm_messaging.Message(
             data=data,
             token=token,
-            android=_fcm_messaging.AndroidConfig(priority="high"),
+            # Disappearing chats: a notification for a message that is no
+            # longer relevant after a day should not be delivered late.
+            # (No collapse_key: that would drop a burst down to one push.)
+            android=_fcm_messaging.AndroidConfig(
+                priority="high",
+                ttl=timedelta(hours=24) if private else None,
+            ),
         )
-        message_id = await asyncio.to_thread(_fcm_messaging.send, message)
+        fcm_id = await asyncio.to_thread(_fcm_messaging.send, message)
         print(
             f"[social] FCM DM push OK -> {recipient_uid[:8]} "
-            f"message_id={message_id}"
+            f"message_id={fcm_id}"
         )
     except _fcm_messaging.UnregisteredError:
         # Stale token — drop from the map AND clear the persisted copy so
@@ -690,6 +736,7 @@ def _dm_to_dict(
     *,
     with_gate_state: str | None = None,
     user_lookup: dict[str, tuple[str | None, str | None, int | None, str | None]] | None = None,
+    nonce_for: str | None = None,
 ) -> dict:
     d = {
         "id": m.id,
@@ -720,6 +767,22 @@ def _dm_to_dict(
         "photo_url": m.photo_url if with_gate_state in (None, "accepted") else None,
         "view_once_status": m.view_once_status if with_gate_state in (None, "accepted") else None,
     }
+    if m.deleted:
+        # Unsent messages ship no content (the client renders its own
+        # "deleted" placeholder from the flag). '' - not None - so apps that
+        # treat a missing text field specially keep working.
+        d["text"] = ""
+        d["np_video_id"] = None
+        d["np_title"] = None
+        d["np_artist"] = None
+        d["np_thumbnail"] = None
+        d["share_moment"] = None
+        d["photo_url"] = None
+    # The sender's own rows carry their client_nonce so an outbox that
+    # survived a reconnect can reconcile with the persisted row instead of
+    # re-sending. Never exposed to the recipient.
+    if nonce_for is not None and m.from_uid == nonce_for and m.client_nonce:
+        d["client_nonce"] = m.client_nonce
     if with_gate_state is not None:
         d["gate_state"] = with_gate_state
     # Sender identity for the snapshot's pending_requests etc., so
@@ -891,7 +954,7 @@ async def _build_snapshot(session: AsyncSession, uid: str) -> dict:
     # Outgoing-still-unread (for the sender's view of their own
     # in-flight messages). Group by peer for the client.
     sent_unread = [
-        _dm_to_dict(m, with_gate_state="accepted", user_lookup=user_lookup)
+        _dm_to_dict(m, with_gate_state="accepted", user_lookup=user_lookup, nonce_for=uid)
         for m in sent_pending
     ]
 
@@ -905,7 +968,15 @@ async def _build_snapshot(session: AsyncSession, uid: str) -> dict:
     history_peers = set(mode_by_peer.keys())
     history: list[dict] = []
     if history_peers:
-        hist_rows = (
+        # Rows this viewer already dismissed are excluded IN the query,
+        # before the LIMIT - otherwise a long run of dismissed rows
+        # crowds live messages out of the window. The cap is per thread
+        # (not global) so one busy chat can't starve the others.
+        dismissed = exists().where(
+            models.DmDisappeared.user_uid == uid,
+            models.DmDisappeared.message_id == models.DmMessage.id,
+        )
+        raw_rows = (
             await session.execute(
                 select(models.DmMessage)
                 .where(
@@ -918,11 +989,21 @@ async def _build_snapshot(session: AsyncSession, uid: str) -> dict:
                         models.DmMessage.from_uid.in_(history_peers),
                         models.DmMessage.to_uid.in_(history_peers),
                     ),
+                    ~dismissed,
                 )
                 .order_by(models.DmMessage.sent_at.desc())
-                .limit(500)
+                .limit(3000)
             )
         ).scalars().all()
+        per_peer: dict[str, int] = {}
+        hist_rows = []
+        for m in raw_rows:  # newest first
+            peer_key = m.to_uid if m.from_uid == uid else m.from_uid
+            n = per_peer.get(peer_key, 0)
+            if n >= 500:
+                continue
+            per_peer[peer_key] = n + 1
+            hist_rows.append(m)
         # Ensure sender names resolve for history rows too.
         missing = {m.from_uid for m in hist_rows} - set(user_lookup.keys())
         if missing:
@@ -940,7 +1021,7 @@ async def _build_snapshot(session: AsyncSession, uid: str) -> dict:
             for u_id, dname, photo, updated_at, status_text in extra:
                 user_lookup[u_id] = (dname, photo, updated_at, status_text)
         history = [
-            _dm_to_dict(m, with_gate_state="accepted", user_lookup=user_lookup)
+            _dm_to_dict(m, with_gate_state="accepted", user_lookup=user_lookup, nonce_for=uid)
             for m in reversed(hist_rows)
         ]
 
@@ -994,6 +1075,9 @@ async def _build_snapshot(session: AsyncSession, uid: str) -> dict:
         # (e.g. messages that haven't been GC'd yet on the server).
         "chat_clears": clear_cutoffs,
         "server_time": _to_ms(_now()),
+        # Capability list so a newer app can tell what this server speaks
+        # and fall back gracefully against an older one.
+        "features": SERVER_FEATURES,
     }
 
 
@@ -1252,11 +1336,14 @@ async def handle_social_fcm_register(
     token = (msg.get("token") or "").strip()
     if not token:
         return
+    if len(token) > 512:
+        return
     _fcm_tokens_by_uid[uid] = token
     # Persist so the token survives a server restart/redeploy — otherwise
     # an offline user can't be pushed a DM until they reconnect the WS.
     try:
         async with _session_scope() as session:
+            await steal_fcm_token(session, token, uid)
             await session.execute(
                 update(models.User)
                 .where(models.User.id == uid)
@@ -1384,6 +1471,54 @@ async def handle_lounge_unreact(
         "message_id": message_id,
         "reactions": updated,
     })
+
+
+# (sender_uid, client_nonce) -> (message_id, monotonic_ts) for recently sent
+# text DMs. The DB lookup is the source of truth for dedupe; this cache
+# covers the case where the row has ALREADY been deleted (seen + shared
+# delete) before a stale outbox retry arrives - without it the retry would
+# resurrect the message as a brand-new unseen one.
+_RECENT_NONCE_TTL_S = 15 * 60
+_RECENT_NONCE_MAX = 5000
+_recent_nonces: "collections.OrderedDict[tuple[str, str, str], tuple[int, float]]" = collections.OrderedDict()
+
+
+def _nonce_remember(uid: str, peer: str, nonce: str, message_id: int) -> None:
+    key = (uid, peer, nonce)
+    _recent_nonces[key] = (message_id, time.monotonic())
+    _recent_nonces.move_to_end(key)
+    while len(_recent_nonces) > _RECENT_NONCE_MAX:
+        _recent_nonces.popitem(last=False)
+
+
+def _nonce_recall(uid: str, peer: str, nonce: str) -> int | None:
+    key = (uid, peer, nonce)
+    hit = _recent_nonces.get(key)
+    if hit is None:
+        return None
+    if time.monotonic() - hit[1] > _RECENT_NONCE_TTL_S:
+        _recent_nonces.pop(key, None)
+        return None
+    return hit[0]
+
+
+# Advertised in every social_snapshot. Additive; older apps ignore it.
+SERVER_FEATURES = ["dm_nonce_idempotent", "dm_read_ids", "dm_close", "dm_send_ack"]
+
+
+_retention_hits: "dict[str, collections.deque[float]]" = {}
+
+
+def _retention_rate_ok(uid: str, limit: int = 6, window_s: float = 60.0) -> bool:
+    """At most `limit` mode changes per `window_s` per user."""
+    now = time.monotonic()
+    dq = _retention_hits.setdefault(uid, collections.deque())
+    while dq and now - dq[0] > window_s:
+        dq.popleft()
+    if len(dq) >= limit:
+        return False
+    dq.append(now)
+    return True
 
 
 def _clip(value, limit: int) -> str | None:
@@ -1522,6 +1657,55 @@ async def handle_dm_send(client_id: str, websocket: WebSocket, msg: dict) -> Non
         # we still STORE the message (sender never knows they were
         # declined — soft block) but DO NOT deliver it over WS.
         state_row, _ = await _ensure_thread_state(session, sender_uid, recipient_uid)
+
+        # Idempotent resend. The app keeps an outbox and re-sends with the
+        # same client_nonce after a reconnect; without this a send whose
+        # echo was lost would be inserted twice. The advisory lock makes
+        # two concurrent copies (old socket + new socket) serialize so the
+        # second one sees the first one's row.
+        if client_nonce is not None and not view_once:
+            await session.execute(
+                sql_text("SELECT pg_advisory_xact_lock(hashtext(:k))"),
+                {"k": f"dmnonce:{sender_uid}:{recipient_uid}:{client_nonce}"},
+            )
+            dup = (
+                await session.execute(
+                    select(models.DmMessage)
+                    .where(
+                        models.DmMessage.from_uid == sender_uid,
+                        models.DmMessage.to_uid == recipient_uid,
+                        models.DmMessage.client_nonce == client_nonce,
+                    )
+                    .order_by(models.DmMessage.id.desc())
+                    .limit(1)
+                )
+            ).scalar_one_or_none()
+            if dup is not None:
+                if state_row.state == "accepted":
+                    dup_gate = "accepted"
+                elif state_row.state in ("declined_by_a", "declined_by_b"):
+                    dup_gate = "declined"
+                else:
+                    dup_gate = "pending"
+                dup_payload = _dm_to_dict(dup, with_gate_state=dup_gate, nonce_for=sender_uid)
+                dup_payload["from_name"] = sender.name
+                dup_payload["from_avatar_url"] = sender.avatar_url
+                dup_payload["type"] = "dm_message"
+                dup_payload["client_nonce"] = client_nonce
+                await _send(websocket, dup_payload)
+                return
+            gone_id = _nonce_recall(sender_uid, recipient_uid, client_nonce)
+            if gone_id is not None:
+                # Delivered earlier and since consumed: acknowledge so the
+                # sender's outbox clears, but do NOT insert again.
+                await _send(websocket, {
+                    "type": "dm_send_ack",
+                    "client_nonce": client_nonce,
+                    "message_id": gone_id,
+                    "gone": True,
+                })
+                return
+
         gate_state = "pending"
         delivered_to_recipient = False
         if state_row.state == "accepted":
@@ -1554,11 +1738,16 @@ async def handle_dm_send(client_id: str, websocket: WebSocket, msg: dict) -> Non
             # Audit fix #1 — persist client_nonce so the
             # dm_view_once_opened broadcast can carry it back to
             # the sender's optimistic message.
-            client_nonce=client_nonce if view_once else None,
+            # Text/song DMs persist it too (idempotent resend, see above).
+            client_nonce=client_nonce,
         )
         session.add(message)
         await session.commit()
         await session.refresh(message)
+        retention_mode_now = state_row.retention_mode or "keep"
+
+    if client_nonce is not None and not view_once:
+        _nonce_remember(sender_uid, recipient_uid, client_nonce, message.id)
 
     base = _dm_to_dict(message, with_gate_state=gate_state)
     base["from_name"] = sender.name
@@ -1590,6 +1779,8 @@ async def handle_dm_send(client_id: str, websocket: WebSocket, msg: dict) -> Non
                 sender_name=sender.name,
                 sender_avatar_url=sender.avatar_url,
                 preview=fcm_preview,
+                private=(retention_mode_now == "disappear"),
+                message_id=message.id,
             )
 
 
@@ -1718,8 +1909,39 @@ async def handle_dm_set_retention(
     sender = presence.get(me)
     by_name = sender.name if sender is not None else ""
 
+    async def _corrective(current_mode: str) -> None:
+        # Tell the caller what the mode really is so an optimistic toggle
+        # in their UI snaps back (older apps handle a message-less
+        # dm_retention_changed).
+        await _send(websocket, {
+            "type": "dm_retention_changed",
+            "peer_uid": peer,
+            "mode": current_mode,
+            "by_uid": me,
+            "by_name": "",
+        })
+
+    if not _retention_rate_ok(me):
+        await _send(websocket, _err("rate_limited", "Too many mode changes"))
+        async with _session_scope() as s3:
+            cur = await _get_thread_state(s3, me, peer)
+            await _corrective((cur.retention_mode if cur else None) or "keep")
+        return
+
     async with _session_scope() as session:
-        state_row, _ = await _ensure_thread_state(session, me, peer)
+        # Only an accepted (friends) thread can have its mode changed. The
+        # old code created thread state + a chat line for ANY uid, which
+        # let a stranger plant a notice in someone's chat (and raised an
+        # FK error for an unknown uid).
+        state_row = await _get_thread_state(session, me, peer)
+        if state_row is None or state_row.state != "accepted":
+            await _send(websocket, _err("not_friends", "Only friends can change this"))
+            await _corrective((state_row.retention_mode if state_row else None) or "keep")
+            return
+        if (state_row.retention_mode or "keep") == mode:
+            # No-op toggle: no new notice line, just re-sync the caller.
+            await _corrective(mode)
+            return
         state_row.retention_mode = mode
         state_row.updated_at = _now()
 
@@ -1740,6 +1962,24 @@ async def handle_dm_set_retention(
         session.add(event)
         await session.commit()
         await session.refresh(event)
+
+    # Remember where the current disappearing run starts so a later
+    # sweep never touches messages from before it was switched on.
+    # Best-effort and in its own session: the column is additive and
+    # unmapped, and a failure here must not affect the toggle itself.
+    try:
+        a, b = _ordered_pair(me, peer)
+        async with _session_scope() as s2:
+            await s2.execute(
+                sql_text(
+                    "UPDATE dm_thread_state SET retention_since_id = :i "
+                    "WHERE uid_a = :a AND uid_b = :b"
+                ),
+                {"i": event.id if mode == "disappear" else None, "a": a, "b": b},
+            )
+            await s2.commit()
+    except Exception as e:
+        print(f"[social] retention_since_id write skipped: {type(e).__name__}")
 
     event_dict = _dm_to_dict(event, with_gate_state="accepted")
     event_dict["from_name"] = by_name
@@ -1767,6 +2007,189 @@ async def handle_dm_set_retention(
             "message": event_dict,
         },
     )
+
+
+# Shared-delete sweep switch. OFF by default: dm_close only LOGS what it
+# would delete until the owner flips DM_SHARED_DELETE=1 (after the app that
+# sends dm_close has shipped and been adopted).
+DM_SHARED_DELETE = os.environ.get("DM_SHARED_DELETE", "0") == "1"
+
+
+async def handle_dm_read_ids(client_id: str, websocket: WebSocket, msg: dict) -> None:
+    """`dm_read_ids {peer_uid, ids:[...]}` - mark exactly these incoming
+    messages read (the app sends only ids that were really on screen),
+    unlike dm_read's "everything up to N". The sender is told which ids
+    were read, plus a legacy-safe `up_to_message_id`: the highest id such
+    that EVERY message from the sender up to it is read, so an older
+    sender app (which flips everything <= up_to to "Read") never shows an
+    unread message as read."""
+    me = presence.uid_for_client(client_id)
+    if me is None:
+        await _send(websocket, _err("not_subscribed", "Call social_subscribe first"))
+        return
+    peer = str(msg.get("peer_uid") or "").strip()
+    raw_ids = msg.get("ids")
+    if not peer or not isinstance(raw_ids, list):
+        await _send(websocket, _err("bad_request", "peer_uid + ids[] required"))
+        return
+    ids = sorted({
+        i for i in raw_ids
+        if isinstance(i, int) and not isinstance(i, bool) and 0 < i < 2**62
+    })[:500]
+    if not ids:
+        return
+
+    read_at = _now()
+    async with _session_scope() as session:
+        marked = sorted((
+            await session.execute(
+                update(models.DmMessage)
+                .where(
+                    models.DmMessage.to_uid == me,
+                    models.DmMessage.from_uid == peer,
+                    models.DmMessage.read_at.is_(None),
+                    models.DmMessage.id.in_(ids),
+                )
+                .values(read_at=read_at)
+                .returning(models.DmMessage.id)
+            )
+        ).scalars().all())
+        if not marked:
+            await session.commit()
+            return
+        min_unread = (
+            await session.execute(
+                select(func.min(models.DmMessage.id)).where(
+                    models.DmMessage.from_uid == peer,
+                    models.DmMessage.to_uid == me,
+                    models.DmMessage.read_at.is_(None),
+                )
+            )
+        ).scalar()
+        if min_unread is None:
+            prefix = (
+                await session.execute(
+                    select(func.max(models.DmMessage.id)).where(
+                        models.DmMessage.from_uid == peer,
+                        models.DmMessage.to_uid == me,
+                    )
+                )
+            ).scalar() or 0
+        else:
+            prefix = max(int(min_unread) - 1, 0)
+        await session.commit()
+
+    await _send_to_uid(peer, {
+        "type": "dm_messages_read",
+        "reader_uid": me,
+        "up_to_message_id": int(prefix),
+        "ids": [int(i) for i in marked],
+        "read_at": _to_ms(read_at),
+    })
+
+
+async def handle_dm_close(client_id: str, websocket: WebSocket, msg: dict) -> None:
+    """`dm_close {peer_uid}` - the caller (a new app) left a disappearing
+    chat. Everything the peer sent them that they have genuinely read, and
+    that belongs to the current disappearing run, is now deletable for BOTH
+    people. Never inferred from a disconnect or a timer.
+
+    Gated by DM_SHARED_DELETE: when off this only logs what it would do."""
+    me = presence.uid_for_client(client_id)
+    if me is None:
+        return
+    peer = str(msg.get("peer_uid") or "").strip()
+    if not peer:
+        return
+
+    # Where the current disappearing run starts. NULL (every thread that
+    # was already disappearing before this column existed) must NOT mean
+    # "from the beginning" - that would delete keep-era history. Resolve it
+    # to the latest retention_disappear notice; if there is none, pin the
+    # boundary to "now" (everything already there is protected) and do
+    # nothing this time. Unavailable column (old schema) -> do nothing.
+    since = None
+    a, b = _ordered_pair(me, peer)
+    try:
+        async with _session_scope() as s2:
+            since = (
+                await s2.execute(
+                    sql_text(
+                        "SELECT retention_since_id FROM dm_thread_state "
+                        "WHERE uid_a = :a AND uid_b = :b"
+                    ),
+                    {"a": a, "b": b},
+                )
+            ).scalar()
+            if since is None:
+                since = (
+                    await s2.execute(
+                        sql_text(
+                            "SELECT max(id) FROM dm_messages WHERE event_type = "
+                            "'retention_disappear' AND ((from_uid = :a AND to_uid = :b) "
+                            "OR (from_uid = :b AND to_uid = :a))"
+                        ),
+                        {"a": a, "b": b},
+                    )
+                ).scalar()
+            if since is None:
+                pin = (
+                    await s2.execute(
+                        sql_text(
+                            "SELECT coalesce(max(id), 0) FROM dm_messages WHERE "
+                            "(from_uid = :a AND to_uid = :b) OR (from_uid = :b AND to_uid = :a)"
+                        ),
+                        {"a": a, "b": b},
+                    )
+                ).scalar() or 0
+                await s2.execute(
+                    sql_text(
+                        "UPDATE dm_thread_state SET retention_since_id = :p "
+                        "WHERE uid_a = :a AND uid_b = :b AND retention_since_id IS NULL"
+                    ),
+                    {"p": pin, "a": a, "b": b},
+                )
+                await s2.commit()
+                print(f"[social] dm_close: pinned retention_since_id={pin} for {me[:8]}/{peer[:8]} (no deletion this time)")
+                return
+    except Exception as e:
+        print(f"[social] dm_close: retention_since_id unavailable ({type(e).__name__}) - doing nothing")
+        return
+
+    async with _session_scope() as session:
+        state = await _get_thread_state(session, me, peer)
+        if state is None or (state.retention_mode or "keep") != "disappear":
+            return
+        ids = [int(x) for x in (
+            await session.execute(
+                select(models.DmMessage.id).where(
+                    models.DmMessage.from_uid == peer,
+                    models.DmMessage.to_uid == me,
+                    models.DmMessage.read_at.is_not(None),
+                    models.DmMessage.event_type.is_(None),
+                    models.DmMessage.id > since,
+                    # A one-time photo counts as "read" the moment the chat
+                    # opens, but it has NOT been seen until its viewer taps
+                    # it (status 'opened'); never sweep an unopened one.
+                    or_(
+                        models.DmMessage.view_once_status.is_(None),
+                        models.DmMessage.view_once_status == "opened",
+                    ),
+                )
+            )
+        ).scalars().all()]
+        if not ids:
+            return
+        if not DM_SHARED_DELETE:
+            print(f"[social] dm_close DRY-RUN: would delete {len(ids)} message(s) for pair {me[:8]}/{peer[:8]}")
+            return
+        await session.execute(
+            delete(models.DmMessage).where(models.DmMessage.id.in_(ids))
+        )
+        await session.commit()
+
+    await _send_to_uid(me, {"type": "dm_messages_cleared", "peer_uid": peer, "ids": ids})
+    await _send_to_uid(peer, {"type": "dm_messages_cleared", "peer_uid": me, "ids": ids})
 
 
 async def handle_dm_clear_on_leave(
@@ -2301,7 +2724,11 @@ async def prune_loop(interval_seconds: int = 300) -> None:
                 ).label("rn")
                 ranked = select(dm.id, rn).subquery()
                 overflow = select(ranked.c.id).where(ranked.c.rn > 500)
-                await session.execute(delete(dm).where(dm.id.in_(overflow)))
+                # Unread messages are exempt: never-seen rows must not be
+                # trimmed away just because the thread is long.
+                await session.execute(
+                    delete(dm).where(dm.id.in_(overflow), dm.read_at.is_not(None))
+                )
 
                 await session.commit()
         except Exception as e:

@@ -1144,6 +1144,16 @@ async def register_user_fcm_token(
         {"t": token, "u": user["uid"], "d": device, "e": enabled,
          "v": app_version},
     )
+    # A device token belongs to one account: also clear it from the legacy
+    # users.fcm_token column (read as a fallback by DM pushes and morning
+    # push) for any other account, and drop the DM push cache entries.
+    # Savepoint so a failure here cannot poison the registration above.
+    try:
+        import social as _social
+        async with session.begin_nested():
+            await _social.steal_fcm_token(session, token, user["uid"])
+    except Exception as e:
+        print(f"[fcm-token] steal skipped: {type(e).__name__}")
     await session.commit()
     return {"ok": True, "morningPush": enabled}
 
