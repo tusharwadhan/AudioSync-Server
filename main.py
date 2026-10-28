@@ -7279,6 +7279,47 @@ async def handle_rejoin_room(client_id: str, websocket: WebSocket, msg: dict):
         )
 
 
+async def _social_safe(handler, client_id: str, websocket: WebSocket, msg: dict) -> None:
+    """Run one social/DM handler without letting its failure kill the socket.
+
+    The receive loop has no per-message guard, so a DB blip, an over-long
+    value (DataError) or a FK error inside a handler used to tear the whole
+    connection down with no reply - the sender's bubble then sat at
+    "Sending" forever. Disconnects still propagate; anything else is logged
+    and answered with social_error{code:"internal"} (older apps ignore
+    unknown codes, so this is additive).
+    """
+    try:
+        await handler(client_id, websocket, msg)
+    except WebSocketDisconnect:
+        raise
+    except Exception as e:
+        # First line only: SQLAlchemy errors append the SQL and bound
+        # parameters, which would put message text into the server log.
+        first_line = (str(e).splitlines() or [""])[0][:160]
+        print(f"[WS] social handler {getattr(handler, '__name__', '?')} failed for {client_id[:8]}: {type(e).__name__}: {first_line}")
+        nonce = msg.get("client_nonce")
+        if not isinstance(nonce, str) or len(nonce) > 64:
+            nonce = None
+        try:
+            await websocket.send_json({
+                "type": "social_error",
+                "code": "internal",
+                "received": msg.get("type", ""),
+                "client_nonce": nonce,
+            })
+        except Exception:
+            pass
+        # A failed subscribe leaves the socket open but with no snapshot, and
+        # the app only re-sends social_subscribe from onOpen - so drop the
+        # socket and let its normal reconnect path retry (the old behaviour).
+        if handler is social.handle_social_subscribe:
+            try:
+                await websocket.close(code=1011)
+            except Exception:
+                pass
+
+
 @api.websocket("/ws")
 async def websocket_endpoint(websocket: WebSocket):
     await websocket.accept()
@@ -7482,72 +7523,72 @@ async def websocket_endpoint(websocket: WebSocket):
 
             # ── Social v1 (lounge / online / DMs) ──
             elif msg_type == "social_subscribe":
-                await social.handle_social_subscribe(client_id, websocket, msg)
+                await _social_safe(social.handle_social_subscribe, client_id, websocket, msg)
 
             elif msg_type == "presence_ping":
-                await social.handle_presence_ping(client_id, websocket, msg)
+                await _social_safe(social.handle_presence_ping, client_id, websocket, msg)
 
             elif msg_type == "social_fcm_register":
-                await social.handle_social_fcm_register(client_id, websocket, msg)
+                await _social_safe(social.handle_social_fcm_register, client_id, websocket, msg)
 
             elif msg_type == "lounge_send":
-                await social.handle_lounge_send(client_id, websocket, msg)
+                await _social_safe(social.handle_lounge_send, client_id, websocket, msg)
 
             elif msg_type == "dm_send":
-                await social.handle_dm_send(client_id, websocket, msg)
+                await _social_safe(social.handle_dm_send, client_id, websocket, msg)
 
             elif msg_type == "dm_accept":
-                await social.handle_dm_accept(client_id, websocket, msg)
+                await _social_safe(social.handle_dm_accept, client_id, websocket, msg)
 
             elif msg_type == "dm_decline":
-                await social.handle_dm_decline(client_id, websocket, msg)
+                await _social_safe(social.handle_dm_decline, client_id, websocket, msg)
 
             elif msg_type == "dm_read":
-                await social.handle_dm_read(client_id, websocket, msg)
+                await _social_safe(social.handle_dm_read, client_id, websocket, msg)
 
             elif msg_type == "dm_set_retention":
-                await social.handle_dm_set_retention(client_id, websocket, msg)
+                await _social_safe(social.handle_dm_set_retention, client_id, websocket, msg)
 
             elif msg_type == "dm_clear_on_leave":
-                await social.handle_dm_clear_on_leave(client_id, websocket, msg)
+                await _social_safe(social.handle_dm_clear_on_leave, client_id, websocket, msg)
 
             elif msg_type == "dm_open":
-                await social.handle_dm_open(client_id, websocket, msg)
+                await _social_safe(social.handle_dm_open, client_id, websocket, msg)
 
             # ── DM chat-parity messages ──
             elif msg_type == "dm_chat_react":
-                await social.handle_dm_chat_react(client_id, websocket, msg)
+                await _social_safe(social.handle_dm_chat_react, client_id, websocket, msg)
 
             elif msg_type == "dm_chat_unreact":
-                await social.handle_dm_chat_unreact(client_id, websocket, msg)
+                await _social_safe(social.handle_dm_chat_unreact, client_id, websocket, msg)
 
             elif msg_type == "dm_chat_edit":
-                await social.handle_dm_chat_edit(client_id, websocket, msg)
+                await _social_safe(social.handle_dm_chat_edit, client_id, websocket, msg)
 
             elif msg_type == "dm_chat_delete":
-                await social.handle_dm_chat_delete(client_id, websocket, msg)
+                await _social_safe(social.handle_dm_chat_delete, client_id, websocket, msg)
 
             elif msg_type == "dm_chat_typing":
-                await social.handle_dm_chat_typing(client_id, websocket, msg)
+                await _social_safe(social.handle_dm_chat_typing, client_id, websocket, msg)
 
             # ── Lounge chat-parity messages ──
             elif msg_type == "lounge_react":
-                await social.handle_lounge_react(client_id, websocket, msg)
+                await _social_safe(social.handle_lounge_react, client_id, websocket, msg)
 
             elif msg_type == "lounge_unreact":
-                await social.handle_lounge_unreact(client_id, websocket, msg)
+                await _social_safe(social.handle_lounge_unreact, client_id, websocket, msg)
 
             elif msg_type == "dm_unfriend":
-                await social.handle_dm_unfriend(client_id, websocket, msg)
+                await _social_safe(social.handle_dm_unfriend, client_id, websocket, msg)
 
             elif msg_type == "dm_set_mute":
-                await social.handle_dm_set_mute(client_id, websocket, msg)
+                await _social_safe(social.handle_dm_set_mute, client_id, websocket, msg)
 
             elif msg_type == "dm_clear_chat":
-                await social.handle_dm_clear_chat(client_id, websocket, msg)
+                await _social_safe(social.handle_dm_clear_chat, client_id, websocket, msg)
 
             elif msg_type == "dm_chat_view_once_open":
-                await social.handle_dm_chat_view_once_open(client_id, websocket, msg)
+                await _social_safe(social.handle_dm_chat_view_once_open, client_id, websocket, msg)
 
             else:
                 # Unknown message type — reply with social_error so a

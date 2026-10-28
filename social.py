@@ -1386,6 +1386,15 @@ async def handle_lounge_unreact(
     })
 
 
+def _clip(value, limit: int) -> str | None:
+    """Coerce a client-supplied free-text field to a str trimmed to the
+    column width; None when absent or not a string."""
+    if not isinstance(value, str):
+        return None
+    # Postgres text cannot hold NUL; strip it rather than reject the message.
+    return value.replace("\x00", "")[:limit]
+
+
 async def handle_dm_send(client_id: str, websocket: WebSocket, msg: dict) -> None:
     sender_uid = presence.uid_for_client(client_id)
     if sender_uid is None:
@@ -1475,11 +1484,25 @@ async def handle_dm_send(client_id: str, websocket: WebSocket, msg: dict) -> Non
     # (only to the sender) so their client can swap the local "Sending"
     # bubble for the persisted message instead of appending a duplicate.
     client_nonce = msg.get("client_nonce")
-    if client_nonce is not None and not isinstance(client_nonce, str):
+    if client_nonce is not None and (not isinstance(client_nonce, str) or len(client_nonce) > 64):
         client_nonce = None
+
+    # Column-size bounds. An over-long value raises DataError at commit,
+    # which (before _social_safe) closed the whole socket. np_video_id is
+    # an identifier, so refuse it outright; the free-text fields are
+    # trimmed to fit instead of dropping the message.
+    if np_video_id is not None and len(np_video_id) > 32:
+        await _send(websocket, _err("bad_request", "np_video_id too long"))
+        return
+    np_title = _clip(msg.get("np_title"), 512)
+    np_artist = _clip(msg.get("np_artist"), 255)
+    np_thumbnail = _clip(msg.get("np_thumbnail"), 1024)
+    if text is not None:
+        text = text.replace("\x00", "")[:8000] or None
 
     sender = presence.get(sender_uid)
     if sender is None:
+        await _send(websocket, _err("not_subscribed", "Call social_subscribe first"))
         return
 
     async with _session_scope() as session:
@@ -1517,9 +1540,9 @@ async def handle_dm_send(client_id: str, websocket: WebSocket, msg: dict) -> Non
             to_uid=recipient_uid,
             text=text,
             np_video_id=np_video_id,
-            np_title=msg.get("np_title"),
-            np_artist=msg.get("np_artist"),
-            np_thumbnail=msg.get("np_thumbnail"),
+            np_title=np_title,
+            np_artist=np_artist,
+            np_thumbnail=np_thumbnail,
             reply_to_message_id=reply_to_id,
             share_moment=share_moment,
             reactions={},
