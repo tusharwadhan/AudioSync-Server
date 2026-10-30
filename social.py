@@ -2268,6 +2268,11 @@ async def handle_dm_set_retention(
 # sends dm_close has shipped and been adopted).
 DM_SHARED_DELETE = os.environ.get("DM_SHARED_DELETE", "0") == "1"
 
+# One-time photos: the DB link is cleared when the recipient opens one (so
+# no app can show it again), but the file is KEPT on Cloudinary unless this
+# is turned on. Default off = never delete a photo from Cloudinary.
+DM_PHOTO_DESTROY_ON_OPEN = os.environ.get("DM_PHOTO_DESTROY_ON_OPEN", "0") == "1"
+
 
 async def handle_dm_read_ids(client_id: str, websocket: WebSocket, msg: dict) -> None:
     """`dm_read_ids {peer_uid, ids:[...]}` - mark exactly these incoming
@@ -2841,7 +2846,8 @@ async def handle_dm_chat_view_once_open(
 
     # Fire-and-forget Cloudinary destroy on a worker thread so a
     # slow CDN purge doesn't stall this WS worker (audit fix #2).
-    if public_id is not None:
+    # Skipped by default: the photo is kept on Cloudinary (see DM_PHOTO_DESTROY_ON_OPEN).
+    if public_id is not None and DM_PHOTO_DESTROY_ON_OPEN:
         import cloudinary.uploader
         async def _destroy_async():
             try:
@@ -2887,7 +2893,8 @@ async def rest_dm_view_once_open(message_id: int, caller_uid: str) -> dict:
         row.photo_url = None
         await session.commit()
 
-    if public_id is not None:
+    # Kept on Cloudinary unless DM_PHOTO_DESTROY_ON_OPEN is set.
+    if public_id is not None and DM_PHOTO_DESTROY_ON_OPEN:
         import cloudinary.uploader
         async def _destroy_async():
             try:
