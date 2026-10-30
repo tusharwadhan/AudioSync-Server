@@ -60,6 +60,7 @@ import asyncio
 import collections
 import os
 import json
+import re
 import time
 from dataclasses import dataclass
 from datetime import datetime, timezone, timedelta
@@ -773,7 +774,10 @@ def _dm_to_dict(
         "reply_to_message_id": m.reply_to_message_id,
         "edited_at": _to_ms(m.edited_at),
         "deleted": bool(m.deleted),
-        "share_moment": m.share_moment,
+        # Dedications ship under their own key; older apps would otherwise
+        # take any share_moment for a plain moment card and drop the song.
+        "share_moment": None if _is_dedication(m.share_moment) else m.share_moment,
+        "dedication": m.share_moment if _is_dedication(m.share_moment) else None,
         "event_type": m.event_type,
         # R4 view-once fields (migration 0012). Both NULL for
         # plain text DMs. photo_url goes NULL atomically with
@@ -796,6 +800,7 @@ def _dm_to_dict(
         d["np_artist"] = None
         d["np_thumbnail"] = None
         d["share_moment"] = None
+        d["dedication"] = None
         d["photo_url"] = None
     # The sender's own rows carry their client_nonce so an outbox that
     # survived a reconnect can reconcile with the persisted row instead of
@@ -1648,7 +1653,10 @@ def _nonce_recall(uid: str, peer: str, nonce: str) -> int | None:
 
 
 # Advertised in every social_snapshot. Additive; older apps ignore it.
-SERVER_FEATURES = ["dm_nonce_idempotent", "dm_read_ids", "dm_close", "dm_send_ack"]
+SERVER_FEATURES = [
+    "dm_nonce_idempotent", "dm_read_ids", "dm_close", "dm_send_ack",
+    "dedication_v1",
+]
 
 
 _retention_hits: "dict[str, collections.deque[float]]" = {}
@@ -1672,7 +1680,74 @@ def _clip(value, limit: int) -> str | None:
     if not isinstance(value, str):
         return None
     # Postgres text cannot hold NUL; strip it rather than reject the message.
-    return value.replace("\x00", "")[:limit]
+    return value.replace("\x00", "").encode("utf-8", "ignore").decode("utf-8")[:limit]
+
+
+_DEDICATION_VIDEO_ID_RE = re.compile(r"^[A-Za-z0-9_-]{6,32}$")
+_DEDICATION_MAX_SPAN_MS = 60_000
+_DEDICATION_MAX_LINES = 16
+
+
+def _is_dedication(sm) -> bool:
+    return isinstance(sm, dict) and sm.get("kind") == "dedication"
+
+
+def _sanitize_dedication(raw) -> "dict | None":
+    """Validate + canonicalise a client "dedication" share_moment payload.
+
+    Returns a fresh dict (never the client's object, so no stray keys or
+    oversize values reach the JSONB column) or None when the payload is
+    not a well-formed dedication. A dedication is a pointer: song + the
+    [start_ms, end_ms] window + the lyric lines inside it + an optional
+    note. `position_ms` mirrors start_ms so clients that only know the
+    older share-moment shape still get a sensible "from 1:42".
+    """
+    if not isinstance(raw, dict) or raw.get("kind") != "dedication":
+        return None
+    vid = raw.get("video_id")
+    if not isinstance(vid, str) or not _DEDICATION_VIDEO_ID_RE.fullmatch(vid):
+        return None
+
+    def _int(v):
+        return v if isinstance(v, int) and not isinstance(v, bool) else None
+
+    start_ms, end_ms = _int(raw.get("start_ms")), _int(raw.get("end_ms"))
+    if start_ms is None or end_ms is None:
+        return None
+    if not (0 <= start_ms < end_ms <= 4 * 3600 * 1000):
+        return None
+    if end_ms - start_ms > _DEDICATION_MAX_SPAN_MS:
+        return None
+
+    lines_in = raw.get("lines")
+    if not isinstance(lines_in, list) or not (1 <= len(lines_in) <= _DEDICATION_MAX_LINES):
+        return None
+    lines = []
+    for ln in lines_in:
+        if not isinstance(ln, dict):
+            return None
+        t = _int(ln.get("t"))
+        txt = _clip(ln.get("text"), 200)
+        if t is None or t < 0 or t > end_ms or not txt or not txt.strip():
+            return None
+        lines.append({"t": t, "text": txt.strip()})
+
+    # Derived, not client-supplied: an arbitrary https host would make the
+    # recipient's phone fetch an attacker-chosen URL.
+    thumb = f"https://i.ytimg.com/vi/{vid}/mqdefault.jpg"
+    note = (_clip(raw.get("note"), 280) or "").strip() or None
+    return {
+        "kind": "dedication",
+        "video_id": vid,
+        "title": (_clip(raw.get("title"), 200) or "").strip(),
+        "artist": (_clip(raw.get("artist"), 120) or "").strip() or None,
+        "thumbnail": thumb,
+        "position_ms": start_ms,
+        "start_ms": start_ms,
+        "end_ms": end_ms,
+        "lines": lines,
+        "note": note,
+    }
 
 
 async def handle_dm_send(client_id: str, websocket: WebSocket, msg: dict) -> None:
@@ -1703,7 +1778,8 @@ async def handle_dm_send(client_id: str, websocket: WebSocket, msg: dict) -> Non
 
     text = (msg.get("text") or "").strip() or None
     np_video_id = (msg.get("np_video_id") or "").strip() or None
-    share_moment = msg.get("share_moment")
+    # Only dedications are sent as structured DM payloads, under "dedication".
+    share_moment = msg.get("dedication")
     if not isinstance(share_moment, dict):
         share_moment = None
 
@@ -1791,6 +1867,23 @@ async def handle_dm_send(client_id: str, websocket: WebSocket, msg: dict) -> Non
     np_thumbnail = _clip(msg.get("np_thumbnail"), 1024)
     if text is not None:
         text = text.replace("\x00", "")[:8000] or None
+
+    # Dedication: the only share_moment kind clients send. It is validated
+    # and rebuilt server-side, and the song is mirrored into the np_*
+    # columns so older apps (which don't know "dedication") still show an
+    # ordinary tap-to-play song card instead of a blank bubble.
+    dedication = None
+    if share_moment is not None:
+        dedication = _sanitize_dedication(share_moment)
+        if dedication is None:
+            await _send(websocket, _serr("bad_dedication", "Invalid dedication"))
+            return
+        share_moment = dedication
+        text = None
+        np_video_id = dedication["video_id"]
+        np_title = dedication["title"] or None
+        np_artist = dedication["artist"]
+        np_thumbnail = dedication["thumbnail"]
 
     sender = presence.get(sender_uid)
     if sender is None:
@@ -1929,7 +2022,11 @@ async def handle_dm_send(client_id: str, websocket: WebSocket, msg: dict) -> Non
             # R4 view-once: lock-screen preview is plain "Photo"
             # (no emoji round-trip risk per audit fix #11, no
             # photo_url leak in FCM payload).
-            fcm_preview = "Photo" if view_once else (text or "Shared a song")
+            fcm_preview = (
+                "Photo" if view_once
+                else "Dedicated a song to you" if dedication is not None
+                else (text or "Shared a song")
+            )
             await _push_dm_fcm(
                 recipient_uid=recipient_uid,
                 sender_uid=sender_uid,
@@ -2581,6 +2678,9 @@ async def handle_dm_chat_edit(
             await _send(websocket, _err("not_allowed", "Can only edit own messages"))
             return
         if m.deleted:
+            return
+        if _is_dedication(m.share_moment):
+            await _send(websocket, _err("not_allowed", "A dedication can't be edited"))
             return
         m.text = new_text
         m.edited_at = _now()
