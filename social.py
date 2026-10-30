@@ -1208,6 +1208,10 @@ async def handle_social_disconnect(client_id: str, seen_at: float | None = None)
     kicked = presence.unsubscribe_by_client(client_id)
     if kicked is None:
         return
+    try:
+        await _typing_clear_for(kicked.uid)
+    except Exception as e:
+        print(f"[social] typing clear on disconnect failed: {type(e).__name__}")
     # Stamp last_seen on the user row so friends' clients can show
     # "last seen X ago" in their DM header subtitles.
     try:
@@ -2011,6 +2015,11 @@ async def handle_dm_send(client_id: str, websocket: WebSocket, msg: dict) -> Non
         sender_payload["client_nonce"] = client_nonce
     await _send(websocket, sender_payload)
 
+    # A message ends "typing": drop the timer and tell the recipient, so apps
+    # that never clear it on message arrival do not keep showing it.
+    if _typing_forget(sender_uid, recipient_uid) and delivered_to_recipient:
+        await _typing_stopped(sender_uid, recipient_uid)
+
     # Deliver to recipient if not soft-blocked. If their WS isn't
     # connected, fall back to an FCM data push so their device wakes
     # up and shows a notification.
@@ -2732,6 +2741,55 @@ async def handle_dm_chat_delete(
     )
 
 
+# "Typing" used to be a pure relay: a lost "stopped typing" (sender's app
+# killed, socket dropped, chat left) left the receiver's "typing..." on
+# screen forever. The server now keeps one timer per (sender, peer): a pulse
+# re-arms it, "stopped" cancels it, and if neither comes within the TTL (or
+# the sender disconnects, or sends the message) the server tells the peer
+# "stopped" itself. Apps that only send one pulse then "stopped" after 4 s
+# stay well inside the TTL.
+TYPING_TTL_S = float(os.environ.get("TYPING_TTL_S", "8"))
+_typing_timers: "dict[tuple[str, str], asyncio.TimerHandle]" = {}
+
+
+def _typing_forget(frm: str, to: str) -> bool:
+    """Cancel the timer for (frm -> to). True if one was armed."""
+    handle = _typing_timers.pop((frm, to), None)
+    if handle is None:
+        return False
+    handle.cancel()
+    return True
+
+
+def _typing_arm(frm: str, to: str) -> None:
+    _typing_forget(frm, to)
+    loop = asyncio.get_running_loop()
+    _typing_timers[(frm, to)] = loop.call_later(
+        TYPING_TTL_S, lambda: asyncio.ensure_future(_typing_expire(frm, to))
+    )
+
+
+async def _typing_stopped(frm: str, to: str) -> None:
+    await _send_to_uid(to, {"type": "dm_typing", "from_uid": frm, "is_typing": False})
+
+
+async def _typing_expire(frm: str, to: str) -> None:
+    # The timer fired: it is no longer armed.
+    if _typing_timers.pop((frm, to), None) is None:
+        return
+    try:
+        await _typing_stopped(frm, to)
+    except Exception as e:
+        print(f"[social] typing expire failed: {type(e).__name__}")
+
+
+async def _typing_clear_for(uid: str) -> None:
+    """`uid` went away: nobody they were typing to should keep waiting."""
+    for frm, to in [k for k in _typing_timers if k[0] == uid]:
+        if _typing_forget(frm, to):
+            await _typing_stopped(frm, to)
+
+
 async def handle_dm_chat_typing(
     client_id: str, websocket: WebSocket, msg: dict
 ) -> None:
@@ -2740,8 +2798,12 @@ async def handle_dm_chat_typing(
         return
     peer = (msg.get("peer_uid") or "").strip()
     is_typing = bool(msg.get("isTyping", True))
-    if not peer:
+    if not peer or len(peer) > 128:
         return
+    if is_typing:
+        _typing_arm(me, peer)
+    else:
+        _typing_forget(me, peer)
     # Typing has no DB side-effect. Just notify the peer.
     await _send_to_uid(
         peer,
