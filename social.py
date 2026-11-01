@@ -1723,8 +1723,11 @@ def _sanitize_dedication(raw) -> "dict | None":
     if end_ms - start_ms > _DEDICATION_MAX_SPAN_MS:
         return None
 
+    # Lyrics are optional: the current picker sends none (older apps send up to 16).
     lines_in = raw.get("lines")
-    if not isinstance(lines_in, list) or not (1 <= len(lines_in) <= _DEDICATION_MAX_LINES):
+    if lines_in is None:
+        lines_in = []
+    if not isinstance(lines_in, list) or len(lines_in) > _DEDICATION_MAX_LINES:
         return None
     lines = []
     for ln in lines_in:
