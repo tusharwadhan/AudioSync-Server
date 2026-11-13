@@ -44,6 +44,8 @@ COPY control_session.py .
 # Same failure class as above: no COPY = ModuleNotFoundError = crash-loop
 # (took down the 2026-10-04 deploys until added).
 COPY morning_push.py .
+# Moment links (/share/moment/*): imported by main.py, so a missing COPY is a boot crash.
+COPY moment_share.py .
 # The /remote page is read from disk at request time, so without this the
 # route 404s in production while working perfectly in local dev.
 COPY static ./static
