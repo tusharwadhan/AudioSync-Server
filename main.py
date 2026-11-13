@@ -8336,6 +8336,12 @@ api.include_router(morning_push.router)
 # Root-level (ungated) banner images — FCM's fetcher can't send API keys.
 app.include_router(morning_push.public_router)
 
+# Moments outside the app: POST /api/v1/moment, GET /api/v1/moment/{id},
+# and the public /share/moment/{id} page.
+import moment_share
+api.include_router(moment_share.router)
+app.include_router(moment_share.public_router)
+
 
 @app.on_event("startup")
 async def startup_morning_push():

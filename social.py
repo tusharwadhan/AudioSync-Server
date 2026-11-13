@@ -1659,7 +1659,7 @@ def _nonce_recall(uid: str, peer: str, nonce: str) -> int | None:
 # Advertised in every social_snapshot. Additive; older apps ignore it.
 SERVER_FEATURES = [
     "dm_nonce_idempotent", "dm_read_ids", "dm_close", "dm_send_ack",
-    "dedication_v1",
+    "dedication_v1", "moment_link_v1",
 ]
 
 

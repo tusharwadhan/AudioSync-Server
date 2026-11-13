@@ -755,3 +755,27 @@ class MorningPushDraft(Base):
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), default=utc_now, nullable=False
     )
+
+
+class MomentShare(Base):
+    """A shared "moment": a pointer to a window of a song (video_id +
+    start/end + optional lyric lines + note) behind a short public id, so it
+    can be sent OUTSIDE the app as a link (/share/moment/<id>).
+
+    Same payload shape the DM dedication uses (sanitised by
+    social._sanitize_dedication), stored whole in `payload` — the row is a
+    pointer, never audio. `user_id` is the sender, kept for rate limiting
+    and so a future "my links" / revoke feature has an owner to key on."""
+
+    __tablename__ = "moment_shares"
+
+    id: Mapped[str] = mapped_column(String(16), primary_key=True)
+    user_id: Mapped[str] = mapped_column(
+        String(128), ForeignKey("users.id", ondelete="CASCADE"), nullable=False
+    )
+    payload: Mapped[dict] = mapped_column(JSONB, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utc_now, nullable=False
+    )
+
+    __table_args__ = (Index("ix_moment_shares_user_created", "user_id", "created_at"),)
