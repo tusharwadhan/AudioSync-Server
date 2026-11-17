@@ -232,17 +232,16 @@ class RoomListResponse(BaseModel):
 
 # App update configuration - modify these values to control updates
 APP_UPDATE_CONFIG = {
-    "latestVersion": "5.19.2",
-    "latestVersionCode": 89,
-    "apkUrl": "https://raw.githubusercontent.com/tusharwadhan/AudioSync-Server/tushar/releases/syncaura-5.19.2.apk",
-    "releaseNotes": "Watch your music 🎬 Live previews in the album art, video mode on tap, fullscreen on rotate — with synced lyrics floating on top.",
-    # Minor-version jump (5.18.x → 5.19.0) → the client classifier routes
-    # this to the MAJOR tier (full update sheet) — the video suite's
-    # public launch deserves the prominent treatment.
+    "latestVersion": "6.0.0",
+    "latestVersionCode": 90,
+    "apkUrl": "https://raw.githubusercontent.com/tusharwadhan/AudioSync-Server/tushar/releases/syncaura-6.0.0.apk",
+    "releaseNotes": "SyncAura 6.0 is here. A new look on every screen — Home, Search, Library, Downloads and Settings. Play a Moment right in the chat.",
+    # Major-digit jump (5.x -> 6.0.0): the client classifier routes this to the MAJOR tier
+    # (full update sheet, Update + Later). Optional: mandatoryBelow stays at 41 and it is not
+    # an emergency.
     "mandatoryBelow": 41,
     "isEmergency": False,
-    # PUBLIC: 5.19.1 is the video-suite launch + the Zomato-style morning
-    # push card, device-tested before this flip. Empty list = everyone.
+    # PUBLIC: offered to everyone (empty list = no targeting).
     "targetEmails": [],
 }
 
